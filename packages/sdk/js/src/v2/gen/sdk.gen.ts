@@ -31,6 +31,8 @@ import type {
   BackgroundProcessStopResponses,
   BackgroundProcessStopSessionErrors,
   BackgroundProcessStopSessionResponses,
+  CodexImageGenerateErrors,
+  CodexImageGenerateResponses,
   CommandListErrors,
   CommandListResponses,
   CommitMessageGenerateErrors,
@@ -280,6 +282,8 @@ import type {
   SessionForkResponses,
   SessionGetErrors,
   SessionGetResponses,
+  SessionGrantPermissionErrors,
+  SessionGrantPermissionResponses,
   SessionInitErrors,
   SessionInitResponses,
   SessionListErrors,
@@ -3691,6 +3695,7 @@ export class Session2 extends HeyApiClient {
       scope?: "project"
       path?: string
       roots?: boolean | "true" | "false"
+      includeChildren?: boolean | "true" | "false"
       start?: number
       search?: string
       limit?: number
@@ -3707,6 +3712,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "scope" },
             { in: "query", key: "path" },
             { in: "query", key: "roots" },
+            { in: "query", key: "includeChildren" },
             { in: "query", key: "start" },
             { in: "query", key: "search" },
             { in: "query", key: "limit" },
@@ -4664,6 +4670,49 @@ export class Session2 extends HeyApiClient {
       url: "/session/{sessionID}/unrevert",
       ...options,
       ...params,
+    })
+  }
+
+  /**
+   * Grant session permissions
+   *
+   * Merge permission rules into a session without returning the full session payload.
+   */
+  public grantPermission<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      permission?: PermissionRuleset
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "permission" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      SessionGrantPermissionResponses,
+      SessionGrantPermissionErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/permission",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 
@@ -6263,6 +6312,54 @@ export class CommitMessage extends HeyApiClient {
   }
 }
 
+export class CodexImage extends HeyApiClient {
+  /**
+   * Generate image with Codex
+   *
+   * Generate one PNG with GPT Image 2 using the connected ChatGPT/Codex subscription.
+   */
+  public generate<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      prompt?: string
+      quality?: "auto" | "low" | "medium" | "high"
+      size?: string
+      images?: Array<{
+        mediaType: string
+        dataBase64: string
+      }>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "prompt" },
+            { in: "body", key: "quality" },
+            { in: "body", key: "size" },
+            { in: "body", key: "images" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<CodexImageGenerateResponses, CodexImageGenerateErrors, ThrowOnError>({
+      url: "/codex/image/generate",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class EnhancePrompt extends HeyApiClient {
   /**
    * Enhance prompt
@@ -6597,7 +6694,7 @@ export class Session4 extends HeyApiClient {
    *
    * Download a cloud-synced session and write it to local storage with fresh IDs.
    */
-  public import<ThrowOnError extends boolean = false>(
+  public ["import"]<ThrowOnError extends boolean = false>(
     parameters?: {
       directory?: string
       workspace?: string
@@ -8031,6 +8128,11 @@ export class KiloClient extends HeyApiClient {
   private _commitMessage?: CommitMessage
   get commitMessage(): CommitMessage {
     return (this._commitMessage ??= new CommitMessage({ client: this.client }))
+  }
+
+  private _codexImage?: CodexImage
+  get codexImage(): CodexImage {
+    return (this._codexImage ??= new CodexImage({ client: this.client }))
   }
 
   private _enhancePrompt?: EnhancePrompt

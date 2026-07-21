@@ -29,6 +29,7 @@ export const ListQuery = Schema.Struct({
   scope: Schema.optional(Schema.Literals(["project"])),
   path: Schema.optional(Schema.String),
   roots: Schema.optional(QueryBoolean),
+  includeChildren: Schema.optional(QueryBoolean), // kilocode_change
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.NumberFromString),
@@ -72,6 +73,9 @@ export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
 // kilocode_change start
+export const PermissionGrantPayload = Schema.Struct({
+  permission: Permission.Ruleset,
+})
 export const ViewedPayload = Schema.Struct({
   focused: Schema.optional(Schema.Array(Schema.String)),
   open: Schema.optional(Schema.Array(Schema.String)),
@@ -101,6 +105,7 @@ export const SessionPaths = {
   shell: `${root}/:sessionID/shell`,
   revert: `${root}/:sessionID/revert`,
   unrevert: `${root}/:sessionID/unrevert`,
+  grantPermission: `${root}/:sessionID/permission`, // kilocode_change
   permissions: `${root}/:sessionID/permissions/:permissionID`,
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -410,6 +415,21 @@ export const SessionApi = HttpApi.make("session")
             deprecated: true,
           }),
         ),
+        // kilocode_change start - allow clients to append session permissions without returning large session rows
+        HttpApiEndpoint.post("grantPermission", SessionPaths.grantPermission, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: PermissionGrantPayload,
+          success: described(Schema.Boolean, "Permission rules merged"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.grantPermission",
+            summary: "Grant session permissions",
+            description: "Merge permission rules into a session without returning the full session payload.",
+          }),
+        ),
+        // kilocode_change end
         HttpApiEndpoint.delete("deleteMessage", SessionPaths.deleteMessage, {
           params: { sessionID: SessionID, messageID: MessageID },
           query: WorkspaceRoutingQuery,

@@ -317,4 +317,25 @@ describe("FileWatcher", () => {
     expect(result.status).toBe("skipped")
     expect(result.reason).toBe("File is ignored by .gitignore or .kilocodeignore")
   })
+
+  test("processFile skips files matched by nested .gitignore rules", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "file-watcher-test-"))
+    const cacheDir = path.join(root, ".cache")
+    const pkg = path.join(root, "packages", "app")
+    const file = path.join(pkg, "generated", "client.ts")
+
+    await mkdir(cacheDir, { recursive: true })
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(path.join(pkg, ".gitignore"), "generated/\n")
+    await writeFile(file, "export const generated = 1\n")
+
+    const cache = new CacheManager(cacheDir, root)
+    await cache.initialize()
+
+    const watcher = new FileWatcher(root, cache, createEmbedder(), undefined, await loadIgnore(root))
+    const result = await watcher.processFile(file)
+
+    expect(result.status).toBe("skipped")
+    expect(result.reason).toBe("File is ignored by .gitignore or .kilocodeignore")
+  })
 })

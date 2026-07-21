@@ -499,7 +499,15 @@ export function fromConfig(permission: ConfigPermission.Info) {
 }
 
 export function merge(...rulesets: Ruleset[]): Rule[] {
-  return [...PermissionV2.merge(...rulesets)]
+  // kilocode_change start - keep merge semantics compact while preserving last-rule-wins evaluation
+  const rules = new Map<string, Rule>()
+  for (const rule of PermissionV2.merge(...rulesets)) {
+    const key = `${rule.permission}\u0000${rule.pattern}`
+    rules.delete(key)
+    rules.set(key, rule)
+  }
+  return [...rules.values()]
+  // kilocode_change end
 }
 
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {

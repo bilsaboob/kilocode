@@ -30,6 +30,7 @@ import {
   ListQuery,
   MessagesQuery,
   PermissionResponsePayload,
+  PermissionGrantPayload, // kilocode_change
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -62,8 +63,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
 
+    // kilocode_change start - hydrate all descendants in batched server-side waves
+    const descendants = Effect.fn("SessionHttpApi.descendants")(function* (ids: SessionID[]) {
+      const rows = new Map<string, Session.Info>()
+      const seen = new Set<SessionID>()
+      let batch = ids
+      while (batch.length) {
+        const parents = batch.filter((id) => !seen.has(id))
+        batch = []
+        if (parents.length === 0) break
+        for (const id of parents) seen.add(id)
+        const kids = yield* session.childrenByParent(parents)
+        for (const row of kids) {
+          if (!rows.has(row.id)) batch.push(row.id)
+          rows.set(row.id, row)
+        }
+      }
+      return [...rows.values()]
+    })
+    // kilocode_change end
+
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
-      return yield* session.list({
+      const rows = yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
         scope: ctx.query.scope,
         path: ctx.query.path,
@@ -72,6 +93,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         search: ctx.query.search,
         limit: ctx.query.limit,
       })
+      // kilocode_change start - let clients hydrate root session children without browser-side N+1 requests
+      if (!ctx.query.includeChildren || rows.length === 0) return rows
+      const roots = rows.filter((row) => !row.parentID)
+      if (roots.length === 0) return rows
+      const kids = yield* descendants(roots.map((row) => row.id))
+      const map = new Map<string, Session.Info>()
+      for (const row of [...rows, ...kids]) map.set(row.id, row)
+      return [...map.values()].sort((a, b) => b.time.updated - a.time.updated)
+      // kilocode_change end
     })
 
     const status = Effect.fn("SessionHttpApi.status")(function* () {
@@ -381,6 +411,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return true
     })
 
+    // kilocode_change start - merge session permissions without returning a full session payload
+    const grantPermission = Effect.fn("SessionHttpApi.grantPermission")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof PermissionGrantPayload.Type
+    }) {
+      const current = yield* requireSession(ctx.params.sessionID)
+      yield* session.setPermission({
+        sessionID: ctx.params.sessionID,
+        permission: Permission.merge(current.permission ?? [], ctx.payload.permission),
+      })
+      return true
+    })
+    // kilocode_change end
+
     const deleteMessage = Effect.fn("SessionHttpApi.deleteMessage")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
@@ -447,6 +491,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("revert", revert)
       .handle("unrevert", unrevert)
       .handle("permissionRespond", permissionRespond)
+      .handle("grantPermission", grantPermission) // kilocode_change
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
       .handle("updatePart", updatePart)

@@ -652,7 +652,12 @@ describe("plan_exit detection", () => {
     withInstance(async () => {
       const session = await sessions.create({})
       const dir = path.dirname(Session.plan(session, Instance.current))
-      await expect(fs.stat(dir).then(() => true, () => false)).resolves.toBe(false)
+      await expect(
+        fs.stat(dir).then(
+          () => true,
+          () => false,
+        ),
+      ).resolves.toBe(false)
 
       const id = MessageID.ascending()
       const user: MessageV2.WithParts = {

@@ -17,6 +17,63 @@ export interface Interface extends Core.Interface {}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
+const sol = "gpt-5.6-sol"
+const row: Core.Model = {
+  id: sol,
+  name: "GPT-5.6 Sol",
+  family: "gpt-sol",
+  release_date: "2026-07-09",
+  attachment: true,
+  reasoning: true,
+  temperature: false,
+  tool_call: true,
+  cost: {
+    input: 5,
+    output: 30,
+    cache_read: 0.5,
+    cache_write: 6.25,
+    tiers: [
+      {
+        input: 10,
+        output: 45,
+        cache_read: 1,
+        cache_write: 12.5,
+        tier: { type: "context", size: 272_000 },
+      },
+    ],
+    context_over_200k: {
+      input: 10,
+      output: 45,
+      cache_read: 1,
+      cache_write: 12.5,
+    },
+  },
+  limit: {
+    context: 1_050_000,
+    input: 922_000,
+    output: 128_000,
+  },
+  modalities: {
+    input: ["text", "image", "pdf"],
+    output: ["text"],
+  },
+}
+
+function patch(input: Record<string, Core.Provider>) {
+  const openai = input.openai
+  if (!openai || openai.models[sol]) return input
+  return {
+    ...input,
+    openai: {
+      ...openai,
+      models: {
+        ...openai.models,
+        [sol]: row,
+      },
+    },
+  }
+}
+
 function baseURL(url: string | undefined, org: string | undefined) {
   if (!url) return
   const base = url.replace(/\/+$/, "")
@@ -40,7 +97,7 @@ export const layer: Layer.Layer<Service, never, Core.Service | Config.Service | 
       const cache = yield* ModelCache.Service
 
       const get = Effect.fn("ModelsDev.get")(function* () {
-        const providers = { ...(yield* core.get()) }
+        const providers = patch({ ...(yield* core.get()) })
         delete providers.kilo
 
         const cfg = yield* config.get()

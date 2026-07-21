@@ -195,13 +195,12 @@ test("evaluate - matches expanded $HOME pattern", () => {
 
 // merge tests
 
-test("merge - simple concatenation", () => {
+test("merge - same permission and pattern keeps last rule", () => {
   const result = Permission.merge(
     [{ permission: "bash", pattern: "*", action: "allow" }],
     [{ permission: "bash", pattern: "*", action: "deny" }],
   )
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
     { permission: "bash", pattern: "*", action: "deny" },
   ])
 })
@@ -244,6 +243,18 @@ test("merge - multiple rulesets", () => {
 test("merge - empty ruleset does nothing", () => {
   const result = Permission.merge([{ permission: "bash", pattern: "*", action: "allow" }], [])
   expect(result).toEqual([{ permission: "bash", pattern: "*", action: "allow" }])
+})
+
+test("merge - duplicate exact rules are compacted", () => {
+  const result = Permission.merge(
+    [{ permission: "edit", pattern: "src/*", action: "allow" }],
+    [{ permission: "edit", pattern: "src/*", action: "allow" }],
+    [{ permission: "read", pattern: "src/*", action: "allow" }],
+  )
+  expect(result).toEqual([
+    { permission: "edit", pattern: "src/*", action: "allow" },
+    { permission: "read", pattern: "src/*", action: "allow" },
+  ])
 })
 
 test("merge - preserves rule order", () => {

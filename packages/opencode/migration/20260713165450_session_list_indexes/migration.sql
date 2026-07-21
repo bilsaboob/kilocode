@@ -1,0 +1,2 @@
+CREATE INDEX `session_directory_parent_time_updated_id_idx` ON `session` (`directory`,`parent_id`,`time_updated`,`id`);--> statement-breakpoint
+CREATE INDEX `session_project_parent_time_updated_id_idx` ON `session` (`project_id`,`parent_id`,`time_updated`,`id`);

@@ -1,4 +1,4 @@
-import type { Ignore } from "ignore"
+import type { IgnoreMatcher } from "./shared/load-ignore"
 import path from "path"
 
 import { getDefaultModelId } from "./model-registry"
@@ -208,7 +208,7 @@ export class CodeIndexServiceFactory {
     embedder: IEmbedder,
     vectorStore: IVectorStore,
     parser: ICodeParser,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): DirectoryScanner {
     const config = this.configManager.getConfig()
     const meta = this.getTelemetryMeta()
@@ -229,7 +229,7 @@ export class CodeIndexServiceFactory {
     embedder: IEmbedder,
     vectorStore: IVectorStore,
     cacheManager: CacheManager,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): IFileWatcher {
     const config = this.configManager.getConfig()
     const meta = this.getTelemetryMeta()
@@ -248,7 +248,7 @@ export class CodeIndexServiceFactory {
 
   public createServices(
     cacheManager: CacheManager,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): {
     embedder: IEmbedder
     vectorStore: IVectorStore

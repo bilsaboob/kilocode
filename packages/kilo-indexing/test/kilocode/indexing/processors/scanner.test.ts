@@ -1,5 +1,5 @@
 import { createHash } from "crypto"
-import { mkdtemp } from "fs/promises"
+import { mkdir, mkdtemp } from "fs/promises"
 import ignore from "ignore"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -105,6 +105,7 @@ class ManyParser implements ICodeParser {
 
 class Store implements IVectorStore {
   public multi: string[][] = []
+  public deleted: string[] = []
   public points = 0
 
   public async initialize(): Promise<boolean> {
@@ -124,7 +125,9 @@ class Store implements IVectorStore {
     return []
   }
 
-  public async deletePointsByFilePath(_filePath: string): Promise<void> {}
+  public async deletePointsByFilePath(filePath: string): Promise<void> {
+    this.deleted.push(filePath)
+  }
 
   public async deletePointsByMultipleFilePaths(filePaths: string[]): Promise<void> {
     this.multi.push(filePaths)
@@ -307,6 +310,40 @@ describe("DirectoryScanner", () => {
     expect(result.stats.processed).toBe(1)
     expect(cache.getHash(blocked)).toBeUndefined()
     expect(cache.getHash(open)).toBeDefined()
+  })
+
+  test("skips node_modules and files matched by nested .gitignore rules", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scanner-test-"))
+    const cacheDir = await mkdtemp(join(tmpdir(), "scanner-cache-"))
+    const pkg = join(root, "packages", "app")
+    const dependency = join(root, "node_modules", "dependency", "index.ts")
+    const generated = join(pkg, "generated", "client.ts")
+    const source = join(pkg, "src", "main.ts")
+    const ignored = await loadIgnore(root)
+
+    await mkdir(join(root, "node_modules", "dependency"), { recursive: true })
+    await mkdir(join(pkg, "generated"), { recursive: true })
+    await mkdir(join(pkg, "src"), { recursive: true })
+    await Bun.write(join(pkg, ".gitignore"), "generated/\n")
+    await Bun.write(dependency, "export const dependency = 1\n")
+    await Bun.write(generated, "export const generated = 1\n")
+    await Bun.write(source, "export const source = 1\n")
+
+    const cache = new CacheManager(cacheDir, root)
+    await cache.initialize()
+    cache.updateHash(dependency, "previous-dependency-hash")
+    cache.updateHash(generated, "previous-generated-hash")
+
+    const store = new Store()
+    const scan = new DirectoryScanner(new Emb(), store, new Parser(), cache, ignored, 1, 1)
+    const result = await scan.scanDirectory(root)
+
+    expect(result.stats.processed).toBe(1)
+    expect(cache.getHash(dependency)).toBeUndefined()
+    expect(cache.getHash(generated)).toBeUndefined()
+    expect(cache.getHash(source)).toBeDefined()
+    expect(store.deleted).toContain(dependency)
+    expect(store.deleted).toContain(generated)
   })
 
   test("emits retry telemetry for transient batch failures", async () => {

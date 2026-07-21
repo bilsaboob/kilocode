@@ -147,6 +147,7 @@ function askGuard(mcp: Record<string, "allow" | "ask" | "deny"> = {}) {
     websearch: "allow",
     codebase_search: "allow",
     semantic_search: "allow",
+    zen_search_memory: "ask",
     external_directory: {
       [Truncate.GLOB]: "allow",
     },
@@ -201,6 +202,7 @@ function planGuard(worktree: string, mcp: Record<string, "allow" | "ask" | "deny
     websearch: "allow",
     codebase_search: "allow",
     semantic_search: "allow",
+    zen_search_memory: "ask",
     external_directory: {
       [Truncate.GLOB]: "allow",
       [path.join(Global.Path.data, "plans", "*")]: "allow",
@@ -228,7 +230,7 @@ export interface KiloData {
 // Prepare kilo-specific data derived from config. Call once per state initialization.
 export function prepare(cfg: Config.Info): KiloData {
   const mcpRules = getMcpRules(cfg)
-  const defaultsPatch = Permission.fromConfig({ bash, recall: "ask" })
+  const defaultsPatch = Permission.fromConfig({ bash, recall: "ask", zen_search_memory: "ask" })
   return { mcpRules, defaultsPatch }
 }
 
@@ -343,7 +345,7 @@ export function patchAgents(
         defaults,
         agents.build.permission,
         user,
-        Permission.fromConfig({ semantic_search: "allow" }),
+        Permission.fromConfig({ semantic_search: "allow", zen_search_memory: "ask" }),
       ),
     }
     delete agents.build
@@ -381,6 +383,7 @@ export function patchAgents(
           websearch: "allow",
           codebase_search: "allow",
           semantic_search: "allow",
+          zen_search_memory: "ask",
           read: "allow",
           external_directory: {
             // Mirror upstream explore's shape: the outer "*": "deny" above wins
@@ -413,6 +416,7 @@ export function patchAgents(
         suggest: "allow", // kilocode_change
         plan_enter: "allow",
         semantic_search: "allow",
+        zen_search_memory: "ask",
       }),
       user,
     ),
@@ -443,6 +447,7 @@ export function patchAgents(
         webfetch: "allow",
         websearch: "allow",
         codebase_search: "allow",
+        zen_search_memory: "ask",
         external_directory: {
           [Truncate.GLOB]: "allow",
         },

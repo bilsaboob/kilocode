@@ -306,20 +306,40 @@ describe("session HttpApi", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const headers = { "x-kilo-directory": test.directory }
-        const parent = yield* createSession({ title: "parent" })
+        const permission = [{ permission: "*", pattern: "*", action: "allow" as const }]
+        const parent = yield* createSession({ title: "parent", permission })
         const child = yield* createSession({ title: "child", parentID: parent.id })
+        const grandchild = yield* createSession({ title: "grandchild", parentID: child.id })
+        const sibling = yield* createSession({ title: "sibling" })
+        const siblingChild = yield* createSession({ title: "sibling child", parentID: sibling.id })
         const message = yield* createTextMessage(parent.id, "hello")
         yield* createTextMessage(parent.id, "world")
 
         const listed = yield* requestJson<Session.Info[]>(`${SessionPaths.list}?roots=true`, { headers })
         expect(listed.map((item) => item.id)).toContain(parent.id)
         expect(Object.hasOwn(listed[0]!, "parentID")).toBe(false)
+        expect(listed.find((item) => item.id === parent.id)?.permission).toBeUndefined()
+
+        // kilocode_change start - root list can include descendants for latency-sensitive clients
+        const listedWithChildren = yield* requestJson<Session.Info[]>(
+          `${SessionPaths.list}?roots=true&includeChildren=true`,
+          { headers },
+        )
+        expect(new Set(listedWithChildren.map((item) => item.id)).size).toBe(listedWithChildren.length)
+        expect(listedWithChildren.map((item) => item.id)).toEqual(
+          expect.arrayContaining([parent.id, child.id, grandchild.id, sibling.id, siblingChild.id]),
+        )
+        expect(listedWithChildren.find((item) => item.id === child.id)?.parentID).toBe(parent.id)
+        expect(listedWithChildren.find((item) => item.id === grandchild.id)?.parentID).toBe(child.id)
+        expect(listedWithChildren.find((item) => item.id === siblingChild.id)?.parentID).toBe(sibling.id)
+        expect(listedWithChildren.find((item) => item.id === parent.id)?.permission).toBeUndefined()
+        // kilocode_change end
 
         expect(yield* requestJson<Record<string, unknown>>(SessionPaths.status, { headers })).toEqual({})
 
         expect(
           yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: parent.id }), { headers }),
-        ).toMatchObject({ id: parent.id, title: "parent" })
+        ).toMatchObject({ id: parent.id, title: "parent", permission })
 
         expect(
           (yield* requestJson<Session.Info[]>(pathFor(SessionPaths.children, { sessionID: parent.id }), {
@@ -367,6 +387,74 @@ describe("session HttpApi", () => {
           (yield* requestJson<{ items: SessionMessage.Message[] }>(`/api/session/${parent.id}/message`, { headers }))
             .items,
         ).toMatchObject([{ type: "assistant" }])
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "dedupes session permission updates",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-kilo-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({
+          title: "permission dedupe",
+          permission: [
+            { permission: "edit", pattern: "src/*", action: "allow" as const },
+            { permission: "read", pattern: "src/*", action: "allow" as const },
+          ],
+        })
+        const payload = {
+          permission: [
+            { permission: "edit", pattern: "src/*", action: "allow" as const },
+            { permission: "bash", pattern: "*", action: "allow" as const },
+            { permission: "bash", pattern: "*", action: "deny" as const },
+          ],
+        }
+
+        const updated = yield* requestJson<Session.Info>(pathFor(SessionPaths.update, { sessionID: session.id }), {
+          headers,
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        })
+
+        expect(updated.permission).toEqual([
+          { permission: "read", pattern: "src/*", action: "allow" },
+          { permission: "edit", pattern: "src/*", action: "allow" },
+          { permission: "bash", pattern: "*", action: "deny" },
+        ])
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "grants session permissions without returning the session payload",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-kilo-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({
+          title: "permission grant",
+          permission: [{ permission: "read", pattern: "src/*", action: "allow" as const }],
+        })
+
+        const granted = yield* requestJson<boolean>(pathFor(SessionPaths.grantPermission, { sessionID: session.id }), {
+          headers,
+          method: "POST",
+          body: JSON.stringify({
+            permission: [
+              { permission: "read", pattern: "src/*", action: "allow" },
+              { permission: "edit", pattern: "src/*", action: "allow" },
+            ],
+          }),
+        })
+
+        const updated = yield* Session.use.get(session.id)
+        expect(granted).toBe(true)
+        expect(updated.permission).toEqual([
+          { permission: "read", pattern: "src/*", action: "allow" },
+          { permission: "edit", pattern: "src/*", action: "allow" },
+        ])
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

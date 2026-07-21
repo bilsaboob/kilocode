@@ -2255,6 +2255,10 @@ export type BackgroundProcessLogs = {
   output: string
 }
 
+export type CodexImageApiError = {
+  message: string
+}
+
 export type ConfigOverlayResponse = {
   scope: "global" | "project"
   effective: Config
@@ -6878,6 +6882,7 @@ export type SessionListData = {
     scope?: "project"
     path?: string
     roots?: boolean | "true" | "false"
+    includeChildren?: boolean | "true" | "false"
     start?: number
     search?: string
     limit?: number
@@ -7852,6 +7857,42 @@ export type PermissionRespondResponses = {
 }
 
 export type PermissionRespondResponse = PermissionRespondResponses[keyof PermissionRespondResponses]
+
+export type SessionGrantPermissionData = {
+  body?: {
+    permission: PermissionRuleset
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/permission"
+}
+
+export type SessionGrantPermissionErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionGrantPermissionError = SessionGrantPermissionErrors[keyof SessionGrantPermissionErrors]
+
+export type SessionGrantPermissionResponses = {
+  /**
+   * Permission rules merged
+   */
+  200: boolean
+}
+
+export type SessionGrantPermissionResponse = SessionGrantPermissionResponses[keyof SessionGrantPermissionResponses]
 
 export type PartDeleteData = {
   body?: never
@@ -9418,6 +9459,50 @@ export type CommitMessageGenerateResponses = {
 }
 
 export type CommitMessageGenerateResponse = CommitMessageGenerateResponses[keyof CommitMessageGenerateResponses]
+
+export type CodexImageGenerateData = {
+  body?: {
+    prompt: string
+    quality?: "auto" | "low" | "medium" | "high"
+    size?: string
+    images?: Array<{
+      mediaType: string
+      dataBase64: string
+    }>
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/codex/image/generate"
+}
+
+export type CodexImageGenerateErrors = {
+  /**
+   * CodexImageApiError | InvalidRequestError
+   */
+  400: CodexImageApiError | InvalidRequestError
+}
+
+export type CodexImageGenerateError = CodexImageGenerateErrors[keyof CodexImageGenerateErrors]
+
+export type CodexImageGenerateResponses = {
+  /**
+   * Codex subscription image generation result
+   */
+  200: {
+    model: string
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    size?: string
+    quality?: string
+    background?: string
+    mediaType: string
+    dataBase64: string
+  }
+}
+
+export type CodexImageGenerateResponse = CodexImageGenerateResponses[keyof CodexImageGenerateResponses]
 
 export type ConfigOverlayData = {
   body?: never

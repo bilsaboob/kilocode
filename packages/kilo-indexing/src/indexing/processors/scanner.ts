@@ -1,4 +1,3 @@
-import type { Ignore } from "ignore"
 import { stat, readFile } from "fs/promises"
 import path from "path"
 import { glob } from "glob"
@@ -27,6 +26,7 @@ import {
 import { FileIgnore } from "../../file/ignore"
 import { Log } from "../../util/log"
 import { sanitizeErrorMessage } from "../shared/validation-helpers"
+import type { IgnoreMatcher } from "../shared/load-ignore"
 import type { IndexingTelemetryMeta, IndexingTelemetryMode, IndexingTelemetryReporter } from "../interfaces/telemetry"
 
 const log = Log.create({ service: "indexing-scanner" })
@@ -41,7 +41,7 @@ export class DirectoryScanner implements IDirectoryScanner {
     private readonly vectorStore: IVectorStore,
     private readonly codeParser: ICodeParser,
     private readonly cacheManager: CacheManager,
-    private readonly ignoreInstance: Ignore,
+    private readonly ignoreInstance: IgnoreMatcher,
     batchSegmentThreshold?: number,
     maxBatchRetries?: number,
     private readonly onTelemetry?: IndexingTelemetryReporter,
@@ -137,6 +137,7 @@ export class DirectoryScanner implements IDirectoryScanner {
   ): Promise<{ stats: { processed: number; skipped: number }; totalBlockCount: number }> {
     // reset cooperative cancel flag on new full scan
     this._cancelled = false
+    await this.ignoreInstance.reload?.()
 
     const directoryPath = directory
     // Use the directory path directly as the workspace root

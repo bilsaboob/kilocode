@@ -43,7 +43,7 @@ export namespace AllowEverythingPermission {
         const session = yield* sessions.get(id).pipe(Effect.orDie)
         yield* sessions.setPermission({
           sessionID: id,
-          permission: [...(session.permission ?? []), ...rules],
+          permission: Permission.merge(session.permission ?? [], rules),
         })
       }
 

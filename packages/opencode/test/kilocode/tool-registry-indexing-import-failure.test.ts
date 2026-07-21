@@ -39,6 +39,7 @@ function infos() {
     recall: info("recall"),
     manager: info("agent_manager"),
     process: info("background_process"),
+    memory: info("zen_search_memory"),
   }
 }
 

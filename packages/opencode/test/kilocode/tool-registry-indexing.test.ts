@@ -191,6 +191,8 @@ describe("kilocode tool registry indexing", () => {
 
   test("conditionally includes Kilo registry extras", () => {
     const prev = process.env["KILO_CLIENT"]
+    const url = process.env["ZEN_MEMORY_TOOL_URL"]
+    const token = process.env["ZEN_MEMORY_TOOL_TOKEN"]
     const def = (id: string): Tool.Def => ({
       id,
       description: id,
@@ -203,6 +205,7 @@ describe("kilocode tool registry indexing", () => {
       recall: def("recall"),
       manager: def("agent_manager"),
       process: def("background_process"),
+      memory: def("zen_search_memory"),
     }
 
     try {
@@ -213,12 +216,12 @@ describe("kilocode tool registry indexing", () => {
         "background_process",
       ])
       expect(KiloToolRegistry.extra(tools, { experimental: { codebase_search: true } }).map((tool) => tool.id)).toEqual(
-        ["codebase_search", "semantic_search", "recall", "background_process"],
+        ["semantic_search", "codebase_search", "recall", "background_process"],
       )
 
       process.env["KILO_CLIENT"] = "vscode"
       expect(KiloToolRegistry.extra(tools, { experimental: { codebase_search: true } }).map((tool) => tool.id)).toEqual(
-        ["codebase_search", "semantic_search", "recall", "background_process", "agent_manager"],
+        ["semantic_search", "codebase_search", "recall", "background_process", "agent_manager"],
       )
       expect(KiloToolRegistry.extra({ ...tools, semantic: undefined }, {}).map((tool) => tool.id)).toEqual([
         "recall",
@@ -228,9 +231,21 @@ describe("kilocode tool registry indexing", () => {
 
       process.env["KILO_CLIENT"] = "desktop"
       expect(KiloToolRegistry.extra(tools, {}).map((tool) => tool.id)).toEqual(["semantic_search", "recall"])
+
+      process.env["ZEN_MEMORY_TOOL_URL"] = "http://127.0.0.1:1"
+      process.env["ZEN_MEMORY_TOOL_TOKEN"] = "test-token"
+      expect(KiloToolRegistry.extra(tools, {}).map((tool) => tool.id)).toEqual([
+        "semantic_search",
+        "recall",
+        "zen_search_memory",
+      ])
     } finally {
       if (prev === undefined) delete process.env["KILO_CLIENT"]
       if (prev !== undefined) process.env["KILO_CLIENT"] = prev
+      if (url === undefined) delete process.env["ZEN_MEMORY_TOOL_URL"]
+      if (url !== undefined) process.env["ZEN_MEMORY_TOOL_URL"] = url
+      if (token === undefined) delete process.env["ZEN_MEMORY_TOOL_TOKEN"]
+      if (token !== undefined) process.env["ZEN_MEMORY_TOOL_TOKEN"] = token
     }
   })
 

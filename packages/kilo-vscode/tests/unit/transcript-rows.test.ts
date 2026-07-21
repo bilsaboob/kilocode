@@ -206,17 +206,10 @@ describe("partitionRows", () => {
     })
     const result = partitionRows(rows, new Set(["u2"]))
 
-    expect(result.virtual.map((row) => `${row.turn}:${row.type}`)).toEqual([
-      "u1:user",
-      "u1:assistant",
-      "u2:user",
-      "u2:assistant",
-      "u2:assistant",
-    ])
-    expect(result.direct.flatMap((row) => (row.type === "assistant" ? row.parts : [])).map((item) => item.id)).toEqual([
-      "p16",
-      "p17",
-    ])
+    expect(result.virtual.map((row) => `${row.turn}:${row.type}`)).toEqual(["u1:user", "u1:assistant", "u2:user"])
+    expect(result.direct.flatMap((row) => (row.type === "assistant" ? row.parts : [])).map((item) => item.id)).toEqual(
+      parts.map((item) => item.id),
+    )
   })
 
   it("keeps trailing diff and error rows after the direct assistant suffix", () => {

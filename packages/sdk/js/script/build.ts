@@ -40,6 +40,20 @@ await createClient({
   ],
 })
 
+// Patch a @hey-api/openapi-ts codegen bug: SDK operation names can collide
+// with syntax-sensitive JavaScript keywords. A generated class method named
+// `import(parameters, options)` fails to parse in WebView runtimes because it
+// is treated like dynamic import syntax. Computed method names keep the public
+// API shape (`client.cloud.session.import(...)`) while emitting valid JS.
+const sdkPath = "./src/v2/gen/sdk.gen.ts"
+const sdkFile = Bun.file(sdkPath)
+const sdkSource = await sdkFile.text()
+const sdkPatched = sdkSource.replace(/^(\s*)public import(?=<)/gm, '$1public ["import"]')
+if (sdkPatched === sdkSource) {
+  throw new Error(`Reserved method name patch did not apply; @hey-api/openapi-ts output may have changed (${sdkPath})`)
+}
+await Bun.write(sdkPath, sdkPatched)
+
 // Patch a @hey-api/openapi-ts codegen bug: SseFn incorrectly passes the
 // endpoint's TError into the second generic of ServerSentEventsResult, which
 // is the AsyncGenerator's TReturn slot. Iterator return values have nothing

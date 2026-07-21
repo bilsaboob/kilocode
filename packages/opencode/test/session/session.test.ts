@@ -215,4 +215,20 @@ describe("Session", () => {
       expect(saved.metadata).toBeUndefined()
     }),
   )
+
+  it.instance("loads children for multiple parents in one call", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const a = yield* Effect.acquireRelease(session.create({ title: "parent-a" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+      const b = yield* Effect.acquireRelease(session.create({ title: "parent-b" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+      const c = yield* Effect.acquireRelease(session.create({ title: "parent-c" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+      const ca = yield* Effect.acquireRelease(session.create({ parentID: a.id, title: "child-a" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+      const cb = yield* Effect.acquireRelease(session.create({ parentID: b.id, title: "child-b" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+      const cc = yield* Effect.acquireRelease(session.create({ parentID: c.id, title: "child-c" }), (info) => session.remove(info.id).pipe(Effect.ignore))
+
+      const rows = yield* session.childrenByParent([a.id, b.id])
+      expect(rows.map((row) => row.id).sort()).toEqual([ca.id, cb.id].sort())
+      expect(rows.map((row) => row.id)).not.toContain(cc.id)
+    }),
+  )
 })

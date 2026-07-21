@@ -10,8 +10,8 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 import { Database } from "@/storage/db"
 import { NotFoundError } from "@/storage/storage"
-// kilocode_change - drop unused inArray/lt (listGlobal delegated to KiloSession)
-import { eq, and, gte, isNull, desc, like, or } from "drizzle-orm"
+// kilocode_change - drop unused lt (listGlobal delegated to KiloSession), keep inArray for batched child hydration, sql for lightweight list rows
+import { eq, and, gte, isNull, desc, like, or, inArray, sql } from "drizzle-orm"
 import { SyncEvent } from "../sync"
 import { PartTable, SessionTable } from "./session.sql"
 // kilocode_change - ProjectTable removed (unused)
@@ -56,8 +56,9 @@ export function isDefaultTitle(title: string) {
 }
 
 type SessionRow = typeof SessionTable.$inferSelect
+type InfoRow = Omit<SessionRow, "permission"> & { permission?: Permission.Ruleset | null } // kilocode_change
 
-export function fromRow(row: SessionRow): Info {
+export function fromRow(row: InfoRow): Info {
   const summary =
     row.summary_additions !== null || row.summary_deletions !== null || row.summary_files !== null
       ? {
@@ -508,6 +509,7 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<MessageV2.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  readonly childrenByParent: (parentIDs: SessionID[]) => Effect.Effect<Info[]> // kilocode_change
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -540,6 +542,40 @@ export type Patch = Types.DeepMutable<SyncEvent.Event<typeof Event.Updated>["dat
 
 const db = <T>(fn: (d: Parameters<typeof Database.use>[0] extends (trx: infer D) => any ? D : never) => T) =>
   Effect.sync(() => Database.use(fn))
+
+// kilocode_change start - list-shaped responses do not need large per-session permission snapshots
+const columns = {
+  id: SessionTable.id,
+  project_id: SessionTable.project_id,
+  workspace_id: SessionTable.workspace_id,
+  parent_id: SessionTable.parent_id,
+  slug: SessionTable.slug,
+  directory: SessionTable.directory,
+  path: SessionTable.path,
+  title: SessionTable.title,
+  version: SessionTable.version,
+  share_url: SessionTable.share_url,
+  summary_additions: SessionTable.summary_additions,
+  summary_deletions: SessionTable.summary_deletions,
+  summary_files: SessionTable.summary_files,
+  summary_diffs: SessionTable.summary_diffs,
+  metadata: SessionTable.metadata,
+  cost: SessionTable.cost,
+  tokens_input: SessionTable.tokens_input,
+  tokens_output: SessionTable.tokens_output,
+  tokens_reasoning: SessionTable.tokens_reasoning,
+  tokens_cache_read: SessionTable.tokens_cache_read,
+  tokens_cache_write: SessionTable.tokens_cache_write,
+  revert: SessionTable.revert,
+  permission: sql<Permission.Ruleset | null>`null`.as("permission"),
+  agent: SessionTable.agent,
+  model: SessionTable.model,
+  time_created: SessionTable.time_created,
+  time_updated: SessionTable.time_updated,
+  time_compacting: SessionTable.time_compacting,
+  time_archived: SessionTable.time_archived,
+}
+// kilocode_change end
 
 export const layer: Layer.Layer<
   Service,
@@ -581,7 +617,7 @@ export const layer: Layer.Layer<
         agent: input.agent,
         model: input.model,
         metadata: input.metadata,
-        permission: input.permission ? [...input.permission] : undefined,
+        permission: input.permission ? Permission.merge(input.permission) : undefined, // kilocode_change - compact duplicate permission rules on write
         cost: 0,
         tokens: EmptyTokens,
         time: {
@@ -622,23 +658,34 @@ export const layer: Layer.Layer<
       )
     })
 
-    // kilocode_change start - scope children by persisted parent project_id
-    const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+    // kilocode_change start - scope and batch child hydration by persisted parent project_id
+    const childrenByParent = Effect.fn("Session.childrenByParent")(function* (parentIDs: SessionID[]) {
+      const ids = [...new Set(parentIDs)].filter(Boolean)
+      if (ids.length === 0) return []
       const rows = yield* db((d) => {
-        const parent = d
-          .select({ projectID: SessionTable.project_id })
-          .from(SessionTable)
-          .where(eq(SessionTable.id, parentID))
-          .get()
-        const conditions = [eq(SessionTable.parent_id, parentID)]
-        if (parent) conditions.push(eq(SessionTable.project_id, parent.projectID))
+        const parents = new Map(
+          d
+            .select({ id: SessionTable.id, projectID: SessionTable.project_id })
+            .from(SessionTable)
+            .where(inArray(SessionTable.id, ids))
+            .all()
+            .map((row) => [row.id, row.projectID]),
+        )
         return d
-          .select()
+          .select(columns)
           .from(SessionTable)
-          .where(and(...conditions))
+          .where(inArray(SessionTable.parent_id, ids))
           .all()
+          .filter((row) => {
+            const project = parents.get(row.parent_id as SessionID)
+            return !project || row.project_id === project
+          })
       })
       return rows.map(fromRow)
+    })
+
+    const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+      return yield* childrenByParent([parentID])
     })
     // kilocode_change end
 
@@ -843,7 +890,7 @@ export const layer: Layer.Layer<
       sessionID: SessionID
       permission: Permission.Ruleset
     }) {
-      yield* patch(input.sessionID, { permission: [...input.permission], time: { updated: Date.now() } })
+      yield* patch(input.sessionID, { permission: Permission.merge(input.permission), time: { updated: Date.now() } }) // kilocode_change - compact duplicate permission rules on write
     })
 
     const setRevert = Effect.fn("Session.setRevert")(function* (input: {
@@ -959,6 +1006,7 @@ export const layer: Layer.Layer<
       diff,
       messages,
       children,
+      childrenByParent, // kilocode_change
       remove,
       updateMessage,
       removeMessage,
@@ -1045,7 +1093,7 @@ function* listByProject(
 
   const rows = Database.use((db) =>
     db
-      .select()
+      .select(columns)
       .from(SessionTable)
       .where(and(...conditions))
       .orderBy(desc(SessionTable.time_updated))
