@@ -1,5 +1,10 @@
 import { Auth } from "@/auth"
-import { CodexImageRequest, generateCodexImage, type CodexImageFetch } from "@/kilocode/image-generation"
+import {
+  CodexImageGenerationError,
+  CodexImageRequest,
+  generateCodexImage,
+  type CodexImageFetch,
+} from "@/kilocode/image-generation"
 import { Provider } from "@/provider/provider"
 import { ProviderID } from "@/provider/schema"
 import { InstanceHttpApi } from "@/server/routes/instance/httpapi/api"
@@ -36,7 +41,15 @@ export const codexImageHandlers = HttpApiBuilder.group(InstanceHttpApi, "codex-i
 
       return yield* Effect.tryPromise({
         try: (signal) => generateCodexImage(fetcher as CodexImageFetch, ctx.payload, signal),
-        catch: (cause) => new CodexImageApiError({ message: cause instanceof Error ? cause.message : String(cause) }),
+        catch: (cause) =>
+          new CodexImageApiError({
+            message:
+              cause instanceof CodexImageGenerationError
+                ? `Upstream HTTP ${cause.status}: ${cause.message}`
+                : cause instanceof Error
+                  ? cause.message
+                  : String(cause),
+          }),
       })
     })
 

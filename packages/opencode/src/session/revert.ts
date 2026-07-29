@@ -45,6 +45,7 @@ export const layer = Layer.effect(
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
       let rev: Session.Info["revert"]
+      let boundary = -1 // kilocode_change - client-provided message IDs are not necessarily chronologically sortable
       const patches: Snapshot.Patch[] = []
       for (const msg of all) {
         if (msg.info.role === "user") lastUser = msg.info
@@ -62,6 +63,7 @@ export const layer = Layer.effect(
                 messageID: !partID && lastUser ? lastUser.id : msg.info.id,
                 partID,
               }
+              boundary = all.findIndex((item) => item.info.id === rev?.messageID) // kilocode_change
             }
             remaining.push(part)
           }
@@ -75,7 +77,7 @@ export const layer = Layer.effect(
 
       // kilocode_change start - compute diffs BEFORE reverting files so the diff
       // reflects changes being undone (files on disk still have AI modifications)
-      const range = all.filter((msg) => msg.info.id >= rev.messageID)
+      const range = boundary >= 0 ? all.slice(boundary) : [] // kilocode_change - use chronology, not ID ordering
       const diffs = yield* summary.computeDiff({ messages: range })
       // kilocode_change end
 
@@ -119,20 +121,16 @@ export const layer = Layer.effect(
       const sessionID = session.id
       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
       const messageID = session.revert.messageID
-      const remove = [] as MessageV2.WithParts[]
-      let target: MessageV2.WithParts | undefined
-      for (const msg of msgs) {
-        if (msg.info.id < messageID) continue
-        if (msg.info.id > messageID) {
-          remove.push(msg)
-          continue
-        }
-        if (session.revert.partID) {
-          target = msg
-          continue
-        }
-        remove.push(msg)
+      // kilocode_change start - external clients may provide valid, non-sortable message IDs
+      const index = msgs.findIndex((msg) => msg.info.id === messageID)
+      if (index < 0) {
+        log.warn("revert boundary missing during cleanup", { sessionID, messageID })
+        yield* sessions.clearRevert(sessionID)
+        return
       }
+      const target = session.revert.partID ? msgs[index] : undefined
+      const remove = msgs.slice(index + (session.revert.partID ? 1 : 0))
+      // kilocode_change end
       for (const msg of remove) {
         yield* sync.run(MessageV2.Event.Removed, {
           sessionID,

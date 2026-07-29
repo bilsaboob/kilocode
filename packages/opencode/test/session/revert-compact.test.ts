@@ -427,6 +427,83 @@ describe("revert + compact workflow", () => {
     ),
   )
 
+  // kilocode_change start - external clients may provide valid, non-sortable message IDs
+  it.live(
+    "cleanup preserves earlier assistants when client message IDs are not sortable",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const info = yield* session.create({})
+          const sid = info.id
+          const first = MessageID.make("msg_45ef567b57a4470b84cba7e6a12a5687")
+          const firstReply = MessageID.make("msg_fad63cd80001CpQ75BxCmWE17R")
+          const boundary = MessageID.make("msg_bcda18f36ec14cd181a9257fd4f1863a")
+          const lastReply = MessageID.make("msg_fad755400001N7d6OK7CqMIsFR")
+
+          yield* session.updateMessage({
+            id: first,
+            role: "user",
+            sessionID: sid,
+            agent: "default",
+            model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+            time: { created: 1 },
+          })
+          yield* text(sid, first, "first question")
+          yield* session.updateMessage({
+            id: firstReply,
+            role: "assistant",
+            sessionID: sid,
+            mode: "default",
+            agent: "default",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens,
+            modelID: ModelID.make("gpt-4"),
+            providerID: ProviderID.make("openai"),
+            parentID: first,
+            time: { created: 2 },
+            finish: "end_turn",
+          })
+          yield* text(sid, firstReply, "first answer")
+          yield* session.updateMessage({
+            id: boundary,
+            role: "user",
+            sessionID: sid,
+            agent: "default",
+            model: { providerID: ProviderID.make("openai"), modelID: ModelID.make("gpt-4") },
+            time: { created: 3 },
+          })
+          yield* text(sid, boundary, "replacement point")
+          yield* session.updateMessage({
+            id: lastReply,
+            role: "assistant",
+            sessionID: sid,
+            mode: "default",
+            agent: "default",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens,
+            modelID: ModelID.make("gpt-4"),
+            providerID: ProviderID.make("openai"),
+            parentID: boundary,
+            time: { created: 4 },
+            finish: "end_turn",
+          })
+          yield* text(sid, lastReply, "discarded answer")
+
+          const state = yield* revert.revert({ sessionID: sid, messageID: boundary })
+          yield* revert.cleanup(state)
+
+          const remaining = yield* session.messages({ sessionID: sid })
+          expect(remaining.map((msg) => msg.info.id)).toEqual([first, firstReply])
+        }),
+      { git: true },
+    ),
+  )
+  // kilocode_change end
+
   it.live(
     "cleanup is a no-op when session has no revert state",
     provideTmpdirInstance(

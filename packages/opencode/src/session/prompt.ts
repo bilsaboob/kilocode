@@ -6,6 +6,7 @@ import { KiloSessionPromptQueue } from "@/kilocode/session/prompt-queue" // kilo
 import { KiloSession } from "@/kilocode/session" // kilocode_change
 import { KiloCostPropagation } from "@/kilocode/session/cost-propagation" // kilocode_change
 import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_change
+import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { Question } from "@/question" // kilocode_change
@@ -160,6 +161,7 @@ export const layer = Layer.effect(
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
+      KiloSessionRecovery.reset(sessionID) // kilocode_change - cancel delayed automatic recovery
       yield* KiloSessionPromptQueue.cancel(sessionID) // kilocode_change - drop queued follow-up loops on abort
       KiloSessionPrompt.abortPlanFollowup(sessionID) // kilocode_change - abort pending plan-followup handover work
       yield* state.cancel(sessionID)
@@ -1298,6 +1300,10 @@ export const layer = Layer.effect(
 
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       function* (input: PromptInput) {
+        // kilocode_change start - reject stale recovery prompts and reset retry history for explicit user prompts
+        const recovery = KiloSessionRecovery.begin(input.sessionID, input.parts)
+        if (recovery === "stale") return yield* lastAssistant(input.sessionID)
+        // kilocode_change end
         const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
         yield* revert.cleanup(session)
         // kilocode_change start - recover interrupted Kilo turns before accepting a follow-up
@@ -1336,7 +1342,7 @@ export const layer = Layer.effect(
         // Queue tails and runner fibers can resume outside the HTTP request's
         // ambient instance context; bridge both Effect refs and legacy ALS.
         const bridge = yield* EffectBridge.make()
-        return yield* KiloSessionPromptQueue.enqueue(
+        const result = yield* KiloSessionPromptQueue.enqueue(
           input.sessionID,
           message.info.id,
           bridge.run(
@@ -1346,6 +1352,71 @@ export const layer = Layer.effect(
           ), // kilocode_change
           bridge.run(lastAssistant(input.sessionID)),
         )
+        // kilocode_change start - resume terminal provider/context/length failures in this session only
+        if (result.info.role !== "assistant") return result
+        if (recovery === "auto" && !KiloSessionRecovery.valid(input.sessionID, input.parts)) return result
+        const messages = yield* sessions.messages({ sessionID: input.sessionID })
+        const decision = KiloSessionRecovery.finish({
+          sessionID: input.sessionID,
+          message: result.info,
+          messages,
+        })
+        if (!decision) return result
+        if (decision.action === "pause") {
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: result.info.id,
+            sessionID: input.sessionID,
+            type: "text",
+            text: "Automatic recovery paused after the cooldown attempt also failed. Send a new message to resume this session manually.",
+            ignored: true,
+          })
+          yield* elog.warn("automatic recovery paused", { sessionID: input.sessionID, count: decision.count })
+          return result
+        }
+
+        const user = KiloSessionRecovery.source(messages, result.info)
+        if (!user) return result
+        const next = Date.now() + decision.delay
+        yield* status.set(input.sessionID, {
+          type: "retry",
+          attempt: decision.count,
+          message:
+            decision.delay > 0
+              ? "Automatic recovery paused after 3 interrupted turns"
+              : "Automatically resuming interrupted session",
+          next,
+        })
+        const work = Effect.sleep(decision.delay).pipe(
+          Effect.flatMap(() => {
+            if (!KiloSessionRecovery.claim(input.sessionID, decision.token)) return Effect.void
+            return prompt({
+              sessionID: input.sessionID,
+              agent: user.agent,
+              model: { providerID: user.model.providerID, modelID: user.model.modelID },
+              variant: user.model.variant,
+              tools: user.tools,
+              format: user.format,
+              system: user.system,
+              editorContext: user.editorContext,
+              snapshotInitialization: input.snapshotInitialization,
+              parts: [
+                {
+                  type: "text",
+                  text: KiloSessionRecovery.text(decision.topic),
+                  metadata: { auto_resume: true, recovery_token: decision.token },
+                },
+              ],
+            }).pipe(Effect.asVoid)
+          }),
+          Effect.catchCause((cause) =>
+            elog
+              .error("automatic recovery failed to start", { sessionID: input.sessionID, error: Cause.squash(cause) })
+              .pipe(Effect.andThen(status.set(input.sessionID, { type: "idle" }))),
+          ),
+        )
+        yield* Effect.sync(() => bridge.fork(work))
+        return result
         // kilocode_change end
       },
       Effect.catchTag("NotFoundError", Effect.die),
@@ -1802,6 +1873,7 @@ export const layer = Layer.effect(
     const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
+      KiloSessionRecovery.reset(input.sessionID) // kilocode_change - explicit shell input cancels delayed recovery
       const ready = yield* Latch.make()
       return yield* state.startShell(
         input.sessionID,

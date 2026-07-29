@@ -136,6 +136,63 @@ describe("Session.fork cost accounting", () => {
   )
 })
 
+describe("Session.fork chronological boundary", () => {
+  test(
+    "keeps earlier assistants when client message IDs are not sortable",
+    async () => {
+      await using tmp = await tmpdir({ git: true })
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const original = await sessions.create({ title: "mixed IDs" })
+          const first = MessageID.make("msg_45ef567b57a4470b84cba7e6a12a5687")
+          const firstReply = MessageID.make("msg_fad63cd80001CpQ75BxCmWE17R")
+          const boundary = MessageID.make("msg_bcda18f36ec14cd181a9257fd4f1863a")
+          const lastReply = MessageID.make("msg_fad755400001N7d6OK7CqMIsFR")
+          const user = (id: MessageID, created: number) =>
+            sessions.updateMessage({
+              id,
+              sessionID: original.id,
+              role: "user",
+              time: { created },
+              agent: "test",
+              model: { providerID: "test", modelID: "test" },
+              tools: {},
+            } as MessageV2.User)
+          const assistant = (id: MessageID, parentID: MessageID, created: number) =>
+            sessions.updateMessage({
+              id,
+              sessionID: original.id,
+              role: "assistant",
+              time: { created },
+              parentID,
+              modelID: "test",
+              providerID: "test",
+              mode: "",
+              agent: "test",
+              path: { cwd: tmp.path, root: tmp.path },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            } as MessageV2.Assistant)
+
+          await user(first, 1)
+          await assistant(firstReply, first, 2)
+          await user(boundary, 3)
+          await assistant(lastReply, boundary, 4)
+
+          const source = await sessions.messages({ sessionID: original.id })
+          expect(source.map((msg) => msg.info.id)).toEqual([first, firstReply, boundary, lastReply])
+          const forked = await Session.fork({ sessionID: original.id, messageID: boundary })
+          const copy = await sessions.messages({ sessionID: forked.id })
+          expect(copy.map((msg) => msg.info.role)).toEqual(["user", "assistant"])
+          expect(copy[1]?.info.role === "assistant" ? copy[1].info.parentID : undefined).toBe(copy[0]?.info.id)
+        },
+      })
+    },
+    { timeout: 30000 },
+  )
+})
+
 describe("Session.fork task detachment", () => {
   test(
     "keeps completed task outcomes without cloning child sessions",

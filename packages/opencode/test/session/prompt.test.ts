@@ -34,6 +34,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionRetry } from "../../src/session/retry" // kilocode_change - remove retry delay in recovery integration test
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Suggestion } from "../../src/kilocode/suggestion" // kilocode_change - accept suggestion in telemetry test
@@ -514,6 +515,64 @@ it.instance("loop calls LLM and returns assistant message", () =>
     expect(yield* llm.hits).toHaveLength(1)
   }),
 )
+
+// kilocode_change start - terminal provider failures automatically resume in the same session
+it.instance("automatically resumes a terminal provider error in the same session", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    const previous = process.env.KILO_SESSION_RETRY_LIMIT
+    process.env.KILO_SESSION_RETRY_LIMIT = "1"
+    const delay = spyOn(SessionRetry, "delay").mockReturnValue(0)
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        delay.mockRestore()
+        if (previous === undefined) delete process.env.KILO_SESSION_RETRY_LIMIT
+        else process.env.KILO_SESSION_RETRY_LIMIT = previous
+      }),
+    )
+    yield* llm.error(500, { error: { code: "server_error", message: "temporary provider failure" } })
+    yield* llm.error(500, { error: { code: "server_error", message: "temporary provider failure" } })
+    yield* llm.text("recovered in the original session")
+
+    const failed = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      parts: [{ type: "text", text: "Investigate the Codex stream interruption" }],
+    })
+    expect(failed.info.role === "assistant" ? failed.info.error?.name : undefined).toBe("APIError")
+
+    yield* llm.wait(3)
+    const messages = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const items = yield* sessions.messages({ sessionID: chat.id })
+        const tail = items.at(-1)
+        if (tail?.info.role !== "assistant" || !tail.info.time.completed || tail.info.error) return
+        return items
+      }),
+      "automatic recovery did not finish",
+      "5 seconds",
+    )
+    const users = messages.filter((item) => item.info.role === "user")
+    const recovery = users.at(-1)
+    const text = recovery?.parts.find((part) => part.type === "text")
+
+    expect(users).toHaveLength(2)
+    expect(recovery?.info.sessionID).toBe(chat.id)
+    expect(recovery?.info.role === "user" ? recovery.info.agent : undefined).toBe(
+      users[0]?.info.role === "user" ? users[0].info.agent : undefined,
+    )
+    expect(text?.type === "text" ? text.metadata?.auto_resume : undefined).toBe(true)
+    expect(text?.type === "text" ? text.text : "").toContain("Investigate the Codex stream interruption")
+    expect(messages.at(-1)?.parts.some((part) => part.type === "text" && part.text.includes("recovered"))).toBe(true)
+  }),
+)
+// kilocode_change end
 
 // kilocode_change start - replacement prompts unblock pending Question service requests
 noLLMServer.instance(

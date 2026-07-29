@@ -825,7 +825,7 @@ export const layer: Layer.Layer<
       const writer = KiloSession.writer(session.id, sync) // kilocode_change - commit copied transcript in one transaction
 
       for (const msg of msgs) {
-        if (input.messageID && msg.info.id >= input.messageID) break
+        if (input.messageID && msg.info.id === input.messageID) break // kilocode_change - stop at the chronological boundary, not ID ordering
         const newID = MessageID.ascending()
         idMap.set(msg.info.id, newID)
 
