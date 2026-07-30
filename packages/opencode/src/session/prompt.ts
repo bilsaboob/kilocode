@@ -7,6 +7,7 @@ import { KiloSession } from "@/kilocode/session" // kilocode_change
 import { KiloCostPropagation } from "@/kilocode/session/cost-propagation" // kilocode_change
 import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_change
 import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
+import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { Question } from "@/question" // kilocode_change
@@ -160,7 +161,7 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      yield* elog.info("cancel", { sessionID })
+      yield* elog.info("cancel", { sessionID }) // kilocode_change
       KiloSessionRecovery.reset(sessionID) // kilocode_change - cancel delayed automatic recovery
       yield* KiloSessionPromptQueue.cancel(sessionID) // kilocode_change - drop queued follow-up loops on abort
       KiloSessionPrompt.abortPlanFollowup(sessionID) // kilocode_change - abort pending plan-followup handover work
@@ -1299,8 +1300,11 @@ export const layer = Layer.effect(
     }, Effect.scoped)
 
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
+      // kilocode_change start
       function* (input: PromptInput) {
+        // kilocode_change end
         // kilocode_change start - reject stale recovery prompts and reset retry history for explicit user prompts
+        const kind = KiloSessionRecovery.detect(input.parts)
         const recovery = KiloSessionRecovery.begin(input.sessionID, input.parts)
         if (recovery === "stale") return yield* lastAssistant(input.sessionID)
         // kilocode_change end
@@ -1310,13 +1314,41 @@ export const layer = Layer.effect(
         yield* KiloSessionPrompt.recoverDanglingAssistant({ sessionID: input.sessionID, status, sessions })
         yield* KiloSessionPrompt.recoverProviderFinishError({ sessionID: input.sessionID, status, sessions })
         // kilocode_change end
-        const message = yield* createUserMessage(input)
-        yield* sessions.touch(input.sessionID)
+        // kilocode_change start - anchor resume turns to this session and its own file activity
+        const request = kind
+          ? yield* Effect.gen(function* () {
+              const messageID = input.messageID ?? MessageID.ascending()
+              const history = yield* sessions.messages({ sessionID: input.sessionID })
+              const activity = yield* FileActivity.list(input.sessionID)
+              const paths = activity.filter((item) => item.action !== "read").map((item) => item.path)
+              const shared = yield* FileActivity.shared(input.sessionID, paths)
+              const anchor = KiloSessionRecovery.anchor({
+                sessionID: input.sessionID,
+                resumeMessageID: messageID,
+                messages: history,
+                activity,
+                shared,
+              })
+              return {
+                ...input,
+                messageID,
+                parts: KiloSessionRecovery.parts(input.parts, kind, anchor) as PromptInput["parts"],
+                system: KiloSessionRecovery.system(input.system, anchor),
+              }
+            })
+          : input
+        // kilocode_change end
+        const message = yield* createUserMessage(request)
+        yield* sessions.touch(request.sessionID)
 
         const permissions: Permission.Rule[] = []
-        for (const [t, enabled] of Object.entries(input.tools ?? {})) {
+        // kilocode_change start
+        for (const [t, enabled] of Object.entries(request.tools ?? {})) {
+          // kilocode_change end
+          // kilocode_change start
           permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
-        }
+          // kilocode_change end
+        } // kilocode_change
         if (permissions.length > 0) {
           // kilocode_change start - preserve inherited task restrictions while refreshing prompt tool toggles
           const merged = KiloSessionPrompt.mergeToolPermissions({
@@ -1326,7 +1358,7 @@ export const layer = Layer.effect(
           session.permission = merged
           yield* sessions.setPermission({ sessionID: session.id, permission: merged })
           // kilocode_change end
-        }
+        } // kilocode_change
 
         // kilocode_change start — unblock tools waiting on user input so any in-flight
         // handle.process can return. Adding a new user message is the signal that any
@@ -1336,28 +1368,28 @@ export const layer = Layer.effect(
         // below serializes this prompt after the current turn's current LLM step, and
         // runLoop checks hasFollowup between steps to break out once it has been
         // enqueued during the turn.
-        yield* Effect.promise(() => Suggestion.dismissAll(input.sessionID))
-        yield* question.dismissAll(input.sessionID)
-        if (input.noReply === true) return message
+        yield* Effect.promise(() => Suggestion.dismissAll(request.sessionID))
+        yield* question.dismissAll(request.sessionID)
+        if (request.noReply === true) return message
         // Queue tails and runner fibers can resume outside the HTTP request's
         // ambient instance context; bridge both Effect refs and legacy ALS.
         const bridge = yield* EffectBridge.make()
         const result = yield* KiloSessionPromptQueue.enqueue(
-          input.sessionID,
+          request.sessionID,
           message.info.id,
           bridge.run(
-            loop({ sessionID: input.sessionID, snapshotInitialization: input.snapshotInitialization }).pipe(
+            loop({ sessionID: request.sessionID, snapshotInitialization: request.snapshotInitialization }).pipe(
               Effect.orDie,
             ),
           ), // kilocode_change
-          bridge.run(lastAssistant(input.sessionID)),
+          bridge.run(lastAssistant(request.sessionID)),
         )
         // kilocode_change start - resume terminal provider/context/length failures in this session only
         if (result.info.role !== "assistant") return result
-        if (recovery === "auto" && !KiloSessionRecovery.valid(input.sessionID, input.parts)) return result
-        const messages = yield* sessions.messages({ sessionID: input.sessionID })
+        if (recovery === "auto" && !KiloSessionRecovery.valid(request.sessionID, request.parts)) return result
+        const messages = yield* sessions.messages({ sessionID: request.sessionID })
         const decision = KiloSessionRecovery.finish({
-          sessionID: input.sessionID,
+          sessionID: request.sessionID,
           message: result.info,
           messages,
         })
@@ -1366,19 +1398,19 @@ export const layer = Layer.effect(
           yield* sessions.updatePart({
             id: PartID.ascending(),
             messageID: result.info.id,
-            sessionID: input.sessionID,
+            sessionID: request.sessionID,
             type: "text",
             text: "Automatic recovery paused after the cooldown attempt also failed. Send a new message to resume this session manually.",
             ignored: true,
           })
-          yield* elog.warn("automatic recovery paused", { sessionID: input.sessionID, count: decision.count })
+          yield* elog.warn("automatic recovery paused", { sessionID: request.sessionID, count: decision.count })
           return result
         }
 
         const user = KiloSessionRecovery.source(messages, result.info)
         if (!user) return result
         const next = Date.now() + decision.delay
-        yield* status.set(input.sessionID, {
+        yield* status.set(request.sessionID, {
           type: "retry",
           attempt: decision.count,
           message:
@@ -1389,9 +1421,9 @@ export const layer = Layer.effect(
         })
         const work = Effect.sleep(decision.delay).pipe(
           Effect.flatMap(() => {
-            if (!KiloSessionRecovery.claim(input.sessionID, decision.token)) return Effect.void
+            if (!KiloSessionRecovery.claim(request.sessionID, decision.token)) return Effect.void
             return prompt({
-              sessionID: input.sessionID,
+              sessionID: request.sessionID,
               agent: user.agent,
               model: { providerID: user.model.providerID, modelID: user.model.modelID },
               variant: user.model.variant,
@@ -1399,20 +1431,32 @@ export const layer = Layer.effect(
               format: user.format,
               system: user.system,
               editorContext: user.editorContext,
-              snapshotInitialization: input.snapshotInitialization,
+              snapshotInitialization: request.snapshotInitialization,
               parts: [
                 {
                   type: "text",
-                  text: KiloSessionRecovery.text(decision.topic),
-                  metadata: { auto_resume: true, recovery_token: decision.token },
+                  text: KiloSessionRecovery.text({
+                    sessionID: request.sessionID,
+                    topic: decision.topic,
+                    userMessageID: user.id,
+                    assistantMessageID: result.info.id,
+                  }),
+                  metadata: {
+                    auto_resume: true,
+                    session_resume: true,
+                    resume_kind: "automatic",
+                    recovery_token: decision.token,
+                    anchor_user_message_id: user.id,
+                    interrupted_assistant_message_id: result.info.id,
+                  },
                 },
               ],
             }).pipe(Effect.asVoid)
           }),
           Effect.catchCause((cause) =>
             elog
-              .error("automatic recovery failed to start", { sessionID: input.sessionID, error: Cause.squash(cause) })
-              .pipe(Effect.andThen(status.set(input.sessionID, { type: "idle" }))),
+              .error("automatic recovery failed to start", { sessionID: request.sessionID, error: Cause.squash(cause) })
+              .pipe(Effect.andThen(status.set(request.sessionID, { type: "idle" }))),
           ),
         )
         yield* Effect.sync(() => bridge.fork(work))
@@ -1829,13 +1873,19 @@ export const layer = Layer.effect(
           }
           // kilocode_change end
           return "continue" as const
+          // kilocode_change start
         }).pipe(
+          // kilocode_change end
           Effect.ensuring(instruction.clear(handle.message.id)),
+          // kilocode_change start
           Effect.onInterrupt(() => finalize),
+          // kilocode_change end
         )
         if (outcome === "break") break
+        // kilocode_change start
         continue
-      }
+        // kilocode_change end
+      } // kilocode_change
 
       yield* compaction.prune({ sessionID, reason: "normal" }).pipe(Effect.ignore, Effect.forkIn(scope))
       return yield* lastAssistant(sessionID)

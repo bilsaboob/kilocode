@@ -216,6 +216,14 @@ export const kiloScenarios: Scenario[] = [
       check(typeof body.available === "boolean", "sandbox toggle should report backend availability")
       check(typeof body.version === "number", "sandbox toggle should report its revision")
     }),
+  http.protected
+    .get("/session/{sessionID}/file-activity", "session.fileActivity")
+    .seeded((ctx) => ctx.session({ title: "File activity" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/file-activity", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, array),
   http.protected.get("/remote/status", "remote.status").json(200, (body) => {
     object(body)
     check(body.enabled === false && body.connected === false, "remote should start disabled")

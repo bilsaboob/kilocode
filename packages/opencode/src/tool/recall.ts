@@ -11,6 +11,7 @@ import { Session } from "../session/session" // kilocode_change
 import { SessionID } from "../session/schema" // kilocode_change
 import { RecallSearch } from "../kilocode/session/recall-search" // kilocode_change
 import { KiloSessionPromptQueue } from "../kilocode/session/prompt-queue" // kilocode_change
+import { KiloSessionRecovery } from "../kilocode/session/recovery" // kilocode_change
 import DESCRIPTION from "./recall.txt"
 
 const Parameters = Schema.Struct({
@@ -58,10 +59,11 @@ async function search(
     throw new Error("The 'query' parameter is required when mode is 'search'")
   }
 
+  const scope = resumeScope(ctx) // kilocode_change
   await ctx.ask({
     permission: "recall",
-    patterns: ["search"],
-    always: ["search"],
+    patterns: [scope.active ? ctx.sessionID : "search"],
+    always: [scope.active ? ctx.sessionID : "search"],
     metadata: {
       mode: "search",
       query: params.query,
@@ -78,6 +80,7 @@ async function search(
     signal: ctx.abort,
     excludeSessionID: ctx.sessionID,
     excludeFromMessageID: boundary,
+    onlySessionID: scope.active ? ctx.sessionID : undefined,
   }) // kilocode_change
 
   const coverage = `Searched ${found.sessions} sessions and ${found.parts} transcript parts.`
@@ -121,6 +124,17 @@ async function read(
   if (!Schema.is(SessionID)(params.sessionID)) {
     throw new Error("Invalid session ID. Use search mode first to find valid session IDs.")
   }
+  // kilocode_change start - a resume turn cannot read another session
+  if (!resumeScope(ctx, params.sessionID).allowed) {
+    return {
+      title: "Recall blocked during session resume",
+      output: RecallSearch.inert(
+        `This resume turn is scoped to session ${ctx.sessionID}. Another session cannot be read while resolving the current session's interrupted work.`,
+      ),
+      metadata: { searchedSessions: 0, searchedParts: 0, blocked: true, sessionID: ctx.sessionID },
+    }
+  }
+  // kilocode_change end
 
   const session = await bridge.promise(sessions.get(SessionID.make(params.sessionID))).catch(() => {
     throw new Error("Session not found. Use search mode first to find valid session IDs.")
@@ -182,6 +196,17 @@ async function read(
   return {
     title: `Read: ${RecallSearch.inert(session.title)}`,
     output: RecallSearch.inert(lines.join("\n")),
-    metadata: {},
+    metadata: {
+      searchedSessions: 1,
+      searchedParts: visible.reduce((count, message) => count + message.parts.length, 0),
+    },
   }
+}
+
+export function resumeScope(
+  ctx: Pick<Tool.Context, "messages" | "sessionID">,
+  target?: string,
+): { active: boolean; allowed: boolean } {
+  const active = Boolean(KiloSessionRecovery.current(ctx.messages))
+  return { active, allowed: !active || !target || target === ctx.sessionID }
 }

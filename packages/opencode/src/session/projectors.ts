@@ -10,6 +10,7 @@ import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { WorkspaceTable } from "@/control-plane/workspace.sql"
 import { Log } from "@opencode-ai/core/util/log"
 import nextProjectors from "./projectors-next"
+import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
 
 const log = Log.create({ service: "session.projector" })
 
@@ -190,6 +191,7 @@ export default [
       const next = usage(data.part)
       if (previous) applyUsage(db, row.session_id, previous, -1)
       if (next) applyUsage(db, sessionID, next)
+      FileActivity.project(db, data.part) // kilocode_change - persist deterministic file activity in the part transaction
     } catch (err) {
       if (!foreign(err)) throw err
       log.warn("ignored late part update", { partID: id, messageID, sessionID })

@@ -7,6 +7,9 @@ import {
   WorkspaceRoutingQuery,
 } from "@/server/routes/instance/httpapi/middleware/workspace-routing"
 import { described } from "@/server/routes/instance/httpapi/groups/metadata"
+import { SessionID } from "@/session/schema"
+import { FileActivity } from "@/kilocode/file-activity"
+import { ApiNotFoundError } from "@/server/routes/instance/httpapi/errors"
 
 const root = "/kilocode"
 
@@ -22,6 +25,7 @@ export const KilocodePaths = {
   heapSnapshot: `${root}/heap/snapshot`,
   removeSkill: `${root}/skill/remove`,
   removeAgent: `${root}/agent/remove`,
+  fileActivity: `/session/:sessionID/file-activity`,
 } as const
 
 export const KilocodeApi = HttpApi.make("kilocode")
@@ -62,6 +66,18 @@ export const KilocodeApi = HttpApi.make("kilocode")
             summary: "Remove a custom agent",
             description:
               "Remove a custom (non-native) agent by deleting its markdown file from disk and refreshing state.",
+          }),
+        ),
+        HttpApiEndpoint.get("fileActivity", KilocodePaths.fileActivity, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(FileActivity.Info), "Session file activity"),
+          error: ApiNotFoundError,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.fileActivity",
+            summary: "List session file activity",
+            description: "List deterministic file reads and changes recorded for a session.",
           }),
         ),
       )

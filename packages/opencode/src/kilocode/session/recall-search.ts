@@ -1,8 +1,8 @@
 import path from "path"
-import { eq, inArray } from "drizzle-orm"
+import { and, eq, inArray } from "drizzle-orm"
 import { Database } from "@/storage/db"
 import type { MessageV2 } from "@/session/message-v2"
-import { SessionTable } from "@/session/session.sql"
+import { MessageTable, SessionTable } from "@/session/session.sql"
 import type { MessageID, PartID, SessionID } from "@/session/schema"
 import { Filesystem } from "@/util/filesystem"
 import { ProjectTable } from "@/project/project.sql"
@@ -54,13 +54,18 @@ export namespace RecallSearch {
     FROM json_each(?) AS ids
     CROSS JOIN part AS p
     CROSS JOIN message AS m
+    LEFT JOIN message AS parent ON parent.id = json_extract(m.data, '$.parentID')
     WHERE p.id = ids.value
       AND m.id = p.message_id
       AND m.session_id = p.session_id
       AND NOT (
         m.session_id = ? AND (
-          (json_extract(m.data, '$.role') = 'user' AND m.id >= ?)
-          OR (json_extract(m.data, '$.role') = 'assistant' AND json_extract(m.data, '$.parentID') >= ?)
+          (json_extract(m.data, '$.role') = 'user' AND (
+            m.time_created > ? OR (m.time_created = ? AND m.id >= ?)
+          ))
+          OR (json_extract(m.data, '$.role') = 'assistant' AND (
+            parent.time_created > ? OR (parent.time_created = ? AND parent.id >= ?)
+          ))
         )
       )
       AND (${FILTER_SQL})`
@@ -130,6 +135,7 @@ export namespace RecallSearch {
     signal?: AbortSignal
     excludeSessionID?: SessionID
     excludeFromMessageID?: MessageID
+    onlySessionID?: SessionID
   }): Promise<Output> {
     const parsed = parse(input.query)
     const limit = input.limit ?? 20
@@ -151,7 +157,9 @@ export namespace RecallSearch {
           updated: SessionTable.time_updated,
         })
         .from(SessionTable)
-        .where(inArray(SessionTable.project_id, projects))
+        .where(
+          input.onlySessionID ? eq(SessionTable.id, input.onlySessionID) : inArray(SessionTable.project_id, projects),
+        )
         .all(),
     )
     const items = new Map<SessionID, Item>()
@@ -181,10 +189,26 @@ export namespace RecallSearch {
     const sqlite = Database.Client().$client
     const rowid = sqlite.prepare<{ rowid: number | null }, []>(END_ROWID_SQL).get()?.rowid ?? 0
     const partID = sqlite.prepare<{ id: string | null }, []>(END_ID_SQL).get()?.id ?? ""
-    const statement = sqlite.prepare<Row, [string, string, string, string]>(SEARCH_SQL)
+    const statement = sqlite.prepare<Row, [string, string, number, number, string, number, number, string]>(SEARCH_SQL)
     const page = sqlite.prepare<PageRow, [string, number, number, string]>(PAGE_SQL)
     const excludeSessionID = input.excludeSessionID ?? ""
     const excludeFromMessageID = input.excludeFromMessageID ?? ""
+    const boundary =
+      input.excludeSessionID && input.excludeFromMessageID
+        ? Database.use((db) =>
+            db
+              .select({ time: MessageTable.time_created })
+              .from(MessageTable)
+              .where(
+                and(
+                  eq(MessageTable.session_id, input.excludeSessionID!),
+                  eq(MessageTable.id, input.excludeFromMessageID!),
+                ),
+              )
+              .get(),
+          )
+        : undefined
+    const excludeFromTime = boundary?.time ?? -1
     let parts = 0
 
     const consume = (row: Row) => {
@@ -222,7 +246,11 @@ export namespace RecallSearch {
         for (const row of statement.iterate(
           JSON.stringify(rows.map((entry) => entry.partID)),
           excludeSessionID,
+          excludeFromTime,
+          excludeFromTime,
           excludeFromMessageID,
+          excludeFromTime,
+          excludeFromTime,
           excludeFromMessageID,
         )) {
           consume(row)
@@ -272,12 +300,14 @@ export namespace RecallSearch {
   }
 
   export function visible(messages: MessageV2.WithParts[], messageID: MessageID) {
-    return messages.filter((message) => before(message.info, messageID))
-  }
-
-  function before(info: MessageV2.Info, messageID: MessageID) {
-    if (info.role === "user") return info.id < messageID
-    return info.parentID < messageID
+    const index = messages.findIndex((message) => message.info.id === messageID)
+    if (index < 0) return messages
+    const users = new Set(
+      messages.slice(0, index).flatMap((message) => (message.info.role === "user" ? [message.info.id] : [])),
+    )
+    return messages.filter(
+      (message, offset) => offset < index || (message.info.role === "assistant" && users.has(message.info.parentID)),
+    )
   }
 
   function family(id: string) {

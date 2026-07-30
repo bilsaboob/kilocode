@@ -148,6 +148,7 @@ function askGuard(mcp: Record<string, "allow" | "ask" | "deny"> = {}) {
     codebase_search: "allow",
     semantic_search: "allow",
     zen_search_memory: "ask",
+    zen_query_knowledge: "ask",
     external_directory: {
       [Truncate.GLOB]: "allow",
     },
@@ -203,6 +204,7 @@ function planGuard(worktree: string, mcp: Record<string, "allow" | "ask" | "deny
     codebase_search: "allow",
     semantic_search: "allow",
     zen_search_memory: "ask",
+    zen_query_knowledge: "ask",
     external_directory: {
       [Truncate.GLOB]: "allow",
       [path.join(Global.Path.data, "plans", "*")]: "allow",
@@ -230,7 +232,12 @@ export interface KiloData {
 // Prepare kilo-specific data derived from config. Call once per state initialization.
 export function prepare(cfg: Config.Info): KiloData {
   const mcpRules = getMcpRules(cfg)
-  const defaultsPatch = Permission.fromConfig({ bash, recall: "ask", zen_search_memory: "ask" })
+  const defaultsPatch = Permission.fromConfig({
+    bash,
+    recall: "ask",
+    zen_search_memory: "ask",
+    zen_query_knowledge: "ask",
+  })
   return { mcpRules, defaultsPatch }
 }
 
@@ -344,8 +351,12 @@ export function patchAgents(
       permission: Permission.merge(
         defaults,
         agents.build.permission,
+        Permission.fromConfig({
+          semantic_search: "allow",
+          zen_search_memory: "ask",
+          zen_query_knowledge: "ask",
+        }),
         user,
-        Permission.fromConfig({ semantic_search: "allow", zen_search_memory: "ask" }),
       ),
     }
     delete agents.build
@@ -384,6 +395,7 @@ export function patchAgents(
           codebase_search: "allow",
           semantic_search: "allow",
           zen_search_memory: "ask",
+          zen_query_knowledge: "ask",
           read: "allow",
           external_directory: {
             // Mirror upstream explore's shape: the outer "*": "deny" above wins
@@ -417,6 +429,7 @@ export function patchAgents(
         plan_enter: "allow",
         semantic_search: "allow",
         zen_search_memory: "ask",
+        zen_query_knowledge: "ask",
       }),
       user,
     ),
@@ -448,6 +461,7 @@ export function patchAgents(
         websearch: "allow",
         codebase_search: "allow",
         zen_search_memory: "ask",
+        zen_query_knowledge: "ask",
         external_directory: {
           [Truncate.GLOB]: "allow",
         },

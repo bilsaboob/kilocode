@@ -193,6 +193,8 @@ describe("kilocode tool registry indexing", () => {
     const prev = process.env["KILO_CLIENT"]
     const url = process.env["ZEN_MEMORY_TOOL_URL"]
     const token = process.env["ZEN_MEMORY_TOOL_TOKEN"]
+    const knowledgeUrl = process.env["ZEN_KNOWLEDGE_TOOL_URL"]
+    const knowledgeToken = process.env["ZEN_KNOWLEDGE_TOOL_TOKEN"]
     const def = (id: string): Tool.Def => ({
       id,
       description: id,
@@ -206,10 +208,15 @@ describe("kilocode tool registry indexing", () => {
       manager: def("agent_manager"),
       process: def("background_process"),
       memory: def("zen_search_memory"),
+      knowledge: def("zen_query_knowledge"),
     }
 
     try {
       process.env["KILO_CLIENT"] = "cli"
+      delete process.env["ZEN_MEMORY_TOOL_URL"]
+      delete process.env["ZEN_MEMORY_TOOL_TOKEN"]
+      delete process.env["ZEN_KNOWLEDGE_TOOL_URL"]
+      delete process.env["ZEN_KNOWLEDGE_TOOL_TOKEN"]
       expect(KiloToolRegistry.extra(tools, {}).map((tool) => tool.id)).toEqual([
         "semantic_search",
         "recall",
@@ -239,6 +246,15 @@ describe("kilocode tool registry indexing", () => {
         "recall",
         "zen_search_memory",
       ])
+
+      process.env["ZEN_KNOWLEDGE_TOOL_URL"] = "http://127.0.0.1:1"
+      process.env["ZEN_KNOWLEDGE_TOOL_TOKEN"] = "test-token"
+      expect(KiloToolRegistry.extra(tools, {}).map((tool) => tool.id)).toEqual([
+        "semantic_search",
+        "recall",
+        "zen_search_memory",
+        "zen_query_knowledge",
+      ])
     } finally {
       if (prev === undefined) delete process.env["KILO_CLIENT"]
       if (prev !== undefined) process.env["KILO_CLIENT"] = prev
@@ -246,6 +262,10 @@ describe("kilocode tool registry indexing", () => {
       if (url !== undefined) process.env["ZEN_MEMORY_TOOL_URL"] = url
       if (token === undefined) delete process.env["ZEN_MEMORY_TOOL_TOKEN"]
       if (token !== undefined) process.env["ZEN_MEMORY_TOOL_TOKEN"] = token
+      if (knowledgeUrl === undefined) delete process.env["ZEN_KNOWLEDGE_TOOL_URL"]
+      if (knowledgeUrl !== undefined) process.env["ZEN_KNOWLEDGE_TOOL_URL"] = knowledgeUrl
+      if (knowledgeToken === undefined) delete process.env["ZEN_KNOWLEDGE_TOOL_TOKEN"]
+      if (knowledgeToken !== undefined) process.env["ZEN_KNOWLEDGE_TOOL_TOKEN"] = knowledgeToken
     }
   })
 

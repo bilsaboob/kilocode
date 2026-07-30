@@ -40,6 +40,7 @@ function infos() {
     manager: info("agent_manager"),
     process: info("background_process"),
     memory: info("zen_search_memory"),
+    knowledge: info("zen_query_knowledge"),
   }
 }
 

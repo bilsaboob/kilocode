@@ -4,6 +4,7 @@ import { RecallTool } from "../../tool/recall"
 import { AgentManagerTool } from "./agent-manager"
 import { BackgroundProcessTool } from "./background-process"
 import { ZenMemoryTool } from "./zen-memory"
+import { ZenKnowledgeTool } from "./zen-knowledge"
 import * as Tool from "../../tool/tool"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Effect } from "effect"
@@ -39,14 +40,22 @@ export namespace KiloToolRegistry {
       const manager = yield* AgentManagerTool
       const process = yield* BackgroundProcessTool
       const memory = yield* ZenMemoryTool
-      return { codebase, recall, manager, process, memory }
+      const knowledge = yield* ZenKnowledgeTool
+      return { codebase, recall, manager, process, memory, knowledge }
     })
   }
 
   /** Finalize Kilo-specific tools into Tool.Defs. Call this inside the InstanceState state Effect —
    * it has no Service deps beyond what Tool.init itself needs. */
   export function build(
-    tools: { codebase: Tool.Info; recall: Tool.Info; manager: Tool.Info; process: Tool.Info; memory: Tool.Info },
+    tools: {
+      codebase: Tool.Info
+      recall: Tool.Info
+      manager: Tool.Info
+      process: Tool.Info
+      memory: Tool.Info
+      knowledge: Tool.Info
+    },
     deps: Deps,
     loaders: Loaders = {},
   ) {
@@ -57,6 +66,7 @@ export namespace KiloToolRegistry {
         manager: Tool.init(tools.manager),
         process: Tool.init(tools.process),
         memory: Tool.init(tools.memory),
+        knowledge: Tool.init(tools.knowledge),
       })
       const semantic = yield* semanticTool(deps, loaders)
       return { ...base, semantic }
@@ -109,6 +119,7 @@ export namespace KiloToolRegistry {
       manager: Tool.Def
       process: Tool.Def
       memory: Tool.Def
+      knowledge: Tool.Def
     },
     cfg: { experimental?: { codebase_search?: boolean } },
   ): Tool.Def[] {
@@ -117,6 +128,7 @@ export namespace KiloToolRegistry {
       ...(cfg.experimental?.codebase_search === true ? [tools.codebase] : []),
       tools.recall,
       ...(memory() ? [tools.memory] : []),
+      ...(knowledge() ? [tools.knowledge] : []),
       ...(Flag.KILO_CLIENT === "cli" || Flag.KILO_CLIENT === "vscode" ? [tools.process] : []),
       // The extension is the only client that can consume the Agent Manager start event.
       ...(Flag.KILO_CLIENT === "vscode" ? [tools.manager] : []),
@@ -133,5 +145,9 @@ export namespace KiloToolRegistry {
 
   export function memory() {
     return Boolean(process.env.ZEN_MEMORY_TOOL_URL?.trim() && process.env.ZEN_MEMORY_TOOL_TOKEN?.trim())
+  }
+
+  export function knowledge() {
+    return Boolean(process.env.ZEN_KNOWLEDGE_TOOL_URL?.trim() && process.env.ZEN_KNOWLEDGE_TOOL_TOKEN?.trim())
   }
 }

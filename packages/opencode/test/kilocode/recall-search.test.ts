@@ -19,20 +19,21 @@ function add(
   sessionID: SessionID,
   role: "user" | "assistant",
   data: Stored<MessageV2.Part>,
-  opts?: { parentID?: MessageID },
+  opts?: { parentID?: MessageID; messageID?: MessageID; created?: number },
 ) {
-  const messageID = MessageID.ascending()
+  const messageID = opts?.messageID ?? MessageID.ascending()
+  const created = opts?.created ?? Date.now()
   const message: Stored<MessageV2.Info> =
     role === "user"
       ? {
           role,
-          time: { created: Date.now() },
+          time: { created },
           agent: "code",
           model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
         }
       : {
           role,
-          time: { created: Date.now(), completed: Date.now() },
+          time: { created, completed: created },
           parentID: opts?.parentID ?? MessageID.ascending(),
           modelID: ModelID.make("test"),
           providerID: ProviderID.make("test"),
@@ -45,11 +46,9 @@ function add(
         }
   const partID = PartID.ascending()
   Database.use((db) => {
-    db.insert(MessageTable)
-      .values({ id: messageID, session_id: sessionID, time_created: Date.now(), data: message })
-      .run()
+    db.insert(MessageTable).values({ id: messageID, session_id: sessionID, time_created: created, data: message }).run()
     db.insert(PartTable)
-      .values({ id: partID, message_id: messageID, session_id: sessionID, time_created: Date.now(), data })
+      .values({ id: partID, message_id: messageID, session_id: sessionID, time_created: created, data })
       .run()
   })
   return { messageID, partID }
@@ -164,6 +163,56 @@ describe("RecallSearch", () => {
           excludeFromMessageID: active.messageID,
         })
         expect(current.results).toEqual([])
+      },
+    })
+  })
+
+  test("uses chronological turn boundaries for mixed client and Kilo message IDs", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideTestInstance({
+      directory: tmp.path,
+      fn: async () => {
+        const sessions = await Effect.runPromise(Session.Service.pipe(Effect.provide(Session.defaultLayer)))
+        const session = await Effect.runPromise(sessions.create({ title: "Mixed IDs" }))
+        const first = MessageID.make("msg_45ef567b57a4470b84cba7e6a12a5687")
+        const reply = MessageID.make("msg_fad63cd80001CpQ75BxCmWE17R")
+        const boundary = MessageID.make("msg_bcda18f36ec14cd181a9257fd4f1863a")
+        const last = MessageID.make("msg_fad755400001N7d6OK7CqMIsFR")
+        add(session.id, "user", { type: "text", text: "engine analysis" }, { messageID: first, created: 1 })
+        add(
+          session.id,
+          "assistant",
+          { type: "text", text: "prior-assistant-needle" },
+          { messageID: reply, parentID: first, created: 2 },
+        )
+        add(session.id, "user", { type: "text", text: "resume now" }, { messageID: boundary, created: 3 })
+        add(
+          session.id,
+          "assistant",
+          { type: "text", text: "future-assistant-needle" },
+          { messageID: last, parentID: boundary, created: 4 },
+        )
+
+        const messages = await Effect.runPromise(sessions.messages({ sessionID: session.id }))
+        expect(RecallSearch.visible(messages, boundary).map((message) => message.info.id)).toEqual([first, reply])
+        const prior = await RecallSearch.search({
+          query: "prior-assistant-needle",
+          projectID: Instance.project.id,
+          directories: [Instance.worktree],
+          onlySessionID: session.id,
+          excludeSessionID: session.id,
+          excludeFromMessageID: boundary,
+        })
+        const future = await RecallSearch.search({
+          query: "future-assistant-needle",
+          projectID: Instance.project.id,
+          directories: [Instance.worktree],
+          onlySessionID: session.id,
+          excludeSessionID: session.id,
+          excludeFromMessageID: boundary,
+        })
+        expect(prior.results.map((item) => item.id)).toEqual([session.id])
+        expect(future.results).toEqual([])
       },
     })
   })

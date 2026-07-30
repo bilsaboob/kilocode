@@ -11,6 +11,10 @@ import { InstanceStore } from "@/project/instance-store"
 import { InstanceHttpApi } from "@/server/routes/instance/httpapi/api"
 import { Skill } from "@/skill"
 import { RemoveAgentPayload, RemoveSkillPayload } from "../groups/kilocode"
+import { FileActivity } from "@/kilocode/file-activity"
+import { Session } from "@/session/session"
+import { SessionID } from "@/session/schema"
+import * as SessionError from "@/server/routes/instance/httpapi/handlers/session-errors"
 
 export const kilocodeHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilocode", (handlers) =>
   Effect.gen(function* () {
@@ -18,6 +22,8 @@ export const kilocodeHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilocode"
     const skills = yield* Skill.Service
     const config = yield* Config.Service
     const store = yield* InstanceStore.Service
+    const activity = yield* FileActivity.Service
+    const sessions = yield* Session.Service
 
     const heapSnapshot = Effect.fn("KilocodeHttpApi.heapSnapshot")(function* () {
       return yield* Effect.sync(() => HeapSnapshot.write())
@@ -49,9 +55,17 @@ export const kilocodeHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilocode"
       return true
     })
 
+    const fileActivity = Effect.fn("KilocodeHttpApi.fileActivity")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* SessionError.mapStorageNotFound(sessions.get(ctx.params.sessionID))
+      return yield* activity.list(ctx.params.sessionID)
+    })
+
     return handlers
       .handle("heapSnapshot", heapSnapshot)
       .handle("removeSkill", removeSkill)
       .handle("removeAgent", removeAgent)
+      .handle("fileActivity", fileActivity)
   }),
 )

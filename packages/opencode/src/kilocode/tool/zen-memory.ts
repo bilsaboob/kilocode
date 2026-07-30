@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import * as Tool from "../../tool/tool"
 import { RecallSearch } from "../session/recall-search"
+import { KiloSessionRecovery } from "../session/recovery"
 import DESCRIPTION from "./zen-memory.txt"
 
 const Parameters = Schema.Struct({
@@ -79,11 +80,18 @@ async function search(params: Params, ctx: Tool.Context) {
     throw new Error("Zen memory search is unavailable. Start Kilo from Zen so the memory tool bridge is configured.")
   if (!params.query.trim()) throw new Error("The 'query' parameter is required.")
 
+  const scoped = scope(params, ctx)
   await ctx.ask({
     permission: "zen_search_memory",
     patterns: ["search"],
     always: ["search"],
-    metadata: { query: params.query, projectID: params.projectID, featureID: params.featureID, taskID: params.taskID },
+    metadata: {
+      query: scoped.query,
+      projectID: scoped.projectID,
+      featureID: scoped.featureID,
+      taskID: scoped.taskID,
+      sessionID: scoped.sessionID,
+    },
   })
 
   const url = new URL("/search", cfg.url)
@@ -93,7 +101,7 @@ async function search(params: Params, ctx: Tool.Context) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${cfg.token}`,
     },
-    body: JSON.stringify({ ...params, limit: limit(params.limit) }),
+    body: JSON.stringify({ ...scoped, limit: limit(scoped.limit) }),
     signal: ctx.abort,
   })
   if (!response.ok) throw new Error(`Zen memory search failed: ${response.status} ${await response.text()}`)
@@ -113,6 +121,12 @@ async function search(params: Params, ctx: Tool.Context) {
     output: RecallSearch.inert(format(rows)),
     metadata: { results: rows.length },
   }
+}
+
+export function scope(params: Params, ctx: Pick<Tool.Context, "messages" | "sessionID">): Params {
+  return KiloSessionRecovery.current(ctx.messages)
+    ? { ...params, sessionID: ctx.sessionID, includeGlobal: false }
+    : params
 }
 
 function endpoint() {

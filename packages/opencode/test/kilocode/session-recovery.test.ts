@@ -80,6 +80,73 @@ function auto(sessionID: SessionID, token: number) {
 }
 
 describe("automatic session recovery", () => {
+  test("detects narrow manual resume phrases without matching explicit targets", () => {
+    for (const text of [
+      "resume",
+      "RESUME!!!",
+      "resume where you left off",
+      "resume from where you were interrupted",
+      "please resume where the response unexpectedly aborted",
+    ]) {
+      expect(KiloSessionRecovery.intent(text)).toBe(true)
+    }
+    for (const text of [
+      "resume project design generation",
+      "resume feature feat_123",
+      "add a resume upload button",
+      "review my resume",
+      "resume the download after reconnecting",
+    ]) {
+      expect(KiloSessionRecovery.intent(text)).toBe(false)
+    }
+  })
+
+  test("builds a current-session anchor with file and unfinished tool evidence", () => {
+    const prompt = user(sessions[0], "Analyze the game engine runtime")
+    const reply = assistant({ sessionID: sessions[0], parentID: prompt.info.id })
+    const call = {
+      id: PartID.ascending(),
+      sessionID: sessions[0],
+      messageID: reply.id,
+      type: "tool",
+      callID: "call_pending",
+      tool: "read",
+      state: { status: "running", input: { filePath: "runtime.ts" }, time: { start: 1 } },
+    } as MessageV2.ToolPart
+    const anchor = KiloSessionRecovery.anchor({
+      sessionID: sessions[0],
+      resumeMessageID: MessageID.ascending(),
+      messages: [prompt, { info: reply, parts: [call] }],
+      activity: [
+        {
+          messageID: reply.id,
+          path: "D:/ws/project/runtime.ts",
+          action: "modified",
+          time: { created: 2 },
+        },
+        {
+          messageID: prompt.info.id,
+          path: "D:/ws/project/design.json",
+          action: "read",
+          time: { created: 1 },
+        },
+      ],
+      shared: new Map([["D:/ws/project/runtime.ts", [sessions[1]]]]),
+    })
+
+    expect(anchor).toMatchObject({
+      sessionID: sessions[0],
+      userMessageID: prompt.info.id,
+      assistantMessageID: reply.id,
+      topic: "Analyze the game engine runtime",
+      modified: ["D:/ws/project/runtime.ts"],
+      read: ["D:/ws/project/design.json"],
+      shared: [{ path: "D:/ws/project/runtime.ts", sessionIDs: [sessions[1]] }],
+    })
+    expect(anchor.unfinished).toEqual([{ callID: "call_pending", tool: "read", status: "running" }])
+    expect(KiloSessionRecovery.system(undefined, anchor)).toContain(`continuation of session ${sessions[0]} only`)
+  })
+
   test("recognizes terminal interruptions without retrying user aborts or auth errors", () => {
     const base = failure()
     expect(KiloSessionRecovery.interrupted(base.reply)).toBe(true)
@@ -253,6 +320,13 @@ describe("automatic session recovery", () => {
     expect(source?.model.modelID).toBe(ModelID.make("gpt-5.6-sol"))
     expect(source?.model.variant).toBe("high")
     expect(source?.system).toBe("project context")
-    expect(KiloSessionRecovery.text(decision?.topic ?? "")).toContain("existing chat history and tool results only")
+    expect(
+      KiloSessionRecovery.text({
+        sessionID: sessions[0],
+        topic: decision?.topic ?? "",
+        userMessageID: failed.prompt.info.id,
+        assistantMessageID: failed.reply.id,
+      }),
+    ).toContain("existing chat history and tool results only")
   })
 })

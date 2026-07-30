@@ -21,6 +21,7 @@ import { sandboxHandlers } from "./handlers/sandbox"
 import { sessionImportHandlers } from "./handlers/session-import"
 import { suggestionHandlers } from "./handlers/suggestion"
 import { telemetryHandlers } from "./handlers/telemetry"
+import { FileActivity } from "@/kilocode/file-activity"
 
 export const provide = Layer.provide([
   agentBuilderHandlers,
@@ -31,7 +32,7 @@ export const provide = Layer.provide([
   enhancePromptHandlers,
   indexingHandlers,
   kiloGatewayHandlers,
-  kilocodeHandlers,
+  kilocodeHandlers.pipe(Layer.provide(FileActivity.defaultLayer)),
   networkHandlers,
   remoteHandlers,
   sandboxHandlers,

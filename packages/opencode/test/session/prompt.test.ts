@@ -574,6 +574,35 @@ it.instance("automatically resumes a terminal provider error in the same session
 )
 // kilocode_change end
 
+// kilocode_change start - short manual resume prompts receive a current-session anchor
+it.instance("anchors a manual resume to the current session transcript", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const anchor = yield* user(chat.id, "Analyze the old game engine runtime")
+    yield* llm.text("continued current-session analysis")
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      parts: [{ type: "text", text: "resume where you were interrupted" }],
+    })
+
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const resumed = messages.findLast((message) => message.info.role === "user")
+    if (!resumed || resumed.info.role !== "user") throw new Error("expected resumed user message")
+    const text = resumed.parts.find((part) => part.type === "text")
+    expect(text?.type === "text" ? text.metadata?.session_resume : undefined).toBe(true)
+    expect(text?.type === "text" ? text.metadata?.anchor_user_message_id : undefined).toBe(anchor.id)
+    expect(resumed.info.system).toContain(`<kilo-session-resume>`)
+    expect(resumed.info.system).toContain(`continuation of session ${chat.id} only`)
+    expect(resumed.info.system).toContain("Analyze the old game engine runtime")
+  }),
+)
+// kilocode_change end
+
 // kilocode_change start - replacement prompts unblock pending Question service requests
 noLLMServer.instance(
   "new prompt dismisses a pending question",
