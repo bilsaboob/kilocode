@@ -15033,6 +15033,83 @@
         ]
       }
     },
+    "/session/{sessionID}/file-activity": {
+      "get": {
+        "tags": ["kilocode"],
+        "operationId": "session.fileActivity",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses.*"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session file activity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KiloFileActivity"
+                  },
+                  "description": "Session file activity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "List deterministic file reads and changes recorded for a session.",
+        "summary": "List session file activity",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.session.fileActivity({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/network": {
       "get": {
         "tags": ["network"],
@@ -24196,6 +24273,54 @@
           }
         },
         "required": ["_tag"],
+        "additionalProperties": false
+      },
+      "KiloFileActivityTool": {
+        "type": "string",
+        "enum": ["read", "write", "edit", "apply_patch"]
+      },
+      "KiloFileActivityAction": {
+        "type": "string",
+        "enum": ["read", "created", "modified", "deleted"]
+      },
+      "KiloFileActivity": {
+        "type": "object",
+        "properties": {
+          "sessionID": {
+            "type": "string",
+            "pattern": "^ses"
+          },
+          "messageID": {
+            "type": "string"
+          },
+          "partID": {
+            "type": "string"
+          },
+          "callID": {
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/components/schemas/KiloFileActivityTool"
+          },
+          "path": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/KiloFileActivityAction"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["sessionID", "messageID", "partID", "callID", "tool", "path", "action", "time"],
         "additionalProperties": false
       },
       "KilocodeSessionImportResult": {

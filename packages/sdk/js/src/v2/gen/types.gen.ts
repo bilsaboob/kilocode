@@ -2426,6 +2426,23 @@ export type EffectHttpApiErrorServiceUnavailable = {
   _tag: "ServiceUnavailable"
 }
 
+export type KiloFileActivityTool = "read" | "write" | "edit" | "apply_patch"
+
+export type KiloFileActivityAction = "read" | "created" | "modified" | "deleted"
+
+export type KiloFileActivity = {
+  sessionID: string
+  messageID: string
+  partID: string
+  callID: string
+  tool: KiloFileActivityTool
+  path: string
+  action: KiloFileActivityAction
+  time: {
+    created: number
+  }
+}
+
 export type KilocodeSessionImportResult = {
   ok: boolean
   id: string
@@ -10630,6 +10647,40 @@ export type KilocodeRemoveAgentResponses = {
 }
 
 export type KilocodeRemoveAgentResponse = KilocodeRemoveAgentResponses[keyof KilocodeRemoveAgentResponses]
+
+export type SessionFileActivityData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/file-activity"
+}
+
+export type SessionFileActivityErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionFileActivityError = SessionFileActivityErrors[keyof SessionFileActivityErrors]
+
+export type SessionFileActivityResponses = {
+  /**
+   * Session file activity
+   */
+  200: Array<KiloFileActivity>
+}
+
+export type SessionFileActivityResponse = SessionFileActivityResponses[keyof SessionFileActivityResponses]
 
 export type NetworkListData = {
   body?: never
