@@ -96,6 +96,7 @@ export namespace KiloSnapshotTrack {
 
   export const TIMEOUT_MS = duration("KILO_SNAPSHOT_TRACK_TIMEOUT_MS", 10_000)
   export const TURN_TIMEOUT_MS = duration("KILO_SNAPSHOT_TURN_TIMEOUT_MS", 120_000)
+  export const WAIT_TIMEOUT_MS = duration("KILO_SNAPSHOT_WAIT_TIMEOUT_MS", 600_000)
 
   // Wire values — also function as i18n keys via `labelKey`/`headerKey`.
   // The backend matches replies on `label`, so the canonical English strings

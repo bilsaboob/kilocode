@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
-import { Effect, Exit, Layer } from "effect"
+import { Effect, Exit, Layer, Schema } from "effect"
 import type { Tool as AITool, ToolExecutionOptions } from "ai"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Global } from "@opencode-ai/core/global"
@@ -44,7 +44,7 @@ const agent: Agent.Info = {
 }
 const approvals: Permission.AskInput[] = []
 
-function session(directory: string): Session.Info {
+function session(directory: string, knowledge?: Session.Info["knowledge"]): Session.Info {
   return {
     id: sessionID,
     slug: "sandbox-session-tools",
@@ -53,6 +53,7 @@ function session(directory: string): Session.Info {
     title: "Sandbox worktree isolation",
     version: "test",
     permission: Permission.fromConfig({ "*": "allow" }),
+    knowledge,
     time: { created: 0, updated: 0 },
   }
 }
@@ -140,7 +141,16 @@ const registry = Layer.effect(
   Effect.gen(function* () {
     const write = yield* WriteTool.pipe(Effect.flatMap(Tool.init))
     const shell = yield* ShellTool.pipe(Effect.flatMap(Tool.init))
-    const list = [ToolNetwork.builtin(write), ToolNetwork.builtin(shell)]
+    const knowledge = ["zen_query_knowledge", "zen_discover_knowledge", "zen_inspect_entity", "zen_read_source"].map(
+      (id): Tool.Def =>
+        ToolNetwork.builtin({
+          id,
+          description: "Knowledge",
+          parameters: Schema.Struct({}),
+          execute: () => Effect.succeed({ title: "Knowledge", output: "Knowledge", metadata: {} }),
+        }),
+    )
+    const list = [ToolNetwork.builtin(write), ToolNetwork.builtin(shell), ...knowledge]
     return ToolRegistry.Service.of({
       ids: () => Effect.succeed(list.map((item) => item.id)),
       all: () => Effect.succeed(list),
@@ -152,11 +162,11 @@ const registry = Layer.effect(
 const it = testEffect(registry)
 const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") ? it.live : it.live.skip
 
-function resolve(ctx: InstanceContext) {
+function resolve(ctx: InstanceContext, knowledge?: Session.Info["knowledge"]) {
   return SessionTools.resolve({
     agent,
     model,
-    session: session(ctx.directory),
+    session: session(ctx.directory, knowledge),
     processor: {
       message: message(ctx),
       metadata: () => Effect.void,
@@ -171,6 +181,29 @@ function resolve(ctx: InstanceContext) {
     },
   }).pipe(Effect.provideService(InstanceRef, ctx))
 }
+
+it.instance("hides Knowledge tools without effective session scopes", () =>
+  Effect.gen(function* () {
+    const dirs = yield* fixture()
+    const hidden = yield* resolve(dirs.ctx)
+    for (const id of ["zen_query_knowledge", "zen_discover_knowledge", "zen_inspect_entity", "zen_read_source"]) {
+      expect(hidden).not.toHaveProperty(id)
+    }
+
+    const tools = yield* resolve(dirs.ctx, {
+      scopes: [{ knowledgeBaseID: "kb_test", snapshotID: "kbs_test" }],
+      grant: "opaque-grant",
+    })
+    expect(tools).toHaveProperty("zen_query_knowledge")
+    expect(tools).toHaveProperty("zen_discover_knowledge")
+    expect(tools).toHaveProperty("zen_inspect_entity")
+    expect(tools).toHaveProperty("zen_read_source")
+
+    expect(yield* resolve(dirs.ctx, { scopes: [{ knowledgeBaseID: "kb_test" }] })).not.toHaveProperty(
+      "zen_query_knowledge",
+    )
+  }),
+)
 
 function call(tool: AITool, input: unknown, id: string) {
   const options: ToolExecutionOptions = {

@@ -76,6 +76,7 @@ export interface Interface {
     sessionID?: SessionID
     messageID?: MessageID
     snapshotInitialization?: KiloSnapshotTrack.SnapshotInitialization
+    initial?: boolean
   }) => Effect.Effect<string | undefined>
   // kilocode_change end
   readonly patch: (hash: string) => Effect.Effect<Patch>
@@ -900,6 +901,8 @@ export const layer: Layer.Layer<Service, never, Requirements> =
             state: guard,
             fallback: undefined,
             operation: "track",
+            timeoutMs:
+              opts?.initial && opts.snapshotInitialization === "wait" ? KiloSnapshotTrack.WAIT_TIMEOUT_MS : undefined,
           })
         }),
         patch: Effect.fn("Snapshot.patch")(function* (hash: string) {

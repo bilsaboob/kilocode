@@ -1,5 +1,6 @@
 import { Image } from "@/image/image" // kilocode_change - classify user image validation defects
 import { KiloSessionHttpApi } from "@/kilocode/server/httpapi/session-fork" // kilocode_change
+import { SessionKnowledge } from "@/kilocode/session/knowledge" // kilocode_change
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
 import { Command } from "@/command"
@@ -200,6 +201,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ? {
             ...decoded,
             permission: decoded.permission ? [...decoded.permission] : undefined,
+            knowledge: SessionKnowledge.inherit(undefined, decoded.knowledge), // kilocode_change - mutable normalized API input
           }
         : decoded
       return yield* create({ payload })
@@ -218,9 +220,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       if (ctx.payload.title !== undefined) {
         yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title })
       }
-      if (ctx.payload.metadata !== undefined) {
-        yield* session.setMetadata({ sessionID: ctx.params.sessionID, metadata: ctx.payload.metadata })
+      // kilocode_change start - keep generic metadata and Knowledge updates atomic while preserving omitted fields
+      if (ctx.payload.metadata !== undefined || ctx.payload.knowledge !== undefined) {
+        yield* session.setMetadata({
+          sessionID: ctx.params.sessionID,
+          metadata: ctx.payload.metadata,
+          knowledge: ctx.payload.knowledge,
+        })
       }
+      // kilocode_change end
       if (ctx.payload.permission !== undefined) {
         yield* session.setPermission({
           sessionID: ctx.params.sessionID,
@@ -241,6 +249,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         session.fork({
           sessionID: ctx.params.sessionID,
           messageID: ctx.payload?.messageID,
+          knowledge: ctx.payload?.knowledge, // kilocode_change
         }),
       )
     })

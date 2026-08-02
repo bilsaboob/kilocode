@@ -134,6 +134,7 @@ export const layer = Layer.effect(
         sessionID: input.sessionID,
         messageID: input.assistantMessage.id,
         snapshotInitialization: input.snapshotInitialization,
+        initial: true,
       })
       // kilocode_change end
       const ctx: ProcessorContext = {

@@ -4,6 +4,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { makeRuntime } from "@/effect/run-service"
 import { Identifier } from "@/id/id"
 import { Instance, type InstanceContext } from "@/kilocode/instance"
+import { ChildEnv } from "@/kilocode/process/child-env"
 import { SessionID } from "@/session/schema"
 import { Shell } from "@/shell/shell"
 import { NonNegativeInt, PositiveInt, optionalOmitUndefined, withStatics } from "@opencode-ai/core/schema"
@@ -366,7 +367,7 @@ export namespace BackgroundProcess {
     delete result.KILO_SERVER_PASSWORD
     delete result.KILO_SERVER_USERNAME
     delete result.KILO_BACKGROUND_PROCESS_PORTS
-    return result
+    return ChildEnv.scrub(result)
   }
 
   function stopped(proc: ChildProcess) {

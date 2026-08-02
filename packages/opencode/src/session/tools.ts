@@ -1,5 +1,6 @@
 import { Agent } from "@/agent/agent"
 import { KiloSessionPrompt } from "@/kilocode/session/prompt" // kilocode_change
+import { SessionKnowledge } from "@/kilocode/session/knowledge" // kilocode_change
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { MCP } from "@/mcp"
@@ -76,6 +77,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     providerID: input.model.providerID,
     agent: input.agent,
   })) {
+    if (!SessionKnowledge.visible(item.id, input.session.knowledge)) continue // kilocode_change
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
       description: item.description,
@@ -117,6 +119,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   }
 
   for (const [key, item] of Object.entries(yield* mcp.tools())) {
+    if (!SessionKnowledge.visible(key, input.session.knowledge)) continue // kilocode_change
     const execute = item.execute
     if (!execute) continue
 

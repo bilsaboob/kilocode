@@ -32,6 +32,7 @@ import { Global } from "@opencode-ai/core/global"
 // kilocode_change start - Kilo session behavior extensions
 import { BackgroundProcess } from "@/kilocode/background-process"
 import { KiloSession, kiloSessionFork } from "@/kilocode/session"
+import { SessionKnowledge } from "@/kilocode/session/knowledge"
 import { SessionExport } from "@/kilocode/session-export"
 import * as SandboxPolicy from "@/kilocode/sandbox/policy"
 import { baseKey, cumulativeSessionDiff } from "@/kilocode/session-portability/cumulative-diff" // kilocode_change
@@ -59,6 +60,7 @@ type SessionRow = typeof SessionTable.$inferSelect
 type InfoRow = Omit<SessionRow, "permission"> & { permission?: Permission.Ruleset | null } // kilocode_change
 
 export function fromRow(row: InfoRow): Info {
+  const stored = SessionKnowledge.split(row.metadata ?? undefined) // kilocode_change
   const summary =
     row.summary_additions !== null || row.summary_deletions !== null || row.summary_files !== null
       ? {
@@ -100,7 +102,8 @@ export function fromRow(row: InfoRow): Info {
       },
     },
     share,
-    metadata: row.metadata ?? undefined,
+    metadata: stored.metadata, // kilocode_change - expose reserved Knowledge metadata as a first-class field
+    knowledge: stored.knowledge, // kilocode_change
     revert,
     permission: row.permission ? [...row.permission] : undefined,
     time: {
@@ -130,7 +133,7 @@ export function toRow(info: Info) {
     summary_deletions: info.summary?.deletions,
     summary_files: info.summary?.files,
     summary_diffs: info.summary?.diffs,
-    metadata: info.metadata,
+    metadata: SessionKnowledge.merge(info.metadata, info.knowledge), // kilocode_change - persist Knowledge in metadata column
     cost: info.cost ?? 0,
     tokens_input: (info.tokens ?? EmptyTokens).input,
     tokens_output: (info.tokens ?? EmptyTokens).output,
@@ -226,6 +229,7 @@ export const Info = Schema.Struct({
   model: optionalOmitUndefined(Model),
   version: Schema.String,
   metadata: optionalOmitUndefined(Metadata),
+  knowledge: optionalOmitUndefined(SessionKnowledge.Info), // kilocode_change
   time: Time,
   permission: optionalOmitUndefined(Permission.Ruleset),
   revert: optionalOmitUndefined(Revert),
@@ -253,6 +257,7 @@ export const CreateInput = Schema.optional(
     agent: Schema.optional(Schema.String),
     model: Schema.optional(Model),
     metadata: Schema.optional(Metadata),
+    knowledge: Schema.optional(SessionKnowledge.Info), // kilocode_change
     permission: Schema.optional(Permission.Ruleset),
     platform: Schema.optional(Schema.String), // kilocode_change - per-session platform override for telemetry attribution
     workspaceID: Schema.optional(WorkspaceID),
@@ -263,6 +268,7 @@ export type CreateInput = Types.DeepMutable<Schema.Schema.Type<typeof CreateInpu
 export const ForkInput = Schema.Struct({
   sessionID: SessionID,
   messageID: Schema.optional(MessageID),
+  knowledge: Schema.optional(SessionKnowledge.Info), // kilocode_change - allow explicit narrowing or clearing
 })
 export const GetInput = SessionID
 export const ChildrenInput = SessionID
@@ -274,7 +280,10 @@ export const SetArchivedInput = Schema.Struct({
 })
 export const SetMetadataInput = Schema.Struct({
   sessionID: SessionID,
-  metadata: Metadata,
+  // kilocode_change start - update generic metadata and first-class Knowledge atomically
+  metadata: Schema.optional(Metadata),
+  knowledge: Schema.optional(SessionKnowledge.Info),
+  // kilocode_change end
 })
 export const SetPermissionInput = Schema.Struct({
   sessionID: SessionID,
@@ -488,11 +497,16 @@ export interface Interface {
     agent?: string
     model?: Schema.Schema.Type<typeof Model>
     metadata?: typeof Metadata.Type
+    knowledge?: SessionKnowledge.Info // kilocode_change
     permission?: Permission.Ruleset
     platform?: string // kilocode_change - per-session platform override for telemetry attribution
     workspaceID?: WorkspaceID
   }) => Effect.Effect<Info>
-  readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
+  readonly fork: (input: {
+    sessionID: SessionID
+    messageID?: MessageID
+    knowledge?: SessionKnowledge.Info // kilocode_change
+  }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
@@ -600,6 +614,7 @@ export const layer: Layer.Layer<
       directory: string
       path?: string
       metadata?: typeof Metadata.Type
+      knowledge?: SessionKnowledge.Mutable // kilocode_change
       permission?: Permission.Ruleset
       platform?: string // kilocode_change - per-session platform override for telemetry attribution
     }) {
@@ -616,7 +631,8 @@ export const layer: Layer.Layer<
         title: input.title ?? createDefaultTitle(!!input.parentID),
         agent: input.agent,
         model: input.model,
-        metadata: input.metadata,
+        metadata: SessionKnowledge.split(input.metadata).metadata, // kilocode_change - reserve Knowledge metadata key
+        knowledge: input.knowledge, // kilocode_change
         permission: input.permission ? Permission.merge(input.permission) : undefined, // kilocode_change - compact duplicate permission rules on write
         cost: 0,
         tokens: EmptyTokens,
@@ -625,7 +641,7 @@ export const layer: Layer.Layer<
           updated: Date.now(),
         },
       }
-      log.info("created", result)
+      log.info("created", SessionKnowledge.logged(result)) // kilocode_change - never log opaque Knowledge grants
 
       // kilocode_change start - register attribution before session.created subscribers run
       KiloSession.register({ id: result.id, parentID: result.parentID, platform: input.platform })
@@ -788,12 +804,19 @@ export const layer: Layer.Layer<
       agent?: string
       model?: Schema.Schema.Type<typeof Model>
       metadata?: typeof Metadata.Type
+      knowledge?: SessionKnowledge.Info // kilocode_change
       permission?: Permission.Ruleset
       platform?: string // kilocode_change - per-session platform override for telemetry attribution
       workspaceID?: WorkspaceID
     }) {
       const ctx = yield* InstanceState.context
       const workspace = yield* InstanceState.workspaceID
+      // kilocode_change start - child sessions inherit Knowledge unless the caller explicitly narrows or clears it
+      const parent = input?.parentID
+        ? yield* get(input.parentID).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        : undefined
+      const knowledge = SessionKnowledge.inherit(parent?.knowledge, input?.knowledge)
+      // kilocode_change end
       const session = yield* createNext({
         parentID: input?.parentID,
         directory: ctx.directory,
@@ -802,6 +825,7 @@ export const layer: Layer.Layer<
         agent: input?.agent,
         model: input?.model,
         metadata: input?.metadata,
+        knowledge, // kilocode_change
         permission: input?.permission,
         platform: input?.platform, // kilocode_change
         workspaceID: input?.workspaceID ?? workspace,
@@ -809,7 +833,11 @@ export const layer: Layer.Layer<
       return session
     })
 
-    const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+    const fork = Effect.fn("Session.fork")(function* (input: {
+      sessionID: SessionID
+      messageID?: MessageID
+      knowledge?: SessionKnowledge.Info // kilocode_change
+    }) {
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
@@ -819,6 +847,7 @@ export const layer: Layer.Layer<
         workspaceID: original.workspaceID,
         title,
         metadata: structuredClone(original.metadata),
+        knowledge: SessionKnowledge.inherit(original.knowledge, input.knowledge), // kilocode_change
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
@@ -883,7 +912,16 @@ export const layer: Layer.Layer<
     })
 
     const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
-      yield* patch(input.sessionID, { metadata: input.metadata, time: { updated: Date.now() } })
+      // kilocode_change start - preserve whichever metadata surface was omitted and store both atomically
+      const current = yield* get(input.sessionID).pipe(Effect.orDie)
+      const metadata = input.metadata === undefined ? current.metadata : input.metadata
+      const knowledge =
+        input.knowledge === undefined ? current.knowledge : SessionKnowledge.inherit(current.knowledge, input.knowledge)
+      yield* patch(input.sessionID, {
+        metadata: SessionKnowledge.merge(metadata, knowledge),
+        time: { updated: Date.now() },
+      })
+      // kilocode_change end
     })
 
     const setPermission = Effect.fn("Session.setPermission")(function* (input: {

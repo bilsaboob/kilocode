@@ -1,4 +1,5 @@
 import { Permission } from "@/permission"
+import { SessionKnowledge } from "@/kilocode/session/knowledge" // kilocode_change
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Session } from "@/session/session"
@@ -47,6 +48,7 @@ export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
   metadata: Schema.optional(Session.Metadata),
+  knowledge: Schema.optional(SessionKnowledge.Info), // kilocode_change
   permission: Schema.optional(Permission.Ruleset),
   time: Schema.optional(
     Schema.Struct({

@@ -849,6 +849,16 @@ export type SnapshotSummaryFileDiff = {
   status?: "added" | "deleted" | "modified"
 }
 
+export type SessionKnowledgeScope = {
+  knowledgeBaseID: string
+  snapshotID?: string
+}
+
+export type SessionKnowledge = {
+  scopes: Array<SessionKnowledgeScope>
+  grant?: string
+}
+
 export type PermissionAction = "allow" | "deny" | "ask"
 
 export type PermissionRule = {
@@ -897,6 +907,7 @@ export type Session = {
   metadata?: {
     [key: string]: unknown
   }
+  knowledge?: SessionKnowledge
   time: {
     created: number
     updated: number
@@ -1785,6 +1796,7 @@ export type GlobalSession = {
   metadata?: {
     [key: string]: unknown
   }
+  knowledge?: SessionKnowledge
   time: {
     created: number
     updated: number
@@ -6938,6 +6950,7 @@ export type SessionCreateData = {
     metadata?: {
       [key: string]: unknown
     }
+    knowledge?: SessionKnowledge
     permission?: PermissionRuleset
     platform?: string
     workspaceID?: string
@@ -7072,6 +7085,7 @@ export type SessionUpdateData = {
     metadata?: {
       [key: string]: unknown
     }
+    knowledge?: SessionKnowledge
     permission?: PermissionRuleset
     time?: {
       archived?: number
@@ -7386,6 +7400,7 @@ export type SessionMessageResponse = SessionMessageResponses[keyof SessionMessag
 export type SessionForkData = {
   body?: {
     messageID?: string
+    knowledge?: SessionKnowledge
   }
   path: {
     sessionID: string

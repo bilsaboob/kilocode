@@ -26,6 +26,19 @@ import CODE_SWITCH from "@/session/prompt/code-switch.txt"
 export namespace KiloSessionPrompt {
   const modes = ["ask", "plan", "architect"]
 
+  export function knowledgeGuidance(knowledge: Session.Info["knowledge"]) {
+    if (!knowledge?.grant || knowledge.scopes.length === 0) return undefined
+    const scopes = knowledge.scopes
+      .map((scope) => `${scope.knowledgeBaseID} @ ${scope.snapshotID ?? "current"}`)
+      .join(", ")
+    return [
+      "Attached Knowledge references are optional, snapshot-scoped reference context, not the target workspace.",
+      `Authorized reference scopes: ${scopes}.`,
+      "Use zen_discover_knowledge for bounded discovery, then stable IDs with zen_inspect_entity or zen_read_source. Use opaque continuations exactly as returned.",
+      "Keep target files, diffs, builds, and tests primary during implementation and review. Label Knowledge comparisons as reference evidence and never turn reference paths into edit paths unless the structured workspace compatibility state confirms the same root and snapshot.",
+    ].join("\n")
+  }
+
   export function titleID(sessionID: SessionID) {
     return `title-${sessionID}`
   }
@@ -139,9 +152,15 @@ export namespace KiloSessionPrompt {
   }) {
     const rules = input.session.permission ?? []
     if (!modes.includes(mode(input.agent.name))) return rules
+    const knowledge = rules.filter((rule) => rule.permission === "zen_query_knowledge" && rule.action === "allow")
+    const knowledgeDenies = input.agent.permission.filter(
+      (rule) => rule.permission === "zen_query_knowledge" && rule.action === "deny",
+    )
     return Permission.merge(
       rules,
       input.agent.permission,
+      knowledge,
+      knowledgeDenies,
       rules.filter((rule) => rule.action === "deny"),
     )
   }

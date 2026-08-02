@@ -1774,6 +1774,8 @@ export const layer = Layer.effect(
           }
           // kilocode_change end
           const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+          const knowledge = KiloSessionPrompt.knowledgeGuidance(session.knowledge) // kilocode_change
+          if (knowledge) system.push(knowledge) // kilocode_change
           const format = lastUser.format ?? { type: "text" as const }
           if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
           const result = yield* handle.process({

@@ -7,6 +7,7 @@ import { lazy } from "@opencode-ai/core/util/lazy"
 import { Plugin } from "@/plugin"
 import { Shell } from "@/shell/shell"
 import { KiloPtySelfCommand } from "@/kilocode/pty/self-command" // kilocode_change
+import { ChildEnv } from "@/kilocode/process/child-env" // kilocode_change
 import type { Proc } from "#pty"
 import * as Log from "@opencode-ai/core/util/log"
 import { PtyID } from "./schema"
@@ -203,14 +204,14 @@ export const layer = Layer.effect(
 
       const cwd = resolved.cwd || s.dir // kilocode_change
       const shell = yield* plugin.trigger("shell.env", { cwd }, { env: {} })
-      const env = {
+      const env = ChildEnv.scrub({
         ...process.env,
         ...input.env,
         ...shell.env,
         TERM: "xterm-256color",
         KILO_TERMINAL: "1",
         KILO_PTY_ID: id, // kilocode_change
-      } as Record<string, string>
+      } as Record<string, string>) // kilocode_change - keep Zen bridge credentials out of PTYs
       // kilocode_change start
       // Don't leak the kilo server's auth credential into user shells.
       // Anything the shell forks (npm post-install scripts, `curl | bash`,

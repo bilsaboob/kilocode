@@ -1,10 +1,11 @@
 import { spawn as create } from "bun-pty"
+import { ChildEnv } from "@/kilocode/process/child-env" // kilocode_change
 import type { Opts, Proc } from "./pty"
 
 export type { Disp, Exit, Opts, Proc } from "./pty"
 
 export function spawn(file: string, args: string[], opts: Opts): Proc {
-  const pty = create(file, args, opts)
+  const pty = ChildEnv.isolated(() => create(file, args, opts)) // kilocode_change
   return {
     pid: pty.pid,
     onData(listener) {

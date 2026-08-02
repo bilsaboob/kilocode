@@ -5732,6 +5732,9 @@
                   "metadata": {
                     "type": "object"
                   },
+                  "knowledge": {
+                    "$ref": "#/components/schemas/SessionKnowledge"
+                  },
                   "permission": {
                     "$ref": "#/components/schemas/PermissionRuleset"
                   },
@@ -6061,6 +6064,9 @@
                   },
                   "metadata": {
                     "type": "object"
+                  },
+                  "knowledge": {
+                    "$ref": "#/components/schemas/SessionKnowledge"
                   },
                   "permission": {
                     "$ref": "#/components/schemas/PermissionRuleset"
@@ -6917,6 +6923,9 @@
                   "messageID": {
                     "type": "string",
                     "pattern": "^msg"
+                  },
+                  "knowledge": {
+                    "$ref": "#/components/schemas/SessionKnowledge"
                   }
                 },
                 "additionalProperties": false
@@ -19566,6 +19575,45 @@
         "required": ["additions", "deletions"],
         "additionalProperties": false
       },
+      "SessionKnowledgeScope": {
+        "type": "object",
+        "properties": {
+          "knowledgeBaseID": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "snapshotID": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": ["knowledgeBaseID"],
+        "additionalProperties": false
+      },
+      "SessionKnowledge": {
+        "type": "object",
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionKnowledgeScope"
+            },
+            "maxItems": 32
+          },
+          "grant": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^[\\x21-\\x7e]+$"
+          }
+        },
+        "required": ["scopes"],
+        "additionalProperties": false
+      },
       "PermissionAction": {
         "type": "string",
         "enum": ["allow", "deny", "ask"]
@@ -19710,6 +19758,9 @@
           },
           "metadata": {
             "type": "object"
+          },
+          "knowledge": {
+            "$ref": "#/components/schemas/SessionKnowledge"
           },
           "time": {
             "type": "object",
@@ -22291,6 +22342,9 @@
           "metadata": {
             "type": "object"
           },
+          "knowledge": {
+            "$ref": "#/components/schemas/SessionKnowledge"
+          },
           "time": {
             "type": "object",
             "properties": {
@@ -24291,10 +24345,12 @@
             "pattern": "^ses"
           },
           "messageID": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^msg"
           },
           "partID": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^prt"
           },
           "callID": {
             "type": "string"

@@ -19,6 +19,7 @@ import { ENV_FEATURE } from "@kilocode/kilo-gateway"
 import { fn } from "@/kilocode/fn"
 import { existsSync } from "fs"
 import path from "path"
+import { SessionKnowledge } from "./knowledge"
 
 export namespace KiloSession {
   const log = Log.create({ service: "session.kilo" })
@@ -438,7 +439,11 @@ export namespace KiloSession {
 }
 
 export const kiloSessionFork = fn(
-  z.object({ sessionID: toZod(SessionID), messageID: toZod(MessageID).optional() }),
+  z.object({
+    sessionID: toZod(SessionID),
+    messageID: toZod(MessageID).optional(),
+    knowledge: toZod(SessionKnowledge.Info).optional(),
+  }),
   async (input) => {
     const { AppRuntime } = await import("@/effect/app-runtime")
     return AppRuntime.runPromise(Session.Service.use((sessions) => sessions.fork(input)))

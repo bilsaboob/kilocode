@@ -20,6 +20,7 @@ import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
 import { normalizeUrls } from "@/kilocode/util/url" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
+import { ChildEnv } from "@/kilocode/process/child-env" // kilocode_change
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
@@ -453,10 +454,10 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
+      return ChildEnv.scrub({
         ...process.env,
         ...extra.env,
-      }
+      }) // kilocode_change - keep Zen bridge credentials out of model-launched shells
     })
 
     const run = Effect.fn("ShellTool.run")(function* (
