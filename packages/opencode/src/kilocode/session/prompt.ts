@@ -22,20 +22,35 @@ import { Filesystem } from "@/util/filesystem"
 import { InstanceState } from "@/effect/instance-state"
 import NATIVE_PLAN_PROMPT from "@/kilocode/session/native-plan-prompt.txt"
 import CODE_SWITCH from "@/session/prompt/code-switch.txt"
+import { SessionKnowledge } from "./knowledge"
 
 export namespace KiloSessionPrompt {
   const modes = ["ask", "plan", "architect"]
 
   export function knowledgeGuidance(knowledge: Session.Info["knowledge"]) {
     if (!knowledge?.grant || knowledge.scopes.length === 0) return undefined
-    const scopes = knowledge.scopes
-      .map((scope) => `${scope.knowledgeBaseID} @ ${scope.snapshotID ?? "current"}`)
-      .join(", ")
+    const refs = knowledge.scopes.filter(SessionKnowledge.reference)
+    const projects = knowledge.scopes.filter(SessionKnowledge.project)
     return [
-      "Attached Knowledge references are optional, snapshot-scoped reference context, not the target workspace.",
-      `Authorized reference scopes: ${scopes}.`,
-      "Use zen_discover_knowledge for bounded discovery, then stable IDs with zen_inspect_entity or zen_read_source. Use opaque continuations exactly as returned.",
-      "Keep target files, diffs, builds, and tests primary during implementation and review. Label Knowledge comparisons as reference evidence and never turn reference paths into edit paths unless the structured workspace compatibility state confirms the same root and snapshot.",
+      ...(projects.length
+        ? [
+            `Authorized target Project Intelligence scopes: ${projects.map((scope) => scope.projectID).join(", ")}.`,
+            "Project Intelligence is non-authoritative discovery for the target Project. Keep current files, diffs, builds, and tests primary, and use current repository reads before edits.",
+          ]
+        : []),
+      ...(refs.length
+        ? [
+            "Attached Knowledge references are optional, snapshot-scoped reference context, not the target workspace.",
+            `Authorized reference scopes: ${refs.map((scope) => `${scope.knowledgeBaseID} @ ${scope.snapshotID ?? "current"}`).join(", ")}.`,
+            "Use zen_discover_knowledge for bounded discovery, then stable IDs with zen_inspect_entity or zen_read_source. Use opaque continuations exactly as returned.",
+            "Label Knowledge comparisons as reference evidence and never turn reference paths into edit paths unless the structured workspace compatibility state confirms the same root and snapshot.",
+          ]
+        : []),
+      ...(projects.length && refs.length
+        ? [
+            "Keep the target Project index and external Wiki references origin-qualified; same-named paths and entities are not interchangeable.",
+          ]
+        : []),
     ].join("\n")
   }
 

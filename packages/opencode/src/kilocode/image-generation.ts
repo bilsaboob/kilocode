@@ -7,6 +7,7 @@ export const CODEX_IMAGE_MODEL = "gpt-image-2"
 export const CodexImageRequest = Schema.Struct({
   prompt: Schema.String.check(Schema.isMinLength(1)),
   quality: Schema.optional(Schema.Literals(["auto", "low", "medium", "high"])),
+  background: Schema.optional(Schema.Literals(["auto", "opaque"])),
   size: Schema.optional(Schema.String),
   images: Schema.optional(
     Schema.Array(
@@ -53,6 +54,7 @@ export async function generateCodexImage(
   if (images.length > 5)
     throw new CodexImageGenerationError("Codex image generation accepts at most five reference images.", 400)
   const quality = input.quality ?? "auto"
+  const background = input.background ?? "auto"
   const size = imageSize(input.size)
   const endpoint = images.length ? CODEX_IMAGE_EDIT_ENDPOINT : CODEX_IMAGE_ENDPOINT
   const body = images.length
@@ -62,14 +64,14 @@ export async function generateCodexImage(
         images: images.map((image) => ({
           image_url: `data:${image.mediaType};base64,${image.dataBase64.trim()}`,
         })),
-        background: "auto",
+        background,
         quality,
         size,
       }
     : {
         model: CODEX_IMAGE_MODEL,
         prompt,
-        background: "auto",
+        background,
         quality,
         size,
       }

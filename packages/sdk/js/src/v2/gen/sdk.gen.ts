@@ -6365,6 +6365,7 @@ export class CodexImage extends HeyApiClient {
       workspace?: string
       prompt?: string
       quality?: "auto" | "low" | "medium" | "high"
+      background?: "auto" | "opaque"
       size?: string
       images?: Array<{
         mediaType: string
@@ -6382,6 +6383,7 @@ export class CodexImage extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "body", key: "prompt" },
             { in: "body", key: "quality" },
+            { in: "body", key: "background" },
             { in: "body", key: "size" },
             { in: "body", key: "images" },
           ],

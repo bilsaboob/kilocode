@@ -849,10 +849,19 @@ export type SnapshotSummaryFileDiff = {
   status?: "added" | "deleted" | "modified"
 }
 
-export type SessionKnowledgeScope = {
+export type SessionKnowledgeReferenceScope = {
+  kind?: "knowledge_reference"
   knowledgeBaseID: string
   snapshotID?: string
 }
+
+export type SessionKnowledgeProjectScope = {
+  kind: "project_target_index"
+  projectID: string
+  rootIdentity: string
+}
+
+export type SessionKnowledgeScope = SessionKnowledgeReferenceScope | SessionKnowledgeProjectScope
 
 export type SessionKnowledge = {
   scopes: Array<SessionKnowledgeScope>
@@ -9496,6 +9505,7 @@ export type CodexImageGenerateData = {
   body?: {
     prompt: string
     quality?: "auto" | "low" | "medium" | "high"
+    background?: "auto" | "opaque"
     size?: string
     images?: Array<{
       mediaType: string

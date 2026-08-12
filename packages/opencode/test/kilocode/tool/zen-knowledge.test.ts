@@ -5,7 +5,7 @@ import type { Config } from "@/config/config"
 import * as KiloAgent from "@/kilocode/agent"
 import { KiloSessionPrompt } from "@/kilocode/session/prompt"
 import { KiloToolRegistry } from "@/kilocode/tool/registry"
-import { ZenKnowledgeTool } from "@/kilocode/tool/zen-knowledge"
+import { ZenDiscoverKnowledgeTool, ZenKnowledgeTool } from "@/kilocode/tool/zen-knowledge"
 import * as ToolNetwork from "@/kilocode/sandbox/network"
 import { Permission } from "@/permission"
 import { Session } from "@/session/session"
@@ -15,7 +15,11 @@ import { Truncate } from "@/tool/truncate"
 import { awaitWithTimeout, testEffect } from "../../lib/effect"
 
 const knowledge = {
-  scopes: [{ knowledgeBaseID: "kb_test" }, { knowledgeBaseID: "kb_test", snapshotID: "kbs_test" }],
+  scopes: [
+    { knowledgeBaseID: "kb_test" },
+    { knowledgeBaseID: "kb_test", snapshotID: "kbs_test" },
+    { kind: "project_target_index" as const, projectID: "prj_test", rootIdentity: "piroot_test" },
+  ],
   grant: "knowledge-grant",
 }
 const deniedID = SessionID.make("ses_zen_knowledge_denied")
@@ -79,6 +83,10 @@ function env(url: string, token = "knowledge-secret") {
 
 const init = Effect.gen(function* () {
   const info = yield* ZenKnowledgeTool
+  return yield* Tool.init(info)
+})
+const discover = Effect.gen(function* () {
+  const info = yield* ZenDiscoverKnowledgeTool
   return yield* Tool.init(info)
 })
 
@@ -404,8 +412,7 @@ describe("zen_query_knowledge", () => {
       expect(asks[0]?.patterns).toEqual(["impact"])
       expect(asks[0]?.always).toEqual(["impact"])
       expect(asks[0]?.metadata).toEqual({
-        knowledgeBaseID: "kb_test",
-        snapshotID: "kbs_test",
+        scope: { kind: "knowledge_reference", knowledgeBaseID: "kb_test", snapshotID: "kbs_test" },
         operation: "impact",
         query: "User",
         entityID: "entity_user",
@@ -441,6 +448,97 @@ describe("zen_query_knowledge", () => {
       })
     }).pipe(Effect.scoped)
   })
+
+  it.instance("authorizes and formats typed Project discovery without exposing root identity", () =>
+    Effect.gen(function* () {
+      const server = yield* serve(async (request) => {
+        const body = (await request.json()) as Record<string, unknown>
+        expect(body.scope).toEqual({ kind: "project_target_index", projectID: "prj_test" })
+        expect(request.headers.get("x-zen-knowledge-grant")).toBe(knowledge.grant)
+        return Response.json({
+          operation: "search",
+          results: [
+            {
+              id: "pientity:runtime",
+              kind: "Documentation",
+              name: "Runtime queue",
+              summary: "Indexed Project context",
+              catalog: "documentation",
+              provider: "repository_chunk_lexical",
+              status: "current",
+              documentationCandidates: [
+                {
+                  path: "docs/runtime.md",
+                  reason: "Matched current documentation",
+                  indexedHash: "abc123",
+                  state: "current",
+                  directReadRequired: false,
+                },
+              ],
+            },
+          ],
+          completeness: { complete: true },
+          origin: {
+            kind: "project_target_index",
+            projectID: "prj_test",
+            generationID: "pigen_test",
+            deltaRevision: "pirev_test",
+            checkoutProfileID: "picheck_indexed",
+            topologyFingerprint: "topology-indexed",
+            rootIdentity: "piroot_test",
+          },
+          workspace: {
+            sourceAvailable: true,
+            sourceMatchesSnapshot: true,
+            historical: false,
+            snapshotSourceSafe: false,
+            sourceRoot: process.cwd(),
+          },
+          freshness: {
+            state: "checkout_changed",
+            activity: "refreshing",
+            indexedCheckoutProfileID: "picheck_indexed",
+            currentCheckoutProfileID: "picheck_current",
+            currentRepositories: [
+              {
+                repositoryID: "pirepo_root",
+                relativeRoot: ".",
+                branchRef: "refs/heads/feature",
+                headCommit: "abcdef1234567890",
+                initialized: true,
+              },
+            ],
+            indexedFingerprint: "fingerprint",
+            currentFingerprint: "fingerprint",
+            dirty: false,
+            pendingChanges: 0,
+          },
+        })
+      })
+      yield* env(server.url.toString())
+      const tool = yield* discover
+      const asks: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+      const result = yield* tool.execute(
+        { scope: { kind: "project_target_index", projectID: "prj_test" }, query: "runtime queue" },
+        { ...ctx, ask: (request) => Effect.sync(() => asks.push(request)) },
+      )
+
+      expect(asks[0]?.metadata).toMatchObject({
+        scope: { kind: "project_target_index", projectID: "prj_test" },
+        operation: "search",
+      })
+      expect(result.output).toContain("Project: prj_test")
+      expect(result.output).toContain("Generation: pigen_test | Delta: pirev_test")
+      expect(result.output).toContain("Checkout: picheck_indexed")
+      expect(result.output).toContain("Freshness: checkout_changed | Activity: refreshing")
+      expect(result.output).toContain("Current repositories: . @ refs/heads/feature / abcdef123456")
+      expect(result.output).toContain("Documentation candidates")
+      expect(result.output).toContain("docs/runtime.md")
+      expect(result.output).toContain("Project index text is non-authoritative")
+      expect(result.output).not.toContain("piroot_test")
+      expect(JSON.stringify(result.metadata)).not.toContain("piroot_test")
+    }).pipe(Effect.scoped),
+  )
 
   it.instance("preserves exact definitions and completeness metadata", () =>
     Effect.gen(function* () {
@@ -1061,7 +1159,7 @@ describe("zen_query_knowledge", () => {
           knowledgeBaseID: "kb_test",
           operation: "search",
           query: "User",
-          catalogs: ["source_architecture", "concepts", "data_models", "features_flows", "concepts"],
+          catalogs: ["documentation", "source_architecture", "concepts", "data_models", "features_flows", "concepts"],
         },
         { knowledgeBaseID: "kb_test", operation: "search", query: "User", relationTypes: ["persisted_as"] },
         { knowledgeBaseID: "kb_test", operation: "search", query: "User", direction: "sideways" },

@@ -10,10 +10,15 @@ import { testEffect } from "../lib/effect"
 const it = testEffect(Session.defaultLayer)
 const full = {
   scopes: [
-    { knowledgeBaseID: "kb_alpha", snapshotID: "kbs_one" },
-    { knowledgeBaseID: "kb_beta", snapshotID: "kbs_two" },
+    { kind: "knowledge_reference" as const, knowledgeBaseID: "kb_alpha", snapshotID: "kbs_one" },
+    { kind: "knowledge_reference" as const, knowledgeBaseID: "kb_beta", snapshotID: "kbs_two" },
   ],
   grant: "opaque-grant",
+}
+const project = {
+  kind: "project_target_index" as const,
+  projectID: "prj_alpha",
+  rootIdentity: "piroot_0123456789abcdef",
 }
 
 describe("session Knowledge", () => {
@@ -33,7 +38,15 @@ describe("session Knowledge", () => {
     Effect.sync(() => {
       const decode = Schema.decodeUnknownSync(SessionKnowledge.Info)
       expect(decode(full)).toEqual(full)
+      expect(decode({ scopes: [{ knowledgeBaseID: "kb_legacy", snapshotID: "kbs_legacy" }] })).toEqual({
+        scopes: [{ knowledgeBaseID: "kb_legacy", snapshotID: "kbs_legacy" }],
+      })
+      expect(decode({ scopes: [project], grant: "project-grant" })).toEqual({
+        scopes: [project],
+        grant: "project-grant",
+      })
       expect(() => decode({ scopes: [{ knowledgeBaseID: "bad id" }], grant: "opaque-grant" })).toThrow()
+      expect(() => decode({ scopes: [{ ...project, rootIdentity: "bad identity" }], grant: "opaque-grant" })).toThrow()
       expect(() => decode({ scopes: [{ knowledgeBaseID: "kb_alpha" }], grant: "line\nbreak" })).toThrow()
     }),
   )
@@ -112,6 +125,67 @@ describe("session Knowledge", () => {
         knowledge: undefined,
       })
       expect(JSON.stringify(SessionKnowledge.logged({ knowledge: full }))).not.toContain(full.grant)
+    }),
+  )
+
+  it.effect("authorizes exact Project identity and keeps mixed guidance origin-qualified", () =>
+    Effect.sync(() => {
+      const mixed = { scopes: [...full.scopes, project], grant: "mixed-grant" }
+      expect(SessionKnowledge.authorizeProject(mixed, project)).toBe("mixed-grant")
+      expect(() => SessionKnowledge.authorizeProject(mixed, { ...project, projectID: "prj_other" })).toThrow(
+        "outside this session's Project scope",
+      )
+      expect(() => SessionKnowledge.authorizeProject({ scopes: [project] }, project)).toThrow("not authorized")
+      expect(SessionKnowledge.visible("zen_discover_knowledge", { scopes: [project], grant: "project-grant" })).toBe(
+        true,
+      )
+      expect(SessionKnowledge.visible("zen_discover_knowledge", { scopes: [project] })).toBe(false)
+      const guidance = KiloSessionPrompt.knowledgeGuidance(mixed)
+      expect(guidance).toContain("target Project Intelligence")
+      expect(guidance).toContain("external Wiki references")
+      expect(guidance).toContain(project.projectID)
+      expect(guidance).not.toContain(project.rootIdentity)
+      expect(guidance).not.toContain(mixed.grant)
+    }),
+  )
+
+  it.instance("prevents child and fork scope expansion while preserving Project inheritance", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const mixed = { scopes: [full.scopes[0], project], grant: "mixed-grant" }
+      const root = yield* sessions.create({ title: "project root", knowledge: mixed })
+      const inherited = yield* sessions.create({ parentID: root.id, title: "reviewer" })
+      const guessed = yield* sessions.create({
+        parentID: root.id,
+        title: "guessed",
+        knowledge: {
+          scopes: [
+            { ...project, projectID: "prj_other" },
+            { ...full.scopes[0], knowledgeBaseID: "kb_other" },
+          ],
+        },
+      })
+      const fork = yield* sessions.fork({ sessionID: root.id })
+
+      expect(inherited.knowledge).toEqual(mixed)
+      expect(fork.knowledge).toEqual(mixed)
+      expect(guessed.knowledge).toEqual({ scopes: [] })
+      expect(SessionKnowledge.effective(guessed.knowledge)).toEqual([])
+
+      yield* sessions.setMetadata({
+        sessionID: guessed.id,
+        knowledge: { scopes: [project], grant: "fresh-project-grant" },
+      })
+      expect((yield* sessions.get(guessed.id)).knowledge).toEqual({ scopes: [] })
+
+      yield* sessions.setMetadata({
+        sessionID: inherited.id,
+        knowledge: {
+          scopes: [{ ...project, projectID: "prj_other" }],
+          grant: "fresh-project-grant",
+        },
+      })
+      expect((yield* sessions.get(inherited.id)).knowledge).toEqual({ scopes: [] })
     }),
   )
 })

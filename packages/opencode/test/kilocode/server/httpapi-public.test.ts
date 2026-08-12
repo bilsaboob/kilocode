@@ -46,7 +46,11 @@ describe("Kilo PublicApi OpenAPI contract", () => {
 
   test("publishes the Codex subscription image route", () => {
     const spec = OpenApi.fromApi(PublicApi)
-    expect(spec.paths[CodexImagePaths.generate]?.post).toBeDefined()
+    const route = spec.paths[CodexImagePaths.generate]?.post
+    expect(route).toBeDefined()
+    const body = route?.requestBody as Body | undefined
+    const schema = body?.content?.["application/json"]?.schema
+    expect(schema?.properties?.background).toEqual({ type: "string", enum: ["auto", "opaque"] })
   })
 
   test("publishes the session file activity route", () => {

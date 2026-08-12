@@ -916,7 +916,11 @@ export const layer: Layer.Layer<
       const current = yield* get(input.sessionID).pipe(Effect.orDie)
       const metadata = input.metadata === undefined ? current.metadata : input.metadata
       const knowledge =
-        input.knowledge === undefined ? current.knowledge : SessionKnowledge.inherit(current.knowledge, input.knowledge)
+        input.knowledge === undefined
+          ? current.knowledge
+          : current.parentID
+            ? SessionKnowledge.inherit(current.knowledge, input.knowledge)
+            : SessionKnowledge.refresh(current.knowledge, input.knowledge) // kilocode_change - only roots may expand with a fresh signed grant
       yield* patch(input.sessionID, {
         metadata: SessionKnowledge.merge(metadata, knowledge),
         time: { updated: Date.now() },

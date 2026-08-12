@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import { Result, Schema } from "effect"
 import {
   CODEX_IMAGE_EDIT_ENDPOINT,
   CODEX_IMAGE_ENDPOINT,
   CODEX_IMAGE_MODEL,
   CodexImageGenerationError,
+  CodexImageRequest,
   generateCodexImage,
   type CodexImageFetch,
 } from "../../src/kilocode/image-generation"
@@ -53,6 +55,7 @@ describe("Codex image generation", () => {
 
     await generateCodexImage(fetcher, {
       prompt: "Match this reference",
+      background: "opaque",
       images: [{ mediaType: "image/png", dataBase64: "cmVm" }],
     })
 
@@ -61,7 +64,7 @@ describe("Codex image generation", () => {
       model: CODEX_IMAGE_MODEL,
       prompt: "Match this reference",
       images: [{ image_url: "data:image/png;base64,cmVm" }],
-      background: "auto",
+      background: "opaque",
       quality: "auto",
       size: "auto",
     })
@@ -74,12 +77,17 @@ describe("Codex image generation", () => {
       return Response.json({ created: 123, data: [{ b64_json: "cG5n" }] })
     }
 
-    await generateCodexImage(fetcher, { prompt: "Dashboard", quality: "high", size: "1920x1088" })
+    await generateCodexImage(fetcher, {
+      prompt: "Dashboard",
+      quality: "high",
+      background: "opaque",
+      size: "1920x1088",
+    })
 
     expect(JSON.parse(String(requests[0].init?.body))).toEqual({
       model: CODEX_IMAGE_MODEL,
       prompt: "Dashboard",
-      background: "auto",
+      background: "opaque",
       quality: "high",
       size: "1920x1088",
     })
@@ -87,6 +95,15 @@ describe("Codex image generation", () => {
       "multiples of 16",
     )
     expect(requests).toHaveLength(1)
+  })
+
+  test("constrains output background values", () => {
+    const accepts = (background: unknown) =>
+      Result.isSuccess(Schema.decodeUnknownResult(CodexImageRequest)({ prompt: "Dashboard", background }))
+
+    expect(accepts("auto")).toBe(true)
+    expect(accepts("opaque")).toBe(true)
+    expect(accepts("transparent")).toBe(false)
   })
 
   test("surfaces Codex errors and missing image data", async () => {

@@ -17,8 +17,13 @@ describe("session Knowledge HTTP API", () => {
           fetch: ((request: Request) => Server.Default().app.fetch(request)) as unknown as typeof fetch,
         })
         const knowledge = {
-          scopes: [{ knowledgeBaseID: "kb_alpha", snapshotID: "kbs_one" }],
+          scopes: [{ kind: "knowledge_reference" as const, knowledgeBaseID: "kb_alpha", snapshotID: "kbs_one" }],
           grant: "opaque-grant",
+        }
+        const project = {
+          kind: "project_target_index" as const,
+          projectID: "prj_alpha",
+          rootIdentity: "piroot_0123456789abcdef",
         }
         const { data: root } = await client.session.create(
           { directory: tmp.path, title: "scoped", metadata: { keep: true }, knowledge },
@@ -53,12 +58,24 @@ describe("session Knowledge HTTP API", () => {
         )
         expect(inherited.knowledge).toEqual({ scopes: [] })
 
-        const { data: restored } = await client.session.fork(
+        const { data: refused } = await client.session.fork(
           { sessionID: root.id, directory: tmp.path, knowledge },
           { throwOnError: true },
         )
-        expect(restored.knowledge).toEqual(knowledge)
+        expect(refused.knowledge).toEqual({ scopes: [] })
+
+        const mixed = { scopes: [...knowledge.scopes, project], grant: "fresh-mixed-grant" }
+        const { data: refreshed } = await client.session.update(
+          { sessionID: root.id, directory: tmp.path, knowledge: mixed },
+          { throwOnError: true },
+        )
+        expect(refreshed.knowledge).toEqual(mixed)
+        const { data: inheritedMixed } = await client.session.fork(
+          { sessionID: root.id, directory: tmp.path },
+          { throwOnError: true },
+        )
+        expect(inheritedMixed.knowledge).toEqual(mixed)
       },
     })
-  })
+  }, 15_000)
 })

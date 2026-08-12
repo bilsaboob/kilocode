@@ -12130,6 +12130,10 @@
                     "type": "string",
                     "enum": ["auto", "low", "medium", "high"]
                   },
+                  "background": {
+                    "type": "string",
+                    "enum": ["auto", "opaque"]
+                  },
                   "size": {
                     "type": "string"
                   },
@@ -19575,9 +19579,13 @@
         "required": ["additions", "deletions"],
         "additionalProperties": false
       },
-      "SessionKnowledgeScope": {
+      "SessionKnowledgeReferenceScope": {
         "type": "object",
         "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["knowledge_reference"]
+          },
           "knowledgeBaseID": {
             "type": "string",
             "minLength": 1,
@@ -19593,6 +19601,39 @@
         },
         "required": ["knowledgeBaseID"],
         "additionalProperties": false
+      },
+      "SessionKnowledgeProjectScope": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["project_target_index"]
+          },
+          "projectID": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "rootIdentity": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": ["kind", "projectID", "rootIdentity"],
+        "additionalProperties": false
+      },
+      "SessionKnowledgeScope": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/SessionKnowledgeReferenceScope"
+          },
+          {
+            "$ref": "#/components/schemas/SessionKnowledgeProjectScope"
+          }
+        ]
       },
       "SessionKnowledge": {
         "type": "object",
