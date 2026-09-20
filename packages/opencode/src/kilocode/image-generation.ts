@@ -78,7 +78,11 @@ export async function generateCodexImage(
 
   const response = await fetcher(endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      originator: "kilo",
+      "x-codex-image-turn-id": crypto.randomUUID(),
+    },
     body: JSON.stringify(body),
     signal: abort ? AbortSignal.any([abort, AbortSignal.timeout(5 * 60 * 1000)]) : AbortSignal.timeout(5 * 60 * 1000),
   })

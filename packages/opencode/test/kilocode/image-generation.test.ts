@@ -70,6 +70,28 @@ describe("Codex image generation", () => {
     })
   })
 
+  test("attributes generation and edit requests with unique image turn IDs", async () => {
+    const requests: RequestInit[] = []
+    const fetcher: CodexImageFetch = async (_, init) => {
+      requests.push(init ?? {})
+      return Response.json({ created: 123, data: [{ b64_json: "cG5n" }] })
+    }
+
+    await generateCodexImage(fetcher, { prompt: "Generate an image" })
+    await generateCodexImage(fetcher, {
+      prompt: "Edit an image",
+      images: [{ mediaType: "image/png", dataBase64: "cmVm" }],
+    })
+
+    const headers = requests.map((request) => new Headers(request.headers))
+    expect(headers.map((value) => value.get("originator"))).toEqual(["kilo", "kilo"])
+    const turns = headers.map((value) => value.get("x-codex-image-turn-id") ?? "")
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    expect(turns[0]).toMatch(uuid)
+    expect(turns[1]).toMatch(uuid)
+    expect(turns[0]).not.toBe(turns[1])
+  })
+
   test("forwards validated high-quality custom dimensions", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = []
     const fetcher: CodexImageFetch = async (input, init) => {

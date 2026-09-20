@@ -13,6 +13,7 @@ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import { DEFAULT_HEADERS } from "@/kilocode/const" // kilocode_change
+import { KiloPromptCache } from "@/kilocode/session/prompt-cache" // kilocode_change
 // kilocode_change start
 import { getKiloProjectId } from "@/kilocode/project-id"
 import {
@@ -146,6 +147,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       options,
     },
   )
+  const opts = KiloPromptCache.sanitize(input.model, params.options) // kilocode_change
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",
@@ -202,8 +204,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     system,
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
-    params,
-    messageTransformOptions: options,
+    params: { ...params, options: opts }, // kilocode_change
+    messageTransformOptions: opts, // kilocode_change
     headers: {
       ...(input.model.providerID.startsWith("kilo") // kilocode_change
         ? {
