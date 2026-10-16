@@ -33,6 +33,7 @@ import {
   KILO_BUNDLED_PROVIDERS,
   kiloCustomLoaders,
   KILO_MODEL_SCHEMA_EXTENSIONS,
+  markCodexModels,
   patchModelsDevModel as patchKiloModel,
   patchConfigModel as patchKiloConfigModel,
   patchCustomLoaderResult,
@@ -1546,6 +1547,7 @@ export const layer = Layer.effect(
 
         for (const [id, provider] of Object.entries(providers)) {
           const providerID = ProviderID.make(id)
+          markCodexModels(provider, auths[providerID]) // kilocode_change
           if (!isProviderAllowed(providerID)) {
             delete providers[providerID]
             continue

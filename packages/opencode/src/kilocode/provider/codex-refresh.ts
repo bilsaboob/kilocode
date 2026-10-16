@@ -1,4 +1,6 @@
 import { Flock } from "@opencode-ai/core/util/flock"
+import { Auth as Storage } from "@/auth"
+import { makeRuntime } from "@/effect/run-service"
 
 export class CodexAuthExpiredError extends Error {
   constructor(
@@ -25,14 +27,8 @@ type Tokens = {
 }
 
 type Input = {
-  input: {
-    client: {
-      auth: {
-        set: (input: { path: { id: string }; body: Auth }) => Promise<unknown>
-      }
-    }
-  }
   getAuth: () => Promise<unknown>
+  persist?: (auth: Auth) => Promise<unknown>
   auth: Auth
   refresh: (refresh: string, signal: AbortSignal) => Promise<Tokens>
   account: (tokens: Tokens) => string | undefined
@@ -41,6 +37,7 @@ type Input = {
 }
 
 const pending = new Map<string, Promise<Auth>>()
+const storage = makeRuntime(Storage.Service, Storage.defaultLayer)
 const lock = "codex-auth-refresh:openai"
 const timeout = 30_000
 
@@ -100,7 +97,8 @@ export async function refreshCodexAuth(input: Input) {
           expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
           ...(id && { accountId: id }),
         }
-        await input.input.client.auth.set({ path: { id: "openai" }, body: next })
+        // Renewal must not use the interactive auth route, which disposes active workspaces.
+        await (input.persist ? input.persist(next) : storage.runPromise((auth) => auth.set("openai", next)))
         return next
       } catch (err) {
         if (!recoverable(err)) throw err

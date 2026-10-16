@@ -7,6 +7,8 @@ import { KiloSession } from "@/kilocode/session" // kilocode_change
 import { KiloCostPropagation } from "@/kilocode/session/cost-propagation" // kilocode_change
 import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_change
 import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
+import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
+import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
 import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
@@ -532,6 +534,7 @@ export const layer = Layer.effect(
         agent: lastUser.agent,
         model: lastUser.model,
         editorContext: lastUser.editorContext, // kilocode_change — preserve editor context
+        contextPolicy: lastUser.contextPolicy, // kilocode_change
       }
       yield* sessions.updateMessage(summaryUserMsg)
       yield* sessions.updatePart({
@@ -777,6 +780,23 @@ export const layer = Layer.effect(
               .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
           : undefined
       const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
+      // kilocode_change start - freeze before persistence/enqueue, never mutate provider limits
+      const policy =
+        input.contextPolicy || KiloContextPolicy.configured()
+          ? yield* Effect.gen(function* () {
+              const cfg = yield* config.get()
+              const resolved = yield* provider.getModel(model.providerID, model.modelID).pipe(Effect.orDie)
+              return yield* Effect.promise(() =>
+                KiloContextPolicy.capture({
+                  cfg,
+                  model: resolved,
+                  inherited: input.contextPolicy,
+                  outputTokenMax: flags.outputTokenMax,
+                }),
+              )
+            })
+          : undefined
+      // kilocode_change end
 
       const info: MessageV2.User = {
         id: input.messageID ?? MessageID.ascending(),
@@ -793,6 +813,7 @@ export const layer = Layer.effect(
         system: input.system,
         format: input.format,
         editorContext: input.editorContext, // kilocode_change
+        contextPolicy: policy, // kilocode_change
       }
 
       if (current?.agent !== info.agent) {
@@ -1204,6 +1225,7 @@ export const layer = Layer.effect(
         })
       })
 
+      KiloContextPolicy.same(policy, info.contextPolicy) // kilocode_change - plugins cannot replace the admitted profile
       yield* sessions.updateMessage(info)
       for (const part of parts) yield* sessions.updatePart(part)
       const nextPrompt = parts.reduce(
@@ -1309,6 +1331,24 @@ export const layer = Layer.effect(
         if (recovery === "stale") return yield* lastAssistant(input.sessionID)
         // kilocode_change end
         const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        // kilocode_change start - idempotent reconnect, never enqueue an existing submitted message twice
+        if (input.messageID) {
+          const retained = yield* MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+            Effect.option,
+          )
+          if (
+            Option.isSome(retained) &&
+            (input.contextPolicy ||
+              KiloContextPolicy.configured() ||
+              (retained.value.info.role === "user" && retained.value.info.contextPolicy))
+          ) {
+            if (retained.value.info.role !== "user") throw KiloContextPolicy.blocked("Message ID is already in use")
+            if (input.contextPolicy) KiloContextPolicy.same(retained.value.info.contextPolicy, input.contextPolicy)
+            KiloContextTurn.identical(retained.value.info, input)
+            return retained.value
+          }
+        }
+        // kilocode_change end
         yield* revert.cleanup(session)
         // kilocode_change start - recover interrupted Kilo turns before accepting a follow-up
         yield* KiloSessionPrompt.recoverDanglingAssistant({ sessionID: input.sessionID, status, sessions })
@@ -1329,11 +1369,13 @@ export const layer = Layer.effect(
                 activity,
                 shared,
               })
+              const origin = history.find((message) => message.info.id === anchor.userMessageID)?.info
               return {
                 ...input,
                 messageID,
                 parts: KiloSessionRecovery.parts(input.parts, kind, anchor) as PromptInput["parts"],
                 system: KiloSessionRecovery.system(input.system, anchor),
+                contextPolicy: input.contextPolicy ?? (origin?.role === "user" ? origin.contextPolicy : undefined), // kilocode_change
               }
             })
           : input
@@ -1431,6 +1473,7 @@ export const layer = Layer.effect(
               format: user.format,
               system: user.system,
               editorContext: user.editorContext,
+              contextPolicy: user.contextPolicy,
               snapshotInitialization: request.snapshotInitialization,
               parts: [
                 {
@@ -1507,7 +1550,7 @@ export const layer = Layer.effect(
         msgs = KiloSessionPrompt.trimBeforeLastSummary(msgs) // kilocode_change - trim on any completed summary (e.g. manual /compact against a text user)
 
         // kilocode_change start - select loop state by chronology after retained-tail projection
-        const latest = KiloSessionMessageOrder.latest(msgs)
+        const latest = KiloSessionMessageOrder.latest(KiloContextTurn.active(msgs))
         const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = latest
         // kilocode_change end
 
@@ -1612,6 +1655,7 @@ export const layer = Layer.effect(
 
         if (
           lastFinished &&
+          !lastUser.contextPolicy && // kilocode_change - estimate complete request before deciding soft compaction
           lastFinished.summary !== true &&
           (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
         ) {
@@ -1781,6 +1825,8 @@ export const layer = Layer.effect(
           const result = yield* handle.process({
             // kilocode_change start - keep Ask/Plan tool filtering hardened against session allows
             user: lastUser,
+            context: KiloContextTurn.state(msgs, lastUser),
+            sessionTitle: session.title,
             agent,
             permission: KiloSessionPrompt.guardPermissions({ agent, session }),
             // kilocode_change end
@@ -1800,6 +1846,15 @@ export const layer = Layer.effect(
             return "break" as const
           }
 
+          // kilocode_change start - an unknown structured completion is not a successful turn
+          const incomplete = KiloSessionPrompt.incompleteStructuredOutput(format, handle.message, result)
+          if (incomplete) {
+            handle.message.error = incomplete
+            yield* sessions.updateMessage(handle.message)
+            closeReasons.set(sessionID, "error")
+            return "break" as const
+          }
+          // kilocode_change end
           const finished = handle.message.finish && !["tool-calls", "unknown"].includes(handle.message.finish)
           if (finished && !handle.message.error) {
             if (format.type === "json_schema") {
@@ -1830,7 +1885,7 @@ export const layer = Layer.effect(
             // kilocode_change start
             const guard = KiloSessionPrompt.guardCompactionAttempt({
               sessionID,
-              attempts: compactionAttempts,
+              attempts: lastUser.contextPolicy && handle.contextReceipt?.() ? 0 : compactionAttempts,
               closeReasons,
               message: handle.message,
             })
@@ -1848,8 +1903,11 @@ export const layer = Layer.effect(
               auto: true,
               // kilocode_change - preflight compaction replays the pending turn without treating media as provider overflow
               overflow: !handle.message.finish && handle.compactError?.() !== undefined, // kilocode_change
+              contextPolicy: lastUser.contextPolicy, // kilocode_change
+              context: handle.contextReceipt?.(), // kilocode_change
             })
           }
+          if (lastUser.contextPolicy && result !== "compact") compactionAttempts = 0 // kilocode_change - useful progress rearms compaction
           // kilocode_change start — break out so a newer queued prompt can take over
           // instead of starting another LLM step for the now-superseded turn. The
           // current handle.process has fully drained (tokens + inline tool calls) by
@@ -2155,6 +2213,7 @@ type PartInputUnion =
 export type PromptInput = Omit<Schema.Schema.Type<typeof PromptInput>, "parts" | "editorContext"> & {
   parts: PartInputUnion[]
   editorContext?: MessageV2.EditorContext
+  contextPolicy?: KiloContextPolicy.Snapshot // internal only, not accepted from public prompt JSON
 }
 // kilocode_change end
 

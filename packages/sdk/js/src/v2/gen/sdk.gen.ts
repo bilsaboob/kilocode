@@ -31,6 +31,8 @@ import type {
   BackgroundProcessStopResponses,
   BackgroundProcessStopSessionErrors,
   BackgroundProcessStopSessionResponses,
+  CodexImage25GenerateErrors,
+  CodexImage25GenerateResponses,
   CodexImageGenerateErrors,
   CodexImageGenerateResponses,
   CommandListErrors,
@@ -6403,6 +6405,62 @@ export class CodexImage extends HeyApiClient {
   }
 }
 
+export class CodexImage25 extends HeyApiClient {
+  /**
+   * Experiment with GPT Image 2.5 through Codex
+   *
+   * Request one PNG using an explicit Flare or Sunburst model ID. Subscription support is experimental; success does not verify model selection. No fallback or retry is performed.
+   */
+  public generate<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      model?: "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst"
+      prompt?: string
+      quality?: "auto" | "low" | "medium" | "high" | "xhigh" | "max"
+      background?: "auto" | "opaque" | "transparent"
+      size?: string
+      images?: Array<{
+        mediaType: string
+        dataBase64: string
+      }>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "model" },
+            { in: "body", key: "prompt" },
+            { in: "body", key: "quality" },
+            { in: "body", key: "background" },
+            { in: "body", key: "size" },
+            { in: "body", key: "images" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      CodexImage25GenerateResponses,
+      CodexImage25GenerateErrors,
+      ThrowOnError
+    >({
+      url: "/codex/image/generate-2.5",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class EnhancePrompt extends HeyApiClient {
   /**
    * Enhance prompt
@@ -8176,6 +8234,11 @@ export class KiloClient extends HeyApiClient {
   private _codexImage?: CodexImage
   get codexImage(): CodexImage {
     return (this._codexImage ??= new CodexImage({ client: this.client }))
+  }
+
+  private _codexImage25?: CodexImage25
+  get codexImage25(): CodexImage25 {
+    return (this._codexImage25 ??= new CodexImage25({ client: this.client }))
   }
 
   private _enhancePrompt?: EnhancePrompt

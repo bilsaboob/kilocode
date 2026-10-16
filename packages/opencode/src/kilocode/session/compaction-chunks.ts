@@ -11,6 +11,7 @@ import { MessageID, PartID, type SessionID } from "@/session/schema"
 import type { Session } from "@/session/session"
 import { Token } from "@/util/token"
 import * as Log from "@opencode-ai/core/util/log"
+import { KiloContextPolicy } from "./context-policy"
 
 type Update = <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
 type UpdateMessage = <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -60,11 +61,29 @@ export namespace KiloCompactionChunks {
 
   export function eligible(input: { result: SessionProcessor.Result; error: MessageV2.Assistant["error"] }) {
     if (input.result === "compact") return true
+    if (input.result === "stop" && KiloContextPolicy.Blocked.isInstance(input.error))
+      return input.error.data.reason.includes("exceeds the admission budget")
     return input.result === "stop" && input.error?.name === "ContextOverflowError"
   }
 
-  export function needed(input: { cfg: Config.Info; model: Provider.Model; tokens: number; outputTokenMax?: number }) {
+  export function needed(input: {
+    cfg: Config.Info
+    model: Provider.Model
+    tokens: number
+    outputTokenMax?: number
+    policy?: KiloContextPolicy.Snapshot
+  }) {
     const mdl = model(input.model, input.outputTokenMax)
+    const allowance = input.policy?.kind === "codex" ? input.policy.output : mdl.limit.output
+    if (input.policy)
+      return (
+        Math.ceil(input.tokens * 1.3) + 2_048 >
+        Math.min(
+          input.policy.input,
+          KiloContextPolicy.thresholds(input.policy).admissionThreshold,
+          input.policy.combined === null ? Infinity : input.policy.combined - allowance,
+        )
+      )
     // Apply 1.3x multiplier to token estimate to compensate for Token.estimate
     // under-counting actual provider tokenizer counts by ~15-30%.
     return (
@@ -75,11 +94,17 @@ export namespace KiloCompactionChunks {
 
   export function replay(input: Input & { replay: Replay }) {
     return Effect.gen(function* () {
+      if (input.user.contextPolicy) return input.replay
       const chunk: Chunk = {
         index: 0,
         messages: [{ info: input.replay.info, parts: input.replay.parts }],
       }
-      const size = budget({ cfg: input.cfg, model: input.model, outputTokenMax: input.outputTokenMax })
+      const size = budget({
+        cfg: input.cfg,
+        model: input.model,
+        outputTokenMax: input.outputTokenMax,
+        policy: input.user.contextPolicy,
+      })
       if (!(yield* large({ messages: chunk.messages, model: input.model, size }))) return input.replay
       const result = yield* summarize({ ...input, chunk, total: 1 })
       if (result.result !== "continue" || !result.output) return input.replay
@@ -103,8 +128,27 @@ export namespace KiloCompactionChunks {
     })
   }
 
-  export function budget(input: { cfg: Config.Info; model: Provider.Model; outputTokenMax?: number }) {
+  export function budget(input: {
+    cfg: Config.Info
+    model: Provider.Model
+    outputTokenMax?: number
+    policy?: KiloContextPolicy.Snapshot
+  }) {
     const mdl = model(input.model, input.outputTokenMax)
+    const allowance = input.policy?.kind === "codex" ? input.policy.output : mdl.limit.output
+    if (input.policy)
+      return Math.max(
+        1,
+        Math.floor(
+          (Math.min(
+            input.policy.input,
+            KiloContextPolicy.thresholds(input.policy).admissionThreshold,
+            input.policy.combined === null ? Infinity : input.policy.combined - allowance,
+          ) -
+            2_048) *
+            RATIO,
+        ),
+      )
     return Math.max(
       1_000,
       Math.floor(usable({ cfg: input.cfg, model: mdl, outputTokenMax: input.outputTokenMax }) * RATIO),
@@ -287,7 +331,12 @@ export namespace KiloCompactionChunks {
 
   function summarize(input: Input & { chunk: Chunk; total: number }) {
     return Effect.gen(function* () {
-      const size = budget({ cfg: input.cfg, model: input.model, outputTokenMax: input.outputTokenMax })
+      const size = budget({
+        cfg: input.cfg,
+        model: input.model,
+        outputTokenMax: input.outputTokenMax,
+        policy: input.user.contextPolicy,
+      })
       const data = (yield* large({ messages: input.chunk.messages, model: input.model, size }))
         ? [
             {
@@ -336,7 +385,12 @@ export namespace KiloCompactionChunks {
 
   export function process(input: Input) {
     return Effect.gen(function* () {
-      const size = budget({ cfg: input.cfg, model: input.model, outputTokenMax: input.outputTokenMax })
+      const size = budget({
+        cfg: input.cfg,
+        model: input.model,
+        outputTokenMax: input.outputTokenMax,
+        policy: input.user.contextPolicy,
+      })
       const chunks = yield* split({ messages: input.messages, model: input.model, size })
       log.info("fallback", { chunks: chunks.length, concurrency: CONCURRENCY })
 

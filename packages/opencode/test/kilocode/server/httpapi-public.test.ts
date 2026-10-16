@@ -4,6 +4,7 @@ import { OpenApi } from "effect/unstable/httpapi"
 import { AgentBuilderPaths } from "../../../src/kilocode/server/httpapi/groups/agent-builder"
 import { BackgroundProcessPaths } from "../../../src/kilocode/server/httpapi/groups/background-process"
 import { CodexImagePaths } from "../../../src/kilocode/server/httpapi/groups/codex-image"
+import { CodexImage25Paths } from "../../../src/kilocode/server/httpapi/groups/codex-image-25"
 import { ConfigConsolePaths } from "../../../src/kilocode/server/httpapi/groups/config-console"
 import { IndexingPaths, KiloEmbeddingModel } from "../../../src/kilocode/server/httpapi/groups/indexing"
 import { KiloGatewayPaths } from "../../../src/kilocode/server/httpapi/groups/kilo-gateway"
@@ -51,6 +52,26 @@ describe("Kilo PublicApi OpenAPI contract", () => {
     const body = route?.requestBody as Body | undefined
     const schema = body?.content?.["application/json"]?.schema
     expect(schema?.properties?.background).toEqual({ type: "string", enum: ["auto", "opaque"] })
+    expect(schema?.properties?.model).toBeUndefined()
+    expect(schema?.properties?.quality).toEqual({ type: "string", enum: ["auto", "low", "medium", "high"] })
+  })
+
+  test("publishes a separate explicit-model experiment without changing the baseline route", () => {
+    const spec = OpenApi.fromApi(PublicApi)
+    const route = spec.paths[CodexImage25Paths.generate]?.post
+    expect(route).toBeDefined()
+    const body = route?.requestBody as Body | undefined
+    const props = body?.content?.["application/json"]?.schema?.properties
+    expect(props?.model).toEqual({ type: "string", enum: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] })
+    expect(props?.background).toEqual({ type: "string", enum: ["auto", "opaque", "transparent"] })
+    expect(props?.quality).toEqual({ type: "string", enum: ["auto", "low", "medium", "high", "xhigh", "max"] })
+    const response = route?.responses?.["200"] as Body | undefined
+    const output = response?.content?.["application/json"]?.schema?.properties
+    expect(output?.requested).toBeDefined()
+    expect(output?.reported).toBeDefined()
+    expect(output?.image).toBeDefined()
+    expect(output?.model).toBeUndefined()
+    expect(route?.parameters?.map((param) => (param as Parameter).name)).toEqual(["directory", "workspace"])
   })
 
   test("publishes the session file activity route", () => {
@@ -211,5 +232,16 @@ describe("Kilo PublicApi OpenAPI contract", () => {
     const body = spec.paths[KiloGatewayPaths.audioTranscriptions]?.post?.requestBody as Body | undefined
     const schema = body?.content?.["application/json"]?.schema
     expect(schema?.properties?.prompt).toEqual({ type: "string" })
+  })
+
+  test("preserves unknown context measurements as nullable values", () => {
+    const spec = OpenApi.fromApi(PublicApi)
+    const schemas = spec.components?.schemas as Record<string, Schema> | undefined
+    const snapshot = schemas?.UserMessage?.properties?.contextPolicy?.properties
+    const receipt = schemas?.CompactionPart?.properties?.context?.properties
+    const context = schemas?.EventSessionContext?.properties?.properties?.properties
+    for (const field of [snapshot?.combined, receipt?.currentTokens, context?.currentTokens, context?.nextTokens]) {
+      expect(field).toEqual({ anyOf: [{ type: "number" }, { type: "null" }] })
+    }
   })
 })

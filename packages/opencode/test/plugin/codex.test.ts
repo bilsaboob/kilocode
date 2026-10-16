@@ -227,10 +227,10 @@ describe("plugin.codex", () => {
     await Promise.all([first, second])
 
     expect(refreshRequests).toBe(1)
-    expect(authUpdates).toHaveLength(1)
-    expect(authUpdates[0]?.body.refresh).toBe("refresh-new")
-    expect(authUpdates[0]?.body.access).toBe("access-new")
-    expect(authUpdates[0]?.body.accountId).toBe("acc-123")
+    // kilocode_change start - automatic refresh must not trigger interactive auth invalidation
+    expect(authUpdates).toHaveLength(0)
+    expect(auth).toMatchObject({ refresh: "refresh-new", access: "access-new", accountId: "acc-123" })
+    // kilocode_change end
     expect(apiRequests).toEqual([
       { authorization: "Bearer access-new", accountId: "acc-123" },
       { authorization: "Bearer access-new", accountId: "acc-123" },

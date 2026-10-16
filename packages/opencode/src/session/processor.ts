@@ -21,6 +21,7 @@ import { Question } from "@/question"
 // kilocode_change start
 import { KiloSessionProcessor, type ReviewTelemetry } from "@/kilocode/session/processor"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
+import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { KiloRoutedModel } from "@/kilocode/session/routed-model"
 import { Suggestion } from "@/kilocode/suggestion"
 // kilocode_change end
@@ -63,6 +64,7 @@ export interface Handle {
   ) => Effect.Effect<void>
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
   readonly compactError?: () => ReturnType<typeof MessageV2.ContextOverflowError.prototype.toObject> | undefined // kilocode_change
+  readonly contextReceipt?: () => KiloContextPolicy.Receipt | undefined // kilocode_change
 }
 
 type Input = {
@@ -95,6 +97,8 @@ interface ProcessorContext extends Input {
   blocked: boolean
   needsCompaction: boolean
   compactionError: ReturnType<typeof MessageV2.ContextOverflowError.prototype.toObject> | undefined // kilocode_change
+  contextPolicy?: KiloContextPolicy.Snapshot // kilocode_change
+  contextReceipt?: KiloContextPolicy.Receipt // kilocode_change
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
   // kilocode_change start
@@ -780,6 +784,7 @@ export const layer = Layer.effect(
               .pipe(Effect.ignore, Effect.forkIn(scope))
             if (
               !ctx.assistantMessage.summary &&
+              !ctx.contextPolicy && // kilocode_change - policy waits for the complete next request estimate
               // kilocode_change start
               isOverflow({
                 cfg: yield* config.get(),
@@ -941,12 +946,23 @@ export const layer = Layer.effect(
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
         // kilocode_change start - internal preflight signal, not a provider error
         if (e instanceof KiloSessionOverflow.PreflightError) {
+          if (e instanceof KiloContextPolicy.Compact) ctx.contextReceipt = e.receipt // kilocode_change
           ctx.needsCompaction = true
           return
         }
         // kilocode_change end
         slog.error("process", { error: errorMessage(e), stack: e instanceof Error ? e.stack : undefined })
         const error = parse(e)
+        // kilocode_change start - no lossy provider-overflow replay under an admitted policy
+        if (ctx.contextPolicy && MessageV2.ContextOverflowError.isInstance(error)) {
+          ctx.assistantMessage.error = KiloContextPolicy.blocked(
+            "Provider rejected the bounded context estimate",
+          ).toObject()
+          if (!ctx.assistantMessage.summary)
+            yield* bus.publish(Session.Event.Error, { sessionID: ctx.sessionID, error: ctx.assistantMessage.error })
+          return
+        }
+        // kilocode_change end
         // kilocode_change start
         ctx.compactionError = MessageV2.ContextOverflowError.isInstance(error) ? error : ctx.compactionError
         // kilocode_change end
@@ -969,6 +985,7 @@ export const layer = Layer.effect(
           }
         }
         ctx.assistantMessage.error = error
+        if (ctx.contextPolicy && ctx.assistantMessage.summary && KiloContextPolicy.Blocked.isInstance(error)) return // kilocode_change - worker admission is nonterminal during safe splitting
         yield* bus.publish(Session.Event.Error, {
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
@@ -979,6 +996,7 @@ export const layer = Layer.effect(
       // kilocode_change start
       const output = {
         compactError: () => ctx.compactionError,
+        contextReceipt: () => ctx.contextReceipt,
       }
       // kilocode_change end
 
@@ -986,6 +1004,8 @@ export const layer = Layer.effect(
         slog.info("process")
         ctx.needsCompaction = false
         ctx.compactionError = undefined // kilocode_change
+        ctx.contextPolicy = streamInput.user.contextPolicy // kilocode_change
+        ctx.contextReceipt = undefined // kilocode_change
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {

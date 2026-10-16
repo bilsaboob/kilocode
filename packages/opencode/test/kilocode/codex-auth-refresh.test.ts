@@ -32,17 +32,6 @@ const expired = (): Auth => ({
 const root = path.join(import.meta.dir, "../..")
 const worker = path.join(import.meta.dir, "fixture/codex-auth-refresh-worker.ts")
 
-function plugin(persist: (auth: Auth) => void) {
-  const set = async (req: { body: Auth }) => {
-    persist(req.body)
-  }
-  return {
-    client: {
-      auth: { set },
-    },
-  }
-}
-
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
@@ -164,14 +153,14 @@ describe("Codex auth refresh", () => {
 
     const [a, b] = await Promise.all([
       refreshCodexAuth({
-        input: plugin((auth) => writes.push(auth)),
+        persist: async (auth) => writes.push(auth),
         getAuth: async () => first,
         auth: first,
         refresh,
         account: () => undefined,
       }),
       refreshCodexAuth({
-        input: plugin((auth) => writes.push(auth)),
+        persist: async (auth) => writes.push(auth),
         getAuth: async () => second,
         auth: second,
         refresh,
@@ -202,7 +191,7 @@ describe("Codex auth refresh", () => {
     }
 
     const result = await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth,
       auth,
       refresh: async () => {
@@ -214,11 +203,28 @@ describe("Codex auth refresh", () => {
     expect(result).toBe(fresh)
   })
 
+  test("does not expose renewed credentials when persistence fails", async () => {
+    const auth = expired()
+    const failure = new Error("credential storage unavailable")
+    const result = await refreshCodexAuth({
+      persist: async () => {
+        throw failure
+      },
+      getAuth: async () => auth,
+      auth,
+      refresh: async () => ({ id_token: "", access_token: "next-access", refresh_token: "next-refresh" }),
+      account: () => undefined,
+    }).catch((err) => err)
+
+    expect(result).toBe(failure)
+    expect(auth).toEqual(expired())
+  })
+
   test("throws reauth error when refresh 401 has no newer stored token", async () => {
     const auth = expired()
     await expect(
       refreshCodexAuth({
-        input: plugin(() => {}),
+        persist: async () => {},
         getAuth: async () => auth,
         auth,
         refresh: async () => {
@@ -235,7 +241,7 @@ describe("Codex auth refresh", () => {
     const calls: string[] = []
 
     const result = await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth: async () => fresh,
       auth,
       refresh: async (token) => {
@@ -253,7 +259,7 @@ describe("Codex auth refresh", () => {
     const auth = expired()
     const calls: string[] = []
     const failed = await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth: async () => auth,
       auth,
       refresh: async (token) => {
@@ -266,7 +272,7 @@ describe("Codex auth refresh", () => {
     expect(failed).toEqual(new Error("offline"))
 
     await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth: async () => auth,
       auth,
       refresh: async (token) => {
@@ -283,7 +289,7 @@ describe("Codex auth refresh", () => {
     const auth = expired()
     const calls: string[] = []
     const failed = await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth: async () => auth,
       auth,
       refresh: async (token, signal) => {
@@ -300,7 +306,7 @@ describe("Codex auth refresh", () => {
     expect(failed.name).toBe("TimeoutError")
 
     await refreshCodexAuth({
-      input: plugin(() => {}),
+      persist: async () => {},
       getAuth: async () => auth,
       auth,
       refresh: async (token) => {

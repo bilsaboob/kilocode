@@ -1,4 +1,5 @@
 import { Config } from "@/config/config"
+import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
@@ -73,7 +74,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     const bridge = yield* EffectBridge.make()
 
     const health = Effect.fn("GlobalHttpApi.health")(function* () {
-      return { healthy: true as const, version: InstallationVersion }
+      return { healthy: true as const, version: InstallationVersion, contextPolicy: KiloContextPolicy.configured() } // kilocode_change
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {

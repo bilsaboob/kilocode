@@ -85,6 +85,7 @@ export namespace KiloCompactionPayloadRecovery {
 
     return run(input.messages, input.prompt).pipe(
       Effect.flatMap((result) => {
+        if (input.user.contextPolicy) return Effect.succeed(result)
         if (result !== "compact" && (result !== "stop" || !matches(input.processor.message.error))) {
           return Effect.succeed(result)
         }

@@ -10,6 +10,7 @@ import { agentBuilderHandlers } from "./handlers/agent-builder"
 import { backgroundProcessHandlers } from "./handlers/background-process"
 import { commitMessageHandlers } from "./handlers/commit-message"
 import { codexImageHandlers } from "./handlers/codex-image"
+import { codexImage25Handlers } from "./handlers/codex-image-25"
 import { configConsoleHandlers } from "./handlers/config-console"
 import { enhancePromptHandlers } from "./handlers/enhance-prompt"
 import { indexingHandlers } from "./handlers/indexing"
@@ -28,6 +29,7 @@ export const provide = Layer.provide([
   backgroundProcessHandlers,
   commitMessageHandlers,
   codexImageHandlers,
+  codexImage25Handlers,
   configConsoleHandlers,
   enhancePromptHandlers,
   indexingHandlers,

@@ -81,6 +81,15 @@ export function matchLegacyKiloOpenApi(input: Record<string, unknown>) {
   const fields = name ? spec.components?.schemas?.[name]?.properties : update?.properties
   if (fields?.sessionID) fields.sessionID = nullable(fields.sessionID)
 
+  // These are explicit unknown values, not optional-field delete sentinels.
+  const snapshot = spec.components?.schemas?.UserMessage?.properties?.contextPolicy?.properties
+  if (snapshot?.combined) snapshot.combined = nullable(snapshot.combined)
+  const receipt = spec.components?.schemas?.CompactionPart?.properties?.context?.properties
+  if (receipt?.currentTokens) receipt.currentTokens = nullable(receipt.currentTokens)
+  const context = spec.components?.schemas?.EventSessionContext?.properties?.properties?.properties
+  if (context?.currentTokens) context.currentTokens = nullable(context.currentTokens)
+  if (context?.nextTokens) context.nextTokens = nullable(context.nextTokens)
+
   const fim = spec.paths?.["/kilo/fim"]?.post?.responses
   if (!fim) return
   fim["200"] = {

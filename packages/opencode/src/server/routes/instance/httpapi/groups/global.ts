@@ -3,6 +3,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { SyncEvent } from "@/sync"
 import "@/server/event"
 import "@/kilocode/indexing-event" // kilocode_change - register indexing.status before HttpApi event schemas
+import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change - register context event before schema snapshot
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { described } from "./metadata"
@@ -10,6 +11,7 @@ import { described } from "./metadata"
 const GlobalHealth = Schema.Struct({
   healthy: Schema.Literal(true),
   version: Schema.String,
+  contextPolicy: Schema.optional(KiloContextPolicy.Profile), // kilocode_change
 })
 
 const GlobalEventSchema = Schema.Struct({

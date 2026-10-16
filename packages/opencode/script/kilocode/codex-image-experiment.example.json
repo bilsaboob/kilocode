@@ -1,0 +1,6 @@
+{
+  "prompt": "Create a single standalone game UI asset: an ornate bronze rectangular picture frame with four connected rails, symmetrical carved corners, exactly one large empty central opening, crisp dark outlines, and a soft narrow shadow belonging to the frame. Show the entire frame centered with generous padding; do not crop any edge. Fill both the exterior background and the central opening with the same perfectly flat opaque cyan #00FFFF. No portrait, scenery, lettering, checkerboard, or additional objects. Preserve the same design, proportions, bronze palette, and details regardless of output resolution.",
+  "sizes": ["1024x1024", "2048x2048", "3840x2160"],
+  "quality": "high",
+  "background": "opaque"
+}

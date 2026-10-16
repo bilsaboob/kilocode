@@ -6,6 +6,8 @@ import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 import { refreshCodexAuth } from "@/kilocode/provider/codex-refresh" // kilocode_change
+import { CodexModels } from "@/kilocode/provider/codex-models" // kilocode_change
+import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { OpenAIWebSocketPool } from "./ws-pool"
 
 const log = Log.create({ service: "plugin.codex" })
@@ -390,6 +392,26 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       async models(provider, ctx) {
         if (ctx.auth?.type !== "oauth") return provider.models
 
+        // kilocode_change start
+        const profile = KiloContextPolicy.configured()
+        const auth = ctx.auth
+        const catalog = profile
+          ? () =>
+              CodexModels.catalog.load({
+                auth,
+                endpoint: codexApiEndpoint,
+                getAuth: CodexModels.current,
+                refresh: (auth) =>
+                  refreshCodexAuth({
+                    auth,
+                    getAuth: CodexModels.current,
+                    refresh: (token, signal) => refreshAccessToken(token, issuer, signal),
+                    account: extractAccountId,
+                  }),
+              })
+          : undefined
+        const limits = await catalog?.()
+        // kilocode_change end
         return Object.fromEntries(
           Object.entries(provider.models)
             .filter(([, model]) => {
@@ -401,6 +423,10 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               modelID,
               {
                 ...model,
+                // kilocode_change start
+                ...(limits &&
+                  catalog && { codex: CodexModels.bind(CodexModels.lookup(limits, model.api.id), catalog) }),
+                // kilocode_change end
                 cost: {
                   input: 0,
                   output: 0,
@@ -464,7 +490,6 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                 log.info("refreshing codex access token")
                 // kilocode_change start
                 refreshPromise = refreshCodexAuth({
-                  input,
                   getAuth,
                   auth: currentAuth,
                   refresh: (token, signal) => refreshAccessToken(token, issuer, signal),

@@ -24,6 +24,8 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { SessionNetwork } from "./network" // kilocode_change
 import { CodexAuthExpiredError } from "@/kilocode/provider/codex-refresh" // kilocode_change
 import { KiloSessionMessageOrder } from "@/kilocode/session/message-order" // kilocode_change
+import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
+import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
 import * as TextStream from "@/kilocode/text-stream" // kilocode_change
 import { Effect, Schema, Types } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
@@ -191,6 +193,7 @@ export const CompactionPart = Schema.Struct({
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
+  context: Schema.optional(KiloContextPolicy.Receipt), // kilocode_change
 }).annotate({ identifier: "CompactionPart" })
 export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
 
@@ -373,6 +376,7 @@ export const User = Schema.Struct({
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   // kilocode_change start
   editorContext: Schema.optional(EditorContext),
+  contextPolicy: Schema.optional(KiloContextPolicy.Snapshot),
   // kilocode_change end
 }).annotate({ identifier: "UserMessage" })
 export type User = Types.DeepMutable<Schema.Schema.Type<typeof User>>
@@ -410,6 +414,7 @@ const AssistantErrorSchema = Schema.Union([
   AbortedError.EffectSchema,
   StructuredOutputError.EffectSchema,
   ContextOverflowError.EffectSchema,
+  KiloContextPolicy.Blocked.EffectSchema, // kilocode_change
   APIError.EffectSchema,
 ]).annotate({ discriminator: "name" })
 type AssistantError = Schema.Schema.Type<typeof AssistantErrorSchema>
@@ -696,6 +701,11 @@ export function stripMessageMetadata(info: Info): Info {
 const info = (row: typeof MessageTable.$inferSelect) =>
   stripMessageMetadata({
     ...row.data,
+    // kilocode_change start - restore the format codec after the JSON storage round trip
+    ...(row.data.role === "user" && row.data.format
+      ? { format: Schema.decodeUnknownSync(Format)(row.data.format) }
+      : {}),
+    // kilocode_change end
     id: row.id,
     sessionID: row.session_id,
   } as Info)
@@ -1176,11 +1186,15 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
-      ...result.slice(compactionIndex, summaryIndex + 1),
-      ...result.slice(tailIndex, compactionIndex),
-      ...result.slice(summaryIndex + 1),
-    ]
+    return KiloContextTurn.project(
+      [
+        // kilocode_change - preserve the user packet while reducing completed in-turn tools
+        ...result.slice(compactionIndex, summaryIndex + 1),
+        ...result.slice(tailIndex, compactionIndex),
+        ...result.slice(summaryIndex + 1),
+      ],
+      part!,
+    ) // kilocode_change
   }
   return result
 }
@@ -1219,6 +1233,8 @@ export function fromError(
   ctx: { providerID: ProviderID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
   switch (true) {
+    case KiloContextPolicy.Blocked.isInstance(e): // kilocode_change
+      return e.toObject ? e.toObject() : e // kilocode_change
     case e instanceof DOMException && e.name === "AbortError":
       return new AbortedError(
         { message: e.message },

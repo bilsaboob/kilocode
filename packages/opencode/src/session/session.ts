@@ -33,6 +33,7 @@ import { Global } from "@opencode-ai/core/global"
 import { BackgroundProcess } from "@/kilocode/background-process"
 import { KiloSession, kiloSessionFork } from "@/kilocode/session"
 import { SessionKnowledge } from "@/kilocode/session/knowledge"
+import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { SessionExport } from "@/kilocode/session-export"
 import * as SandboxPolicy from "@/kilocode/sandbox/policy"
 import { baseKey, cumulativeSessionDiff } from "@/kilocode/session-portability/cumulative-diff" // kilocode_change
@@ -750,6 +751,13 @@ export const layer: Layer.Layer<
 
     const updateMessage = <T extends MessageV2.Info>(msg: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        // kilocode_change start - persisted user-turn policy cannot be replaced on update
+        if (msg.role === "user") {
+          const previous = yield* MessageV2.get({ sessionID: msg.sessionID, messageID: msg.id }).pipe(Effect.option)
+          if (Option.isSome(previous) && previous.value.info.role === "user")
+            KiloContextPolicy.same(previous.value.info.contextPolicy, msg.contextPolicy)
+        }
+        // kilocode_change end
         // kilocode_change start - ignore FK errors when session was deleted while processor was still running
         yield* KiloSession.runSyncSafe(sync.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg }), {
           type: "message update",
@@ -880,6 +888,15 @@ export const layer: Layer.Layer<
           if (p.type === "compaction" && p.tail_start_id) {
             p.tail_start_id = idMap.get(p.tail_start_id)
           }
+          // kilocode_change start - remap durable admission receipts with the forked transcript
+          if (p.type === "compaction" && p.context)
+            p.context = {
+              ...p.context,
+              source: idMap.get(p.context.source) ?? p.context.source,
+              progress: p.context.progress ? idMap.get(p.context.progress) : undefined,
+              tail: p.context.tail ? idMap.get(p.context.tail) : undefined,
+            }
+          // kilocode_change end
           writer.part(p) // kilocode_change - queue copied parts for the atomic transcript commit
         }
       }

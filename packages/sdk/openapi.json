@@ -231,6 +231,34 @@
                     },
                     "version": {
                       "type": "string"
+                    },
+                    "contextPolicy": {
+                      "type": "object",
+                      "properties": {
+                        "version": {
+                          "type": "number",
+                          "enum": [1]
+                        },
+                        "window": {
+                          "type": "string",
+                          "enum": ["maximum-supported"]
+                        },
+                        "automaticPercent": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 99
+                        },
+                        "admissionPercent": {
+                          "type": "integer",
+                          "minimum": 2,
+                          "maximum": 100
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["version", "window", "automaticPercent", "admissionPercent", "id"],
+                      "additionalProperties": false
                     }
                   },
                   "required": ["healthy", "version"],
@@ -12168,6 +12196,364 @@
         ]
       }
     },
+    "/codex/image/generate-2.5": {
+      "post": {
+        "tags": ["codex-image-25"],
+        "operationId": "codexImage25.generate",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Experimental Codex image result with requested, reported and measured metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requested": {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "type": "string",
+                          "enum": ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]
+                        },
+                        "size": {
+                          "type": "string"
+                        },
+                        "quality": {
+                          "type": "string",
+                          "enum": ["auto", "low", "medium", "high", "xhigh", "max"]
+                        },
+                        "background": {
+                          "type": "string",
+                          "enum": ["auto", "opaque", "transparent"]
+                        }
+                      },
+                      "required": ["model", "size", "quality", "background"],
+                      "additionalProperties": false
+                    },
+                    "reported": {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "type": "string"
+                        },
+                        "effectiveModel": {
+                          "type": "string"
+                        },
+                        "modelSnapshot": {
+                          "type": "string"
+                        },
+                        "size": {
+                          "type": "string"
+                        },
+                        "quality": {
+                          "type": "string"
+                        },
+                        "background": {
+                          "type": "string"
+                        },
+                        "outputFormat": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "image": {
+                      "type": "object",
+                      "properties": {
+                        "width": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["NaN"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["-Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        },
+                        "height": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["NaN"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["-Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        },
+                        "bytes": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["NaN"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["-Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        },
+                        "sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["width", "height", "bytes", "sha256"],
+                      "additionalProperties": false
+                    },
+                    "diagnostics": {
+                      "type": "object",
+                      "properties": {
+                        "endpoint": {
+                          "type": "string"
+                        },
+                        "turnID": {
+                          "type": "string"
+                        },
+                        "requestID": {
+                          "type": "string"
+                        },
+                        "imagegenRequestID": {
+                          "type": "string"
+                        },
+                        "generationID": {
+                          "type": "string"
+                        },
+                        "upstreamStatus": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["NaN"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["-Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        },
+                        "durationMs": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["NaN"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["-Infinity"]
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        }
+                      },
+                      "required": ["endpoint", "turnID", "durationMs"],
+                      "additionalProperties": false
+                    },
+                    "created": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string",
+                          "enum": ["NaN"]
+                        },
+                        {
+                          "type": "string",
+                          "enum": ["Infinity"]
+                        },
+                        {
+                          "type": "string",
+                          "enum": ["-Infinity"]
+                        },
+                        {
+                          "type": "string",
+                          "enum": ["Infinity", "-Infinity", "NaN"]
+                        }
+                      ]
+                    },
+                    "mediaType": {
+                      "type": "string",
+                      "enum": ["image/png"]
+                    },
+                    "dataBase64": {
+                      "type": "string"
+                    },
+                    "usage": {},
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["requested", "reported", "image", "diagnostics", "mediaType", "dataBase64", "warnings"],
+                  "additionalProperties": false,
+                  "description": "Experimental Codex image result with requested, reported and measured metadata"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "CodexImage25RequestError | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CodexImage25RequestError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "CodexImage25UpstreamError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodexImage25UpstreamError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Request one PNG using an explicit Flare or Sunburst model ID. Subscription support is experimental; success does not verify model selection. No fallback or retry is performed.",
+        "summary": "Experiment with GPT Image 2.5 through Codex",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "enum": ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "quality": {
+                    "type": "string",
+                    "enum": ["auto", "low", "medium", "high", "xhigh", "max"]
+                  },
+                  "background": {
+                    "type": "string",
+                    "enum": ["auto", "opaque", "transparent"]
+                  },
+                  "size": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "mediaType": {
+                          "type": "string"
+                        },
+                        "dataBase64": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["mediaType", "dataBase64"],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 5
+                  }
+                },
+                "required": ["model", "prompt"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.codexImage25.generate({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/config/overlay": {
       "get": {
         "tags": ["config-console"],
@@ -17076,6 +17462,9 @@
             "$ref": "#/components/schemas/EventQuestionRejected"
           },
           {
+            "$ref": "#/components/schemas/EventSessionContext"
+          },
+          {
             "$ref": "#/components/schemas/EventLspClientDiagnostics"
           },
           {
@@ -18124,6 +18513,34 @@
         "required": ["name", "data"],
         "additionalProperties": false
       },
+      "ContextAdmissionError": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["ContextAdmissionError"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "isRetryable": {
+                "type": "boolean",
+                "enum": [false]
+              }
+            },
+            "required": ["message", "reason", "isRetryable"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["name", "data"],
+        "additionalProperties": false
+      },
       "APIError": {
         "type": "object",
         "properties": {
@@ -18590,6 +19007,95 @@
               }
             },
             "additionalProperties": false
+          },
+          "contextPolicy": {
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "number",
+                    "enum": [1]
+                  },
+                  "window": {
+                    "type": "string",
+                    "enum": ["maximum-supported"]
+                  },
+                  "automaticPercent": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 99
+                  },
+                  "admissionPercent": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 100
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": ["version", "window", "automaticPercent", "admissionPercent", "id"],
+                "additionalProperties": false
+              },
+              "providerID": {
+                "type": "string"
+              },
+              "modelID": {
+                "type": "string"
+              },
+              "apiID": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["codex", "model"]
+              },
+              "window": {
+                "type": "number"
+              },
+              "input": {
+                "type": "number"
+              },
+              "output": {
+                "type": "number"
+              },
+              "combined": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "hash": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "profile",
+              "providerID",
+              "modelID",
+              "apiID",
+              "kind",
+              "window",
+              "input",
+              "output",
+              "combined",
+              "source",
+              "revision",
+              "hash"
+            ],
+            "additionalProperties": false
           }
         },
         "required": ["id", "sessionID", "role", "time", "agent", "model"],
@@ -18644,6 +19150,9 @@
               },
               {
                 "$ref": "#/components/schemas/ContextOverflowError"
+              },
+              {
+                "$ref": "#/components/schemas/ContextAdmissionError"
               },
               {
                 "$ref": "#/components/schemas/APIError"
@@ -19514,6 +20023,35 @@
           "tail_start_id": {
             "type": "string",
             "pattern": "^msg"
+          },
+          "context": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "progress": {
+                "type": "string"
+              },
+              "currentTokens": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nextTokens": {
+                "type": "number"
+              },
+              "tail": {
+                "type": "string"
+              }
+            },
+            "required": ["source", "currentTokens", "nextTokens"],
+            "additionalProperties": false
           }
         },
         "required": ["id", "sessionID", "messageID", "type", "auto"],
@@ -19945,6 +20483,9 @@
               },
               {
                 "$ref": "#/components/schemas/EventQuestionRejected"
+              },
+              {
+                "$ref": "#/components/schemas/EventSessionContext"
               },
               {
                 "$ref": "#/components/schemas/EventLspClientDiagnostics"
@@ -21712,6 +22253,56 @@
         },
         "additionalProperties": false
       },
+      "CodexContextCapability": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["ready"]
+              },
+              "context": {
+                "type": "integer"
+              },
+              "maximum": {
+                "type": "integer"
+              },
+              "effectivePercent": {
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "binding": {
+                "type": "string"
+              }
+            },
+            "required": ["status", "context", "maximum", "effectivePercent", "source", "revision"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["unavailable"]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "binding": {
+                "type": "string"
+              }
+            },
+            "required": ["status", "reason"],
+            "additionalProperties": false
+          }
+        ]
+      },
       "Model": {
         "type": "object",
         "properties": {
@@ -21956,6 +22547,9 @@
             "additionalProperties": {
               "type": "object"
             }
+          },
+          "codex": {
+            "$ref": "#/components/schemas/CodexContextCapability"
           },
           "recommendedIndex": {
             "type": "number"
@@ -23799,6 +24393,117 @@
         "properties": {
           "message": {
             "type": "string"
+          }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      },
+      "CodexImage25RequestError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      },
+      "CodexImage25UpstreamError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "upstreamStatus": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "turnID": {
+                "type": "string"
+              },
+              "requestID": {
+                "type": "string"
+              },
+              "imagegenRequestID": {
+                "type": "string"
+              },
+              "generationID": {
+                "type": "string"
+              },
+              "upstreamStatus": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity", "-Infinity", "NaN"]
+                  }
+                ]
+              },
+              "durationMs": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity", "-Infinity", "NaN"]
+                  }
+                ]
+              }
+            },
+            "required": ["endpoint", "turnID", "durationMs"],
+            "additionalProperties": false
           }
         },
         "required": ["message"],
@@ -26628,6 +27333,93 @@
         "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
+      "EventSessionContext": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.context"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "type": "string"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "sessionTitle": {
+                "type": "string"
+              },
+              "providerID": {
+                "type": "string"
+              },
+              "modelID": {
+                "type": "string"
+              },
+              "phase": {
+                "type": "string",
+                "enum": ["admission", "compacting", "compacted", "blocked"]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "window": {
+                "type": "number"
+              },
+              "automaticThreshold": {
+                "type": "number"
+              },
+              "admissionThreshold": {
+                "type": "number"
+              },
+              "currentTokens": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nextTokens": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "profileID": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sessionID",
+              "providerID",
+              "modelID",
+              "phase",
+              "reason",
+              "window",
+              "automaticThreshold",
+              "admissionThreshold",
+              "currentTokens",
+              "nextTokens",
+              "profileID"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
       "EventLspClientDiagnostics": {
         "type": "object",
         "properties": {
@@ -27097,6 +27889,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/ContextOverflowError"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ContextAdmissionError"
                   },
                   {
                     "$ref": "#/components/schemas/APIError"
@@ -30967,6 +31762,9 @@
     },
     {
       "name": "codex-image"
+    },
+    {
+      "name": "codex-image-25"
     },
     {
       "name": "config-console",

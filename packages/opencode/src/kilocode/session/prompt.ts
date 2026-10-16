@@ -1,4 +1,3 @@
-// kilocode_change - new file
 import path from "path"
 import fs from "fs/promises"
 import { StringDecoder } from "string_decoder"
@@ -23,9 +22,26 @@ import { InstanceState } from "@/effect/instance-state"
 import NATIVE_PLAN_PROMPT from "@/kilocode/session/native-plan-prompt.txt"
 import CODE_SWITCH from "@/session/prompt/code-switch.txt"
 import { SessionKnowledge } from "./knowledge"
+import { KiloStructuredCompaction } from "./structured-compaction"
 
 export namespace KiloSessionPrompt {
   const modes = ["ask", "plan", "architect"]
+
+  export function incompleteStructuredOutput(
+    format: MessageV2.OutputFormat,
+    message: MessageV2.Assistant,
+    result: string,
+  ) {
+    if (format.type !== "json_schema" || result === "compact" || message.error || message.structured !== undefined)
+      return
+    if (message.finish && message.finish !== "unknown") return
+    return new MessageV2.APIError({
+      message:
+        "[STRUCTURED_OUTPUT_INCOMPLETE] The provider ended the structured output turn without a final result or a reliable finish reason. No provider error details were reported; check the request schema and transport before retrying.",
+      isRetryable: false,
+      metadata: { finish: message.finish ?? "missing", modelID: message.modelID, providerID: message.providerID },
+    }).toObject()
+  }
 
   export function knowledgeGuidance(knowledge: Session.Info["knowledge"]) {
     if (!knowledge?.grant || knowledge.scopes.length === 0) return undefined
@@ -454,12 +470,13 @@ export namespace KiloSessionPrompt {
    * never mutated.
    */
   export function stripHistoricalMedia(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
+    const pending = KiloStructuredCompaction.pending(msgs)?.info.id
     const cutoff = msgs.findLastIndex(
       (m) => m.info.role === "user" && m.parts.some((p) => p.type !== "text" || !p.synthetic),
     )
     if (cutoff <= 0) return msgs
     return msgs.map((msg, idx) => {
-      if (idx >= cutoff) return msg
+      if (idx >= cutoff || msg.info.id === pending) return msg
       const parts = msg.parts.map((part) => {
         if (part.type === "file" && MessageV2.isMedia(part.mime)) {
           return {

@@ -9,8 +9,6 @@ const Auth = z.object({
   expires: z.number(),
   accountId: z.string().optional(),
 })
-type Auth = z.infer<typeof Auth>
-
 const Tokens = z.object({
   id_token: z.string(),
   access_token: z.string(),
@@ -73,21 +71,10 @@ async function main() {
     const data = z.object({ openai: Auth }).parse(JSON.parse(await fs.readFile(file, "utf8")))
     return data.openai
   }
-  const plugin = {
-    client: {
-      auth: {
-        set: async (req: { body: Auth }) => {
-          await fs.writeFile(file, JSON.stringify({ openai: req.body }))
-        },
-      },
-    },
-  }
-
   await fs.writeFile(msg.ready, String(process.pid))
   await wait(msg.start)
   const auth = await read()
   const next = await refreshCodexAuth({
-    input: plugin,
     getAuth: read,
     auth,
     refresh: async (token) => {

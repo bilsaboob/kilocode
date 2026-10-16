@@ -1,5 +1,3 @@
-// kilocode_change - new file
-//
 // Kilo-specific provider logic extracted from packages/opencode/src/provider/provider.ts
 // to minimize merge conflicts with upstream opencode.
 //
@@ -13,6 +11,7 @@ import { optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { Effect, Schema } from "effect"
 import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { mapValues, omit, pickBy } from "remeda"
+import { CodexModels } from "./codex-models"
 
 /** Default timeout (ms) for provider HTTP requests (connection phase). */
 export const REQUEST_TIMEOUT_MS = 300_000 // 5 minutes
@@ -32,6 +31,7 @@ export const KILO_BUNDLED_PROVIDERS: Record<string, () => Promise<(options: any)
 // ---------------------------------------------------------------------------
 
 export const KILO_MODEL_SCHEMA_EXTENSIONS = {
+  codex: Schema.optional(CodexModels.Capability),
   recommendedIndex: optionalOmitUndefined(Schema.Finite),
   prompt: Schema.optional(Schema.Literals(PROMPTS)),
   isFree: Schema.optional(Schema.Boolean),
@@ -70,6 +70,7 @@ export function patchModelsDevModel(providerID: string, source: any) {
 
 export function patchConfigModel(cfg: any, existing: any) {
   return {
+    codex: existing?.codex,
     recommendedIndex: cfg.recommendedIndex ?? existing?.recommendedIndex,
     prompt: cfg.prompt ?? existing?.prompt,
     isFree: cfg.isFree ?? existing?.isFree,
@@ -85,6 +86,8 @@ export function patchConfigModel(cfg: any, existing: any) {
       : {},
   }
 }
+
+export const markCodexModels = CodexModels.mark
 
 // ---------------------------------------------------------------------------
 // Custom loaders (new or fully-replaced loaders)

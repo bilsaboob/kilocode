@@ -203,6 +203,7 @@ export const TaskTool = Tool.define(
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const origin = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: msg.info.parentID }).pipe(Effect.orDie) // kilocode_change
 
       // kilocode_change start — prefer valid subagent overrides, safely inheriting when overrides go stale
       const selected = yield* KiloTask.resolveModel({
@@ -247,6 +248,7 @@ export const TaskTool = Tool.define(
           },
           variant, // kilocode_change
           agent: next.name,
+          contextPolicy: origin.info.role === "user" ? origin.info.contextPolicy : undefined, // kilocode_change
           tools: {
             question: false, // kilocode_change - subagents cannot prompt the user directly
             ...(canTodo ? {} : { todowrite: false }),
@@ -272,6 +274,9 @@ export const TaskTool = Tool.define(
           .prompt({
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
+            contextPolicy: origin.info.role === "user" ? origin.info.contextPolicy : undefined, // kilocode_change
+            model: origin.info.role === "user" && origin.info.contextPolicy ? origin.info.model : undefined, // kilocode_change
+            variant: origin.info.role === "user" && origin.info.contextPolicy ? origin.info.model.variant : undefined, // kilocode_change
             parts: [
               {
                 type: "text",

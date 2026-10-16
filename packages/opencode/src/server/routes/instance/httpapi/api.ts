@@ -24,6 +24,7 @@ import { V2Api } from "./groups/v2"
 import { AgentBuilderApi } from "@/kilocode/server/httpapi/groups/agent-builder"
 import { CommitMessageApi } from "@/kilocode/server/httpapi/groups/commit-message"
 import { CodexImageApi } from "@/kilocode/server/httpapi/groups/codex-image"
+import { CodexImage25Api } from "@/kilocode/server/httpapi/groups/codex-image-25"
 import { BackgroundProcessApi } from "@/kilocode/server/httpapi/groups/background-process"
 import { ConfigConsoleApi } from "@/kilocode/server/httpapi/groups/config-console"
 import { EnhancePromptApi } from "@/kilocode/server/httpapi/groups/enhance-prompt"
@@ -71,6 +72,7 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(BackgroundProcessApi)
   .addHttpApi(CommitMessageApi)
   .addHttpApi(CodexImageApi)
+  .addHttpApi(CodexImage25Api)
   .addHttpApi(ConfigConsoleApi)
   .addHttpApi(EnhancePromptApi)
   .addHttpApi(IndexingApi)

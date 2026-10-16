@@ -1,6 +1,8 @@
 import { MessageError } from "@/session/message-error"
 import { MessageV2 } from "@/session/message-v2"
 import type { MessageID, SessionID } from "@/session/schema"
+import { KiloStructuredCompaction } from "./structured-compaction"
+import { KiloContextPolicy } from "./context-policy"
 
 export namespace KiloSessionRecovery {
   export const COOLDOWN = 10 * 60 * 1000
@@ -228,6 +230,8 @@ export namespace KiloSessionRecovery {
   }
 
   export function interrupted(msg: MessageV2.Assistant) {
+    if (KiloContextPolicy.Blocked.isInstance(msg.error)) return false
+    if (KiloStructuredCompaction.blocked(msg.error)) return false
     if (msg.finish === "length") return true
     if (!msg.error) return msg.finish === "error"
     if (MessageV2.AbortedError.isInstance(msg.error)) return false

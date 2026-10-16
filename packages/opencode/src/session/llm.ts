@@ -25,6 +25,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { KiloSession } from "@/kilocode/session"
 import { KiloLLM } from "@/kilocode/session/llm"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
+import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { SessionExport } from "@/kilocode/session-export"
 import { getActiveOrg } from "@/kilocode/session-export/eligibility"
 import { normalizeUsageForExport, observeFullStreamForExport } from "@/kilocode/session-export/llm"
@@ -52,6 +53,8 @@ export type StreamInput = {
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   preflight?: boolean // kilocode_change - enable proactive threshold compaction for normal session turns
+  context?: KiloContextPolicy.State // kilocode_change
+  sessionTitle?: string // kilocode_change
 }
 
 export type StreamRequest = StreamInput & {
@@ -76,6 +79,7 @@ const live: Layer.Layer<
   | Permission.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | Bus.Service // kilocode_change
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -86,6 +90,7 @@ const live: Layer.Layer<
     const perm = yield* Permission.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const bus = yield* Bus.Service // kilocode_change
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       const l = log
@@ -122,6 +127,44 @@ const live: Layer.Layer<
 
       // kilocode_change start - compact at the configured threshold before contacting the provider
       const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
+      const policy = yield* Effect.tryPromise({
+        try: async () => {
+          if (!input.user.contextPolicy && KiloContextPolicy.configured())
+            throw KiloContextPolicy.blocked("The admitted user message has no frozen context policy")
+          return input.user.contextPolicy
+            ? KiloContextPolicy.capture({
+                cfg,
+                model: input.model,
+                inherited: input.user.contextPolicy,
+                oauth: isOpenaiOauth,
+                outputTokenMax: flags.outputTokenMax,
+              })
+            : undefined
+        },
+        catch: (error) => error,
+      }).pipe(
+        Effect.tapError(() =>
+          input.user.contextPolicy
+            ? KiloContextPolicy.emit(bus, {
+                snapshot: input.user.contextPolicy,
+                sessionID: input.sessionID,
+                messageID: input.user.id,
+                sessionTitle: input.sessionTitle,
+                phase: "blocked",
+                reason: "policy-or-capacity-unavailable",
+                currentTokens: input.context?.currentTokens ?? null,
+                nextTokens: null,
+              })
+            : Effect.void,
+        ),
+      )
+      const messages = yield* Effect.try({
+        try: () =>
+          policy
+            ? KiloContextPolicy.transform(base.messages, input.model, base.messageTransformOptions)
+            : base.messages,
+        catch: (error) => error,
+      })
       const estimated: ModelMessage[] =
         isOpenaiOauth || isWorkflow
           ? [
@@ -132,17 +175,19 @@ const live: Layer.Layer<
               ...base.messages,
             ]
           : base.messages
-      const preflight = input.preflight === true && KiloSessionOverflow.enabled({ cfg, model: input.model })
-      const cap = KiloLLM.needsEstimate({ model: input.model, configured: base.params.maxOutputTokens })
+      const preflight = !policy && input.preflight === true && KiloSessionOverflow.enabled({ cfg, model: input.model })
+      const cap = !policy && KiloLLM.needsEstimate({ model: input.model, configured: base.params.maxOutputTokens })
       const usage =
         cap || preflight ? KiloSessionOverflow.measure({ messages: estimated, tools: base.tools }) : undefined
-      const maxOutputTokens = KiloLLM.capOutputTokens({
-        model: input.model,
-        messages: estimated,
-        tools: base.tools,
-        configured: base.params.maxOutputTokens,
-        tokens: usage?.raw,
-      })
+      const maxOutputTokens = policy
+        ? base.params.maxOutputTokens
+        : KiloLLM.capOutputTokens({
+            model: input.model,
+            messages: estimated,
+            tools: base.tools,
+            configured: base.params.maxOutputTokens,
+            tokens: usage?.raw,
+          })
       if (
         preflight &&
         usage &&
@@ -156,7 +201,23 @@ const live: Layer.Layer<
       ) {
         return yield* Effect.fail(new KiloSessionOverflow.PreflightError())
       }
-      const prepared = { ...base, params: { ...base.params, maxOutputTokens } }
+      if (policy)
+        yield* KiloContextPolicy.admit({
+          snapshot: policy,
+          cfg,
+          messages: isWorkflow ? [{ role: "system", content: base.system.join("\n") }, ...messages] : messages,
+          tools: base.tools,
+          options: base.params.options,
+          output: maxOutputTokens,
+          outputLimit: input.model.limit.output,
+          state: input.preflight ? input.context : undefined,
+          sessionID: input.sessionID,
+          messageID: input.user.id,
+          sessionTitle: input.sessionTitle,
+          bus,
+        })
+      input.abort.throwIfAborted()
+      const prepared = { ...base, messages, params: { ...base.params, maxOutputTokens } }
       // kilocode_change end
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
@@ -383,7 +444,9 @@ const live: Layer.Layer<
             {
               specificationVersion: "v3" as const,
               async transformParams(args) {
-                if (args.type === "stream") {
+                // kilocode_change start - policy counted this exact transform already
+                if (args.type === "stream" && !policy) {
+                  // kilocode_change end
                   // @ts-expect-error
                   args.params.prompt = ProviderTransform.message(
                     args.params.prompt,
@@ -449,7 +512,7 @@ const live: Layer.Layer<
   }),
 )
 
-export const layer = live.pipe(Layer.provide(Permission.defaultLayer))
+export const layer = live.pipe(Layer.provide(Permission.defaultLayer), Layer.provide(Bus.layer)) // kilocode_change
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(

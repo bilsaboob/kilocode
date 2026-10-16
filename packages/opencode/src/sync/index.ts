@@ -17,6 +17,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EffectBridge } from "@/effect/bridge"
 import * as EventWire from "@/kilocode/event-wire" // kilocode_change
+import * as Persistence from "@/kilocode/storage/db" // kilocode_change
 
 // Keep `Event["data"]` mutable because projectors mutate the persisted shape
 // when writing to the database. Bus payloads (`Properties`) stay readonly —
@@ -165,7 +166,9 @@ export const layer = Layer.effect(Service)(
       // Note that this is an "immediate" transaction which is critical.
       // We need to make sure we can safely read and write with nothing
       // else changing the data from under us
-      Database.transaction(
+      // kilocode_change start - retry only failed acquisition, before the callback
+      yield* Persistence.transaction(
+        // kilocode_change end
         (tx) => {
           const id = EventID.ascending()
           const row = tx
@@ -180,6 +183,7 @@ export const layer = Layer.effect(Service)(
         },
         {
           behavior: "immediate",
+          operation: "SyncEvent.run", // kilocode_change
         },
       )
     })

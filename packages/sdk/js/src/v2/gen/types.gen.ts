@@ -22,6 +22,7 @@ export type Event =
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
+  | EventSessionContext
   | EventLspClientDiagnostics
   | EventLspUpdated
   | EventMcpToolsChanged
@@ -369,6 +370,15 @@ export type ContextOverflowError = {
   }
 }
 
+export type ContextAdmissionError = {
+  name: "ContextAdmissionError"
+  data: {
+    message: string
+    reason: string
+    isRetryable: false
+  }
+}
+
 export type ApiError = {
   name: "APIError"
   data: {
@@ -529,6 +539,26 @@ export type UserMessage = {
     activeFile?: string
     shell?: string
   }
+  contextPolicy?: {
+    profile: {
+      version: 1
+      window: "maximum-supported"
+      automaticPercent: number
+      admissionPercent: number
+      id: string
+    }
+    providerID: string
+    modelID: string
+    apiID: string
+    kind: "codex" | "model"
+    window: number
+    input: number
+    output: number
+    combined: number | null
+    source: string
+    revision: string
+    hash: string
+  }
 }
 
 export type AssistantMessage = {
@@ -546,6 +576,7 @@ export type AssistantMessage = {
     | MessageAbortedError
     | StructuredOutputError
     | ContextOverflowError
+    | ContextAdmissionError
     | ApiError
   parentID: string
   modelID: string
@@ -826,6 +857,13 @@ export type CompactionPart = {
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
+  context?: {
+    source: string
+    progress?: string
+    currentTokens: number | null
+    nextTokens: number
+    tail?: string
+  }
 }
 
 export type Part =
@@ -961,6 +999,7 @@ export type GlobalEvent = {
     | EventQuestionAsked
     | EventQuestionReplied
     | EventQuestionRejected
+    | EventSessionContext
     | EventLspClientDiagnostics
     | EventLspUpdated
     | EventMcpToolsChanged
@@ -1573,6 +1612,22 @@ export type Config = {
   }
 }
 
+export type CodexContextCapability =
+  | {
+      status: "ready"
+      context: number
+      maximum: number
+      effectivePercent: number
+      source: string
+      revision: string
+      binding?: string
+    }
+  | {
+      status: "unavailable"
+      reason: string
+      binding?: string
+    }
+
 export type Model = {
   id: string
   providerID: string
@@ -1654,6 +1709,7 @@ export type Model = {
       [key: string]: unknown
     }
   }
+  codex?: CodexContextCapability
   recommendedIndex?: number
   prompt?: "codex" | "gemini" | "beast" | "anthropic" | "trinity" | "anthropic_without_todo" | "ling" | "gpt55"
   isFree?: boolean
@@ -2278,6 +2334,24 @@ export type BackgroundProcessLogs = {
 
 export type CodexImageApiError = {
   message: string
+}
+
+export type CodexImage25RequestError = {
+  message: string
+}
+
+export type CodexImage25UpstreamError = {
+  message: string
+  upstreamStatus?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  diagnostics?: {
+    endpoint: string
+    turnID: string
+    requestID?: string
+    imagegenRequestID?: string
+    generationID?: string
+    upstreamStatus?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    durationMs: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
 }
 
 export type ConfigOverlayResponse = {
@@ -3119,6 +3193,26 @@ export type EventQuestionRejected = {
   properties: QuestionRejected
 }
 
+export type EventSessionContext = {
+  id: string
+  type: "session.context"
+  properties: {
+    sessionID: string
+    messageID?: string
+    sessionTitle?: string
+    providerID: string
+    modelID: string
+    phase: "admission" | "compacting" | "compacted" | "blocked"
+    reason: string
+    window: number
+    automaticThreshold: number
+    admissionThreshold: number
+    currentTokens: number | null
+    nextTokens: number | null
+    profileID: string
+  }
+}
+
 export type EventLspClientDiagnostics = {
   id: string
   type: "lsp.client.diagnostics"
@@ -3271,6 +3365,7 @@ export type EventSessionError = {
       | MessageAbortedError
       | StructuredOutputError
       | ContextOverflowError
+      | ContextAdmissionError
       | ApiError
   }
 }
@@ -4637,6 +4732,13 @@ export type GlobalHealthResponses = {
   200: {
     healthy: true
     version: string
+    contextPolicy?: {
+      version: 1
+      window: "maximum-supported"
+      automaticPercent: number
+      admissionPercent: number
+      id: string
+    }
   }
 }
 
@@ -9545,6 +9647,84 @@ export type CodexImageGenerateResponses = {
 }
 
 export type CodexImageGenerateResponse = CodexImageGenerateResponses[keyof CodexImageGenerateResponses]
+
+export type CodexImage25GenerateData = {
+  body?: {
+    model: "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst"
+    prompt: string
+    quality?: "auto" | "low" | "medium" | "high" | "xhigh" | "max"
+    background?: "auto" | "opaque" | "transparent"
+    size?: string
+    images?: Array<{
+      mediaType: string
+      dataBase64: string
+    }>
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/codex/image/generate-2.5"
+}
+
+export type CodexImage25GenerateErrors = {
+  /**
+   * CodexImage25RequestError | InvalidRequestError
+   */
+  400: CodexImage25RequestError | InvalidRequestError
+  /**
+   * CodexImage25UpstreamError
+   */
+  502: CodexImage25UpstreamError
+}
+
+export type CodexImage25GenerateError = CodexImage25GenerateErrors[keyof CodexImage25GenerateErrors]
+
+export type CodexImage25GenerateResponses = {
+  /**
+   * Experimental Codex image result with requested, reported and measured metadata
+   */
+  200: {
+    requested: {
+      model: "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst"
+      size: string
+      quality: "auto" | "low" | "medium" | "high" | "xhigh" | "max"
+      background: "auto" | "opaque" | "transparent"
+    }
+    reported: {
+      model?: string
+      effectiveModel?: string
+      modelSnapshot?: string
+      size?: string
+      quality?: string
+      background?: string
+      outputFormat?: string
+    }
+    image: {
+      width: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      height: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      bytes: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      sha256: string
+    }
+    diagnostics: {
+      endpoint: string
+      turnID: string
+      requestID?: string
+      imagegenRequestID?: string
+      generationID?: string
+      upstreamStatus?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      durationMs: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    created?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    mediaType: "image/png"
+    dataBase64: string
+    usage?: unknown
+    warnings: Array<string>
+  }
+}
+
+export type CodexImage25GenerateResponse = CodexImage25GenerateResponses[keyof CodexImage25GenerateResponses]
 
 export type ConfigOverlayData = {
   body?: never
