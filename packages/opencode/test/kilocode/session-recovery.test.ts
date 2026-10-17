@@ -154,7 +154,7 @@ describe("automatic session recovery", () => {
       KiloSessionRecovery.interrupted(
         assistant({ sessionID: sessions[0], parentID: base.prompt.info.id, finish: "length" }),
       ),
-    ).toBe(true)
+    ).toBe(false)
     expect(
       KiloSessionRecovery.interrupted(
         assistant({

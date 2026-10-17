@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 import { refreshCodexAuth } from "@/kilocode/provider/codex-refresh" // kilocode_change
 import { CodexModels } from "@/kilocode/provider/codex-models" // kilocode_change
+import { AuthStaleError, type AuthStore } from "@/kilocode/auth/store" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { OpenAIWebSocketPool } from "./ws-pool"
 
@@ -116,6 +117,7 @@ interface TokenResponse {
 }
 
 interface CodexAuthPluginOptions {
+  store?: ReturnType<typeof AuthStore.create> // kilocode_change - use real isolated stores in fixtures
   issuer?: string
   codexApiEndpoint?: string
   experimentalWebSockets?: boolean
@@ -377,6 +379,7 @@ function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResp
 }
 
 export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPluginOptions = {}): Promise<Hooks> {
+  const discovery = options.store ? CodexModels.create(Date.now, options.store) : CodexModels.catalog // kilocode_change
   const issuer = options.issuer ?? ISSUER
   const codexApiEndpoint = options.codexApiEndpoint ?? CODEX_API_ENDPOINT
   let websocketFetchInstalled = false
@@ -397,14 +400,13 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
         const auth = ctx.auth
         const catalog = profile
           ? () =>
-              CodexModels.catalog.load({
+              discovery.load({
                 auth,
                 endpoint: codexApiEndpoint,
-                getAuth: CodexModels.current,
                 refresh: (auth) =>
                   refreshCodexAuth({
                     auth,
-                    getAuth: CodexModels.current,
+                    store: options.store,
                     refresh: (token, signal) => refreshAccessToken(token, issuer, signal),
                     account: extractAccountId,
                   }),
@@ -457,13 +459,6 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
         }
         if (auth.type !== "oauth") return websocketFetch ? { fetch: websocketFetch } : {}
 
-        let refreshPromise:
-          | Promise<{
-              access: string
-              accountId: string | undefined
-            }>
-          | undefined
-
         return {
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
@@ -479,36 +474,23 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               }
             }
 
-            const currentAuth = await getAuth()
+            let currentAuth = await getAuth() // kilocode_change - use only conditionally committed renewal results
+            if (!currentAuth) throw new AuthStaleError() // kilocode_change
             if (currentAuth.type !== "oauth")
               return websocketFetch ? websocketFetch(requestInput, init) : fetch(requestInput, init)
 
-            const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
-
             if (!currentAuth.access || currentAuth.expires < Date.now()) {
-              if (!refreshPromise) {
-                log.info("refreshing codex access token")
-                // kilocode_change start
-                refreshPromise = refreshCodexAuth({
-                  getAuth,
-                  auth: currentAuth,
-                  refresh: (token, signal) => refreshAccessToken(token, issuer, signal),
-                  account: extractAccountId,
-                })
-                  .then((auth) => ({
-                    access: auth.access,
-                    accountId: auth.accountId,
-                  }))
-                  .finally(() => {
-                    refreshPromise = undefined
-                  })
-                // kilocode_change end
-              }
-
-              const refreshed = await refreshPromise
-              currentAuth.access = refreshed.access
-              authWithAccount.accountId = refreshed.accountId
+              // kilocode_change start - coalescing belongs to the revision-aware store, not the loader
+              log.info("refreshing codex access token")
+              currentAuth = await refreshCodexAuth({
+                auth: currentAuth,
+                store: options.store,
+                refresh: (token, signal) => refreshAccessToken(token, issuer, signal),
+                account: extractAccountId,
+              })
+              // kilocode_change end
             }
+            const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string } // kilocode_change
 
             const headers = new Headers()
             if (init?.headers) {

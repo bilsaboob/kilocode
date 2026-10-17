@@ -34,6 +34,7 @@ type Wait = {
 
 type Sse = {
   type: "sse"
+  responses?: boolean // kilocode_change - allow verbatim Responses frames in boundary regressions
   head: unknown[]
   tail: unknown[]
   wait?: PromiseLike<unknown>
@@ -576,6 +577,7 @@ export function httpError(status: number, body: unknown): Item {
 }
 
 export function raw(input: {
+  responses?: boolean // kilocode_change
   chunks?: unknown[]
   head?: unknown[]
   tail?: unknown[]
@@ -586,6 +588,7 @@ export function raw(input: {
 }): Item {
   return {
     type: "sse",
+    responses: input.responses, // kilocode_change
     head: input.head ?? input.chunks ?? [],
     tail: input.tail ?? [],
     wait: input.wait,
@@ -693,7 +696,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         hits = [...hits, current]
         yield* notify()
         if (next.type !== "sse") return fail(next)
-        if (mode === "responses") return send(responses(next, modelFrom(body)))
+        if (mode === "responses" && !next.responses) return send(responses(next, modelFrom(body))) // kilocode_change
         if (next.reset) {
           yield* reset(next)
           return HttpServerResponse.empty()
@@ -703,6 +706,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
 
       yield* router.add("POST", "/v1/chat/completions", handle("chat"))
       yield* router.add("POST", "/v1/responses", handle("responses"))
+      yield* router.add("POST", "/v1/messages", handle("chat")) // kilocode_change - verbatim Anthropic billing fixtures
 
       yield* server.serve(router.asHttpEffect())
 

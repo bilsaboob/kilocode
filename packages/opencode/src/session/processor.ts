@@ -23,6 +23,8 @@ import { KiloSessionProcessor, type ReviewTelemetry } from "@/kilocode/session/p
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { KiloRoutedModel } from "@/kilocode/session/routed-model"
+import { KiloResponse } from "@/kilocode/session/response"
+import { KiloResponseAccounting } from "@/kilocode/session/response-accounting"
 import { Suggestion } from "@/kilocode/suggestion"
 // kilocode_change end
 import { errorMessage } from "@/util/error"
@@ -35,6 +37,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { APICallError } from "ai" // kilocode_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -162,6 +165,7 @@ export const layer = Layer.effect(
       }
       let aborted = false
       const ac = new AbortController() // kilocode_change — abort controller for offline handler
+      const responses = KiloResponse.collector() // kilocode_change
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
 
       const parse = (e: unknown) =>
@@ -203,6 +207,18 @@ export const layer = Layer.effect(
         if (fresh.info.cost <= ctx.assistantMessage.cost) return
         ctx.assistantMessage.cost = fresh.info.cost
       })
+      // kilocode_change end
+
+      // kilocode_change start - retain one stable spending part per observed provider response
+      const accounting = KiloResponseAccounting.create({
+        session,
+        message: ctx.assistantMessage,
+        model: ctx.model,
+        responses,
+        reconcile,
+      })
+      let ending: { finish: string; cost: number; tokens: MessageV2.Assistant["tokens"]; snapshot?: string } | undefined
+      let closed = false
       // kilocode_change end
 
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
@@ -398,6 +414,15 @@ export const layer = Layer.effect(
       const toolInput = (value: unknown): Record<string, any> => (isRecord(value) ? value : { value })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        // kilocode_change start - bill observed work before snapshots or terminal classification
+        const response = responses.event(value)
+        yield* accounting.flush()
+        if (value.type === "step-finish" || value.type === "finish" || value.type === "provider-error") {
+          const failure = responses.failure()
+          if (failure) yield* Effect.fail(failure)
+        }
+        if (value.type === "text-delta" && value.text === "" && value.providerMetadata?.kiloResponse) return
+        // kilocode_change end
         switch (value.type) {
           case "reasoning-start":
             if (value.id in ctx.reasoningMap) return
@@ -639,10 +664,23 @@ export const layer = Layer.effect(
           }
 
           case "provider-error":
-            throw new Error(value.message)
+            // kilocode_change start - preserve native retry policy and bounded provider diagnostic metadata
+            yield* Effect.fail(
+              new APICallError({
+                message: value.message,
+                isRetryable: value.retryable ?? false,
+                url: "",
+                requestBodyValues: {},
+                responseBody: value.providerMetadata ? JSON.stringify(value.providerMetadata) : undefined,
+              }),
+            )
+            return
+          // kilocode_change end
 
           case "step-start":
             // kilocode_change start
+            ending = undefined
+            closed = false
             ctx.stepStart = performance.now()
             ctx.step = { reasoning: false, text: false, tool: false }
             if (!ctx.snapshot)
@@ -688,8 +726,8 @@ export const layer = Layer.effect(
             yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
             const usage = Session.getUsage({
               model: ctx.model,
-              usage: value.usage ?? new Usage({}),
-              metadata: value.providerMetadata,
+              usage: response?.usage ?? value.usage ?? new Usage({}), // kilocode_change - authoritative per-response usage
+              metadata: response?.metadata ?? value.providerMetadata, // kilocode_change - retain provider billing through aggregate finish
             })
             // kilocode_change start
             const model = KiloRoutedModel.readAuto(value.providerMetadata, {
@@ -710,36 +748,12 @@ export const layer = Layer.effect(
               telemetry: ctx.telemetry,
             })
             // kilocode_change end
-            if (!ctx.assistantMessage.summary) {
-              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              if (flags.experimentalEventSystem) {
-                yield* events.publish(SessionEvent.Step.Ended, {
-                  sessionID: ctx.sessionID,
-                  finish: value.reason,
-                  cost: usage.cost,
-                  tokens: usage.tokens,
-                  snapshot: completedSnapshot,
-                  timestamp: DateTime.makeUnsafe(Date.now()),
-                })
-              }
-            }
+            ending = { finish: value.reason, cost: usage.cost, tokens: usage.tokens, snapshot: completedSnapshot } // kilocode_change - defer v2 success until cleanup
             ctx.assistantMessage.finish = value.reason
             // kilocode_change start - capture any subagent cost propagated by tool calls during this step (#6321)
             yield* reconcile()
             // kilocode_change end
-            ctx.assistantMessage.cost += usage.cost
-            ctx.assistantMessage.tokens = usage.tokens
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              reason: value.reason,
-              snapshot: completedSnapshot,
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "step-finish",
-              ...(model ? { model } : {}), // kilocode_change
-              tokens: usage.tokens,
-              cost: usage.cost,
-            })
+            yield* accounting.flush({ snapshot: completedSnapshot, model }) // kilocode_change - update the stable receipt, do not charge twice
             // kilocode_change start - surface output limit stops, with a stronger message for reasoning-only stops
             const warn = KiloSessionProcessor.lengthWarning({ msg: ctx.assistantMessage, step: ctx.step })
             if (warn) {
@@ -783,6 +797,7 @@ export const layer = Layer.effect(
               })
               .pipe(Effect.ignore, Effect.forkIn(scope))
             if (
+              !ctx.assistantMessage.error && // kilocode_change - failed responses cannot authorize compaction
               !ctx.assistantMessage.summary &&
               !ctx.contextPolicy && // kilocode_change - policy waits for the complete next request estimate
               // kilocode_change start
@@ -879,6 +894,7 @@ export const layer = Layer.effect(
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+        yield* accounting.flush().pipe(Effect.uninterruptible) // kilocode_change - only cleanup masks local receipt writes
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
@@ -973,7 +989,8 @@ export const layer = Layer.effect(
         }
         if (!ctx.assistantMessage.summary) {
           // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-          if (flags.experimentalEventSystem) {
+          // kilocode_change start - do not end a v2 step twice
+          if (flags.experimentalEventSystem && !closed) {
             yield* events.publish(SessionEvent.Step.Failed, {
               sessionID: ctx.sessionID,
               error: {
@@ -982,9 +999,12 @@ export const layer = Layer.effect(
               },
               timestamp: DateTime.makeUnsafe(Date.now()),
             })
+            closed = true // kilocode_change
           }
+          // kilocode_change end
         }
         ctx.assistantMessage.error = error
+        if (KiloResponse.blocked(error)) ctx.assistantMessage.finish = "error" // kilocode_change
         if (ctx.contextPolicy && ctx.assistantMessage.summary && KiloContextPolicy.Blocked.isInstance(error)) return // kilocode_change - worker admission is nonterminal during safe splitting
         yield* bus.publish(Session.Event.Error, {
           sessionID: ctx.assistantMessage.sessionID,
@@ -992,6 +1012,16 @@ export const layer = Layer.effect(
         })
         yield* status.set(ctx.sessionID, { type: "idle" })
       })
+
+      // kilocode_change start - Stop remains authoritative through processor finalization
+      const interrupt = Effect.fnUntraced(function* () {
+        if (aborted || closed) return
+        aborted = true
+        responses.interrupt()
+        ac.abort()
+        yield* halt(new DOMException("Aborted", "AbortError"))
+      })
+      // kilocode_change end
 
       // kilocode_change start
       const output = {
@@ -1017,28 +1047,21 @@ export const layer = Layer.effect(
             ctx.step = { reasoning: false, text: false, tool: false }
             const stream = llm.stream({
               ...streamInput,
+              responses,
               preflight: !ctx.assistantMessage.summary,
             })
             // kilocode_change end
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
+              Stream.takeUntil((event) => ctx.needsCompaction && event.type === "finish"), // kilocode_change - settle this response before requesting compaction
               Stream.runDrain,
             )
           }).pipe(
-            Effect.onInterrupt(() =>
-              Effect.gen(function* () {
-                aborted = true
-                ac.abort() // kilocode_change — also abort offline handler
-                if (!ctx.assistantMessage.error) {
-                  yield* halt(new DOMException("Aborted", "AbortError"))
-                }
-              }),
-            ),
+            Effect.onInterrupt(() => interrupt()), // kilocode_change
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
-              (cause) => Effect.fail(Cause.squash(cause)),
+              (cause) => Effect.fail(responses.failure(Cause.squash(cause)) ?? Cause.squash(cause)), // kilocode_change - observed responses cannot be silently resubmitted
             ),
             Effect.retry(
               SessionRetry.policy({
@@ -1076,10 +1099,38 @@ export const layer = Layer.effect(
             ),
             Effect.catch(halt),
             Effect.ensuring(cleanup()),
+            // kilocode_change start - choose one v2 terminal only after cleanup, including a late Stop
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                if (
+                  ending &&
+                  !closed &&
+                  !ctx.assistantMessage.summary &&
+                  !ctx.assistantMessage.error &&
+                  flags.experimentalEventSystem
+                ) {
+                  yield* events.publish(SessionEvent.Step.Ended, {
+                    sessionID: ctx.sessionID,
+                    ...ending,
+                    timestamp: DateTime.makeUnsafe(Date.now()),
+                  })
+                  closed = true
+                }
+              }).pipe(Effect.uninterruptible),
+            ),
+            Effect.onInterrupt(() =>
+              Effect.gen(function* () {
+                if (closed) return
+                yield* interrupt()
+                yield* accounting.flush().pipe(Effect.uninterruptible)
+                yield* session.updateMessage(ctx.assistantMessage)
+              }),
+            ),
+            // kilocode_change end
           )
 
-          if (ctx.needsCompaction) return "compact"
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+          if (ctx.needsCompaction) return "compact" // kilocode_change - an error wins over context-pressure hints
           return "continue"
         })
       })

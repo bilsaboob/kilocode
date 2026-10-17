@@ -10,6 +10,7 @@ import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Image } from "../../src/image/image"
 import { KiloCompactionPayloadRecovery } from "../../src/kilocode/session/compaction-payload-recovery"
+import { KiloCompactionState } from "../../src/kilocode/session/compaction-state"
 import { KiloSessionCompaction } from "../../src/kilocode/session/compaction"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
@@ -138,6 +139,7 @@ function llm() {
 function reply(
   text: string,
   capture?: (input: LLM.StreamInput) => void,
+  reason: "stop" | "length" = "stop",
 ): (input: LLM.StreamInput) => Stream.Stream<Event, unknown> {
   return (input) => {
     capture?.(input)
@@ -146,8 +148,8 @@ function reply(
       LLMEvent.textStart({ id: "txt-0" }),
       LLMEvent.textDelta({ id: "txt-0", text }),
       LLMEvent.textEnd({ id: "txt-0" }),
-      LLMEvent.stepFinish({ index: 0, reason: "stop", usage }),
-      LLMEvent.finish({ reason: "stop", usage }),
+      LLMEvent.stepFinish({ index: 0, reason, usage }),
+      LLMEvent.finish({ reason, usage }),
     )
   }
 }
@@ -199,7 +201,7 @@ describe("KiloCompactionPayloadRecovery", () => {
     expect(KiloCompactionPayloadRecovery.matches(error)).toBe(true)
   })
 
-  test("strips media and marks completed tool outputs compacted", async () => {
+  test("strips only the retry projection without changing durable media or tool receipts", () => {
     const user: MessageV2.WithParts = {
       info: {
         id: userID,
@@ -250,14 +252,8 @@ describe("KiloCompactionPayloadRecovery", () => {
       },
       parts: [tool],
     }
-    const updated: MessageV2.Part[] = []
-
-    await Effect.runPromise(
-      KiloCompactionPayloadRecovery.strip({
-        messages: [user, assistant],
-        update: (part) => Effect.sync(() => updated.push(part)).pipe(Effect.as(part)),
-      }),
-    )
+    const before = JSON.stringify([user, assistant])
+    const updated = KiloCompactionPayloadRecovery.strip([user, assistant]).flatMap((message) => message.parts)
 
     expect(updated).toHaveLength(2)
     expect(updated[0]).toMatchObject({
@@ -268,133 +264,147 @@ describe("KiloCompactionPayloadRecovery", () => {
     if (updated[1]?.type === "tool" && updated[1].state.status === "completed") {
       expect(updated[1].state.time.compacted).toBeNumber()
     }
+    expect(JSON.stringify([user, assistant])).toBe(before)
   })
 
-  test("retries compaction without media and tool outputs after payload-size failure", async () => {
-    await using tmp = await tmpdir({ git: true })
-    const stub = llm()
-    const captures: string[] = []
-    stub.push((input) => {
-      captures.push(JSON.stringify(input.messages))
-      return Stream.fail(
-        new APICallError({
-          message: "Request Entity Too Large",
-          url: "https://api.kilo.ai/api/openrouter/responses",
-          requestBodyValues: {},
-          statusCode: 413,
-          responseHeaders: { "content-type": "text/plain" },
-          responseBody: "Request Entity Too Large\n\nFUNCTION_PAYLOAD_TOO_LARGE",
-          isRetryable: false,
-        }),
-      )
-    })
-    stub.push(
-      reply("summary", (input) => {
+  test.each(["stop", "length"] as const)(
+    "preserves source evidence after a payload retry ending with %s",
+    async (finish) => {
+      await using tmp = await tmpdir({ git: true })
+      const stub = llm()
+      const captures: string[] = []
+      stub.push((input) => {
         captures.push(JSON.stringify(input.messages))
-      }),
-    )
-
-    await provideTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        const session = await svc.create({})
-        const old = await user(session.id, "old image turn")
-        await svc.updatePart({
-          id: PartID.ascending(),
-          messageID: old.id,
-          sessionID: session.id,
-          type: "file",
-          mime: "image/png",
-          filename: "old.png",
-          url: `data:image/png;base64,${"a".repeat(8_000)}`,
-        })
-        const oldReply = await assistant(session.id, old.id, tmp.path)
-        await svc.updatePart({
-          id: PartID.ascending(),
-          messageID: oldReply.id,
-          sessionID: session.id,
-          type: "tool",
-          callID: crypto.randomUUID(),
-          tool: "bash",
-          state: {
-            status: "completed",
-            input: {},
-            output: "old output".repeat(10_000),
-            title: "old",
-            metadata: {},
-            time: { start: Date.now(), end: Date.now() },
-          },
-        })
-        await user(session.id, "latest turn")
-        const keep = await user(session.id, "preserved tail turn")
-        const keepReply = await assistant(session.id, keep.id, tmp.path)
-        await svc.updatePart({
-          id: PartID.ascending(),
-          messageID: keepReply.id,
-          sessionID: session.id,
-          type: "tool",
-          callID: crypto.randomUUID(),
-          tool: "bash",
-          state: {
-            status: "completed",
-            input: {},
-            output: "keep output",
-            title: "keep",
-            metadata: {},
-            time: { start: Date.now(), end: Date.now() },
-          },
-        })
-        await Effect.runPromise(
-          KiloSessionCompaction.create({
-            session: {
-              updateMessage: (msg) => Effect.promise(() => svc.updateMessage(msg)),
-              updatePart: (part) => Effect.promise(() => svc.updatePart(part)),
-            },
-            sessionID: session.id,
-            agent: "build",
-            model: ref,
-            auto: false,
+        return Stream.fail(
+          new APICallError({
+            message: "Request Entity Too Large",
+            url: "https://api.kilo.ai/api/openrouter/responses",
+            requestBodyValues: {},
+            statusCode: 413,
+            responseHeaders: { "content-type": "text/plain" },
+            responseBody: "Request Entity Too Large\n\nFUNCTION_PAYLOAD_TOO_LARGE",
+            isRetryable: false,
           }),
         )
+      })
+      stub.push(
+        reply(
+          "summary",
+          (input) => {
+            captures.push(JSON.stringify(input.messages))
+          },
+          finish,
+        ),
+      )
 
-        const rt = runtime(stub.layer, Config.defaultLayer)
-        try {
-          const msgs = await svc.messages({ sessionID: session.id })
-          const parent = msgs.at(-1)?.info.id
-          expect(parent).toBeTruthy()
-          const result = await rt.runPromise(
-            SessionCompaction.Service.use((svc) =>
-              svc.process({
-                parentID: parent!,
-                messages: msgs,
-                sessionID: session.id,
-                auto: false,
-              }),
-            ),
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await svc.create({})
+          const old = await user(session.id, "old image turn")
+          await svc.updatePart({
+            id: PartID.ascending(),
+            messageID: old.id,
+            sessionID: session.id,
+            type: "file",
+            mime: "image/png",
+            filename: "old.png",
+            url: `data:image/png;base64,${"a".repeat(8_000)}`,
+          })
+          const oldReply = await assistant(session.id, old.id, tmp.path)
+          await svc.updatePart({
+            id: PartID.ascending(),
+            messageID: oldReply.id,
+            sessionID: session.id,
+            type: "tool",
+            callID: crypto.randomUUID(),
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {},
+              output: "old output".repeat(10_000),
+              title: "old",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          })
+          await user(session.id, "latest turn")
+          const keep = await user(session.id, "preserved tail turn")
+          const keepReply = await assistant(session.id, keep.id, tmp.path)
+          await svc.updatePart({
+            id: PartID.ascending(),
+            messageID: keepReply.id,
+            sessionID: session.id,
+            type: "tool",
+            callID: crypto.randomUUID(),
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {},
+              output: "keep output",
+              title: "keep",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          })
+          await Effect.runPromise(
+            KiloSessionCompaction.create({
+              session: {
+                updateMessage: (msg) => Effect.promise(() => svc.updateMessage(msg)),
+                updatePart: (part) => Effect.promise(() => svc.updatePart(part)),
+              },
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: false,
+            }),
           )
 
-          expect(result).toBe("continue")
-          expect(captures).toHaveLength(2)
-          expect(captures[0]).toContain("Attached image/png: old.png")
-          expect(captures[0]).toContain("old output")
-          expect(captures[0]).not.toContain("keep output")
-          expect(captures[1]).not.toContain("data:image/png;base64")
-          expect(captures[1]).not.toContain("old output")
-          expect(captures[1]).not.toContain("keep output")
-          expect(captures[1]).toContain("Attached image/png: old.png")
-          expect(captures[1]).toContain("Old tool result content cleared")
-          const tools = (await svc.messages({ sessionID: session.id }))
-            .flatMap((msg) => msg.parts)
-            .filter((part): part is MessageV2.ToolPart => part.type === "tool")
-          expect(tools).toHaveLength(2)
-          expect(tools[0]?.type).toBe("tool")
-          if (tools[0]?.state.status === "completed") expect(tools[0].state.time.compacted).toBeNumber()
-          expect(tools[1]?.type).toBe("tool")
-          if (tools[1]?.state.status === "completed") expect(tools[1].state.time.compacted).toBeUndefined()
-        } finally {
-          await rt.dispose()
-        }
-      },
-    })
-  })
+          const rt = runtime(stub.layer, Config.defaultLayer)
+          try {
+            const msgs = await svc.messages({ sessionID: session.id })
+            const parent = msgs.at(-1)?.info.id
+            expect(parent).toBeTruthy()
+            const result = await rt.runPromise(
+              SessionCompaction.Service.use((svc) =>
+                svc.process({
+                  parentID: parent!,
+                  messages: msgs,
+                  sessionID: session.id,
+                  auto: false,
+                }),
+              ),
+            )
+
+            expect(result).toBe(finish === "stop" ? "continue" : "stop")
+            expect(captures).toHaveLength(2)
+            expect(captures[0]).toContain("Attached image/png: old.png")
+            expect(captures[0]).toContain("old output")
+            expect(captures[0]).not.toContain("keep output")
+            expect(captures[1]).not.toContain("data:image/png;base64")
+            expect(captures[1]).not.toContain("old output")
+            expect(captures[1]).not.toContain("keep output")
+            expect(captures[1]).toContain("Attached image/png: old.png")
+            expect(captures[1]).toContain("Old tool result content cleared")
+            const saved = await svc.messages({ sessionID: session.id })
+            expect(saved.some((msg) => KiloCompactionState.bound(msg, saved))).toBe(finish === "stop")
+            expect(saved.find((msg) => msg.info.id === old.id)?.parts.some((part) => part.type === "file")).toBe(true)
+            const tools = saved
+              .flatMap((msg) => msg.parts)
+              .filter((part): part is MessageV2.ToolPart => part.type === "tool")
+            expect(tools).toHaveLength(2)
+            expect(tools[0]?.type).toBe("tool")
+            if (tools[0]?.state.status === "completed") {
+              expect(tools[0].state.time.compacted).toBeUndefined()
+              expect(tools[0].state.output).toBe("old output".repeat(10_000))
+            }
+            expect(tools[1]?.type).toBe("tool")
+            if (tools[1]?.state.status === "completed") expect(tools[1].state.time.compacted).toBeUndefined()
+          } finally {
+            await rt.dispose()
+          }
+        },
+      })
+    },
+  )
 })

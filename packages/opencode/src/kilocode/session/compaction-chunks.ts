@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { APICallError } from "ai"
 import type { Agent } from "@/agent/agent"
 import type { Config } from "@/config/config"
 import type { Provider } from "@/provider/provider"
@@ -12,6 +13,8 @@ import type { Session } from "@/session/session"
 import { Token } from "@/util/token"
 import * as Log from "@opencode-ai/core/util/log"
 import { KiloContextPolicy } from "./context-policy"
+import { KiloCompactionState } from "./compaction-state"
+import { KiloResponse } from "./response"
 
 type Update = <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
 type UpdateMessage = <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -33,11 +36,12 @@ export namespace KiloCompactionChunks {
   type Output = {
     result: SessionProcessor.Result
     output: string | undefined
+    error?: MessageV2.Assistant["error"]
   }
 
   type Deps = {
     processors: SessionProcessor.Interface
-    session: Pick<Session.Interface, "updateMessage" | "updatePart" | "removeMessage">
+    session: Pick<Session.Interface, "updateMessage" | "updatePart">
   }
 
   type Input = Deps & {
@@ -59,7 +63,14 @@ export namespace KiloCompactionChunks {
     parts: MessageV2.Part[]
   }
 
-  export function eligible(input: { result: SessionProcessor.Result; error: MessageV2.Assistant["error"] }) {
+  export function eligible(input: { result: SessionProcessor.Result; error?: MessageV2.Assistant["error"] }) {
+    if (KiloResponse.blocked(input.error)) return false
+    if (
+      input.error &&
+      input.error.name !== "ContextOverflowError" &&
+      !KiloContextPolicy.Blocked.isInstance(input.error)
+    )
+      return false
     if (input.result === "compact") return true
     if (input.result === "stop" && KiloContextPolicy.Blocked.isInstance(input.error))
       return input.error.data.reason.includes("exceeds the admission budget")
@@ -107,7 +118,16 @@ export namespace KiloCompactionChunks {
       })
       if (!(yield* large({ messages: chunk.messages, model: input.model, size }))) return input.replay
       const result = yield* summarize({ ...input, chunk, total: 1 })
-      if (result.result !== "continue" || !result.output) return input.replay
+      if (result.result !== "continue" || !result.output) {
+        if (!eligible(result))
+          throw new APICallError({
+            message: result.error?.data.message ?? "[COMPACTION_INCOMPLETE] The replay summary did not complete.",
+            url: "",
+            requestBodyValues: {},
+            isRetryable: false,
+          })
+        return input.replay
+      }
       return {
         info: input.replay.info,
         parts: [
@@ -184,7 +204,14 @@ export namespace KiloCompactionChunks {
     return Effect.gen(function* () {
       const chunks: Chunk[] = []
       let buf: MessageV2.WithParts[] = []
-      for (const msg of input.messages) {
+      // Validate against the source history before splitting. Detached summaries
+      // are ordinary assistant text only in this model-only projection.
+      const source = KiloCompactionState.visible(input.messages).flatMap((message) => {
+        if (message.info.role !== "assistant" || !message.info.summary) return [message]
+        if (!KiloCompactionState.bound(message, input.messages)) return []
+        return [{ ...message, info: { ...message.info, summary: false } }]
+      })
+      for (const msg of source) {
         const next = [...buf, msg]
         const size = yield* estimate({ messages: next, model: input.model })
         if (buf.length && size > input.size) {
@@ -201,7 +228,7 @@ export namespace KiloCompactionChunks {
 
   function text(msg: MessageV2.Assistant, parts: MessageV2.Part[]) {
     return parts
-      .filter((part): part is MessageV2.TextPart => part.type === "text" && part.messageID === msg.id)
+      .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored && part.messageID === msg.id)
       .map((part) => part.text.trim())
       .filter(Boolean)
       .join("\n\n")
@@ -215,7 +242,8 @@ export namespace KiloCompactionChunks {
   }
 
   function part(part: MessageV2.Part) {
-    if (part.type === "text") return clip({ text: part.text, chars: TRANSCRIPT_MAX_CHARS, label: "Text" })
+    if (part.type === "text")
+      return part.ignored ? "" : clip({ text: part.text, chars: TRANSCRIPT_MAX_CHARS, label: "Text" })
     if (part.type === "reasoning")
       return `[Reasoning]: ${clip({ text: part.text, chars: TRANSCRIPT_MAX_CHARS, label: "Reasoning" })}`
     if (part.type === "file") return `[File attachment]: ${part.filename ?? part.url} (${part.mime})`
@@ -242,6 +270,9 @@ export namespace KiloCompactionChunks {
 
   function transcript(input: { messages: MessageV2.WithParts[] }) {
     return input.messages
+      .filter(
+        (msg) => msg.info.role !== "assistant" || !msg.info.summary || KiloCompactionState.bound(msg, input.messages),
+      )
       .map((msg, index) => {
         const body = msg.parts.map(part).filter(Boolean).join("\n\n")
         return [
@@ -291,6 +322,9 @@ export namespace KiloCompactionChunks {
   function run(input: Input & { data: LLM.StreamInput["messages"]; text: string }) {
     return Effect.gen(function* () {
       const msg = yield* input.session.updateMessage(assistant({ base: input.target, sessionID: input.sessionID }))
+      yield* input.session.updatePart(
+        KiloCompactionState.mark({ message: msg, status: "worker", target: input.target.id }),
+      )
       const mdl = model(input.model, input.outputTokenMax)
       const worker = yield* input.processors.create({ assistantMessage: msg, sessionID: input.sessionID, model: mdl })
       const opts = input.agent.options
@@ -304,28 +338,32 @@ export namespace KiloCompactionChunks {
           ),
         },
       }
-      const out = yield* Effect.gen(function* () {
-        const result = yield* worker.process({
-          user: input.user,
-          agent,
-          sessionID: input.sessionID,
-          tools: {},
-          system: [],
-          messages: [...input.data, { role: "user", content: [{ type: "text", text: input.text }] }],
-          model: mdl,
-        })
-        const parts = MessageV2.parts(worker.message.id)
-        return { result, output: text(worker.message, parts) }
-      }).pipe(
-        Effect.ensuring(
-          input.session.removeMessage({ sessionID: input.sessionID, messageID: worker.message.id }).pipe(Effect.ignore),
-        ),
-      )
-      const result = out.result
-      const output = out.output
-      if (result !== "continue") return { result, output: undefined }
-      if (!output) return { result: "stop" as const, output: undefined }
-      return { result, output }
+      const result = yield* worker.process({
+        user: input.user,
+        agent,
+        sessionID: input.sessionID,
+        tools: {},
+        system: [],
+        messages: [...input.data, { role: "user", content: [{ type: "text", text: input.text }] }],
+        model: mdl,
+      })
+      const output = text(worker.message, MessageV2.parts(worker.message.id))
+      const error =
+        worker.message.error ??
+        worker.compactError?.() ??
+        (result === "continue" &&
+        (!KiloCompactionState.ready({ info: worker.message, parts: MessageV2.parts(worker.message.id) }) || !output)
+          ? new MessageV2.APIError({
+              message: "[COMPACTION_INCOMPLETE] A compaction worker did not produce a complete, nonempty result.",
+              isRetryable: false,
+            }).toObject()
+          : undefined)
+      if (error && !worker.message.error) {
+        worker.message.error = error
+        worker.message.finish = "error"
+        yield* input.session.updateMessage(worker.message)
+      }
+      return { result: error && result === "continue" ? ("stop" as const) : result, output, error }
     })
   }
 
@@ -367,18 +405,26 @@ export namespace KiloCompactionChunks {
     return Effect.gen(function* () {
       const result = yield* run({ ...input, data: messages({ summaries: input.summaries }), text: input.prompt })
       if (result.result === "continue") return result
+      if (!eligible(result)) return result
       if (input.depth >= DEPTH || input.summaries.length <= 1) return result
 
       const size = Math.ceil(input.summaries.length / 2)
       const groups = Array.from({ length: Math.ceil(input.summaries.length / size) }, (_, index) =>
         input.summaries.slice(index * size, index * size + size),
       )
+      let failure: Output | undefined
       const next: Output[] = yield* Effect.forEach(
         groups,
-        (group) => reduce({ ...input, summaries: group, depth: input.depth + 1 }),
+        (group) =>
+          Effect.gen(function* () {
+            if (failure) return failure
+            const output = yield* reduce({ ...input, summaries: group, depth: input.depth + 1 })
+            if (output.result !== "continue" || !output.output) failure = output
+            return output
+          }),
         { concurrency: 1 },
       )
-      if (next.some((item) => item.result !== "continue" || !item.output)) return result
+      if (failure) return failure
       return yield* reduce({ ...input, summaries: next.map((item) => item.output!), depth: input.depth + 2 })
     })
   }
@@ -394,16 +440,46 @@ export namespace KiloCompactionChunks {
       const chunks = yield* split({ messages: input.messages, model: input.model, size })
       log.info("fallback", { chunks: chunks.length, concurrency: CONCURRENCY })
 
-      const partial = yield* Effect.forEach(chunks, (chunk) => summarize({ ...input, chunk, total: chunks.length }), {
-        concurrency: Math.min(CONCURRENCY, chunks.length),
-      })
-      if (partial.some((item) => item.result !== "continue" || !item.output)) return "compact" as const
-
+      let failure: Output | undefined
+      const partial = yield* Effect.forEach(
+        chunks,
+        (chunk) =>
+          Effect.gen(function* () {
+            if (failure) return failure
+            const output = yield* summarize({ ...input, chunk, total: chunks.length })
+            if (output.result !== "continue" || !output.output) {
+              if (!failure || (eligible(failure) && !eligible(output))) failure = output
+            }
+            return output
+          }),
+        {
+          concurrency: Math.min(CONCURRENCY, chunks.length),
+        },
+      )
       const final =
-        chunks.length === 1 && (yield* large({ messages: chunks[0].messages, model: input.model, size }))
+        failure ??
+        (chunks.length === 1 && (yield* large({ messages: chunks[0].messages, model: input.model, size }))
           ? partial[0]
-          : yield* reduce({ ...input, summaries: partial.map((item) => item.output!), depth: 0 })
-      if (!final || final.result !== "continue" || !final.output) return "compact" as const
+          : yield* reduce({ ...input, summaries: partial.map((item) => item.output!), depth: 0 }))
+      if (!final || final.result !== "continue" || !final.output) {
+        if (final?.error || !final || !eligible(final)) {
+          input.target.error =
+            final?.error ??
+            new MessageV2.APIError({
+              message:
+                "[COMPACTION_INCOMPLETE] Compaction did not produce a complete summary. Original history was preserved.",
+              isRetryable: false,
+            }).toObject()
+          input.target.finish = "error"
+          yield* input.updateMessage(input.target)
+        }
+        return final && eligible(final) ? ("compact" as const) : ("stop" as const)
+      }
+
+      // Preserve rejected text for diagnosis, without concatenating it into the final summary.
+      for (const part of MessageV2.parts(input.target.id)) {
+        if (part.type === "text" && !part.ignored) yield* input.updatePart({ ...part, ignored: true })
+      }
 
       yield* input.updatePart({
         id: PartID.ascending(),

@@ -442,6 +442,13 @@ describe("Zen process context policy", () => {
       },
       parts: [],
     }
+    summary.parts.push({
+      id: PartID.ascending(),
+      messageID: summary.info.id,
+      sessionID: summary.info.sessionID,
+      type: "text",
+      text: "Completed bounded summary.",
+    })
     const messages = [old, pending, assistant, marker]
     const before = JSON.stringify(messages)
     expect(KiloContextTurn.retain(messages, receipt)).toMatchObject({ head: [old], tail_start_id: pending.info.id })

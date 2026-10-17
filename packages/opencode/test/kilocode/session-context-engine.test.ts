@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect } from "bun:test"
 import type { LanguageModelV3, LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { LLMClient } from "@opencode-ai/llm/route"
-import { Effect, Fiber, Layer, Schema } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { Agent } from "@/agent/agent"
 import { Auth } from "@/auth"
 import { Bus } from "@/bus"
@@ -19,6 +19,7 @@ import { Question } from "@/question"
 import { Reference } from "@/reference/reference"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { KiloContextTurn } from "@/kilocode/session/context-turn"
+import { KiloCompactionState } from "@/kilocode/session/compaction-state"
 import { KiloSessionMessageOrder } from "@/kilocode/session/message-order"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
@@ -220,6 +221,163 @@ const prompts = SessionPrompt.layer.pipe(
   Layer.provide(SessionRunState.defaultLayer),
 )
 const queued = testEffect(prompts)
+
+queued.instance("cancelled or failed followup publication never exposes a phantom prompt", () =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const prompt = yield* SessionPrompt.Service
+    for (const mode of ["row", "error", "commit", "commit-error"] as const) {
+      const fail = mode === "error"
+      const valid = mode === "commit" || mode === "commit-error"
+      const chat = yield* sessions.create({ title: "Fixture staged followup" })
+      const original = user(chat.id, "Original history")
+      delete original.info.format
+      yield* store(original)
+      const service = yield* SessionCompaction.Service
+      yield* service.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const ready = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const wrapped = Session.Service.of({
+        ...sessions,
+        updateMessage: <T extends MessageV2.Info>(info: T) =>
+          sessions
+            .updateMessage(info)
+            .pipe(
+              Effect.tap(() =>
+                info.role === "user" && mode === "row"
+                  ? Deferred.succeed(ready, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                  : Effect.void,
+              ),
+            ),
+        updatePart: <T extends MessageV2.Part>(part: T) => {
+          if (fail && part.type === "text" && part.metadata?.kilo_compaction_followup)
+            return Effect.die(new Error("fixture staging write failure"))
+          const state = part.type === "text" ? part.metadata?.kilo_compaction : undefined
+          return sessions
+            .updatePart(part)
+            .pipe(
+              Effect.tap(() =>
+                state && typeof state === "object" && "status" in state && state.status === "committed"
+                  ? mode === "commit-error"
+                    ? Effect.die(new Error("fixture post-commit notification failure"))
+                    : mode === "commit"
+                      ? Deferred.succeed(ready, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                      : Effect.void
+                  : Effect.void,
+              ),
+            )
+        },
+      })
+      const before = calls.length
+      const process = SessionCompaction.Service.use((value) =>
+        value.process({ parentID: messages.at(-1)!.info.id, sessionID: chat.id, messages, auto: true }),
+      ).pipe(Effect.provide(Layer.fresh(SessionCompaction.layer)), Effect.provideService(Session.Service, wrapped))
+      if (fail || mode === "commit-error") {
+        expect(Exit.isFailure(yield* process.pipe(Effect.exit))).toBe(true)
+      } else {
+        const fiber = yield* process.pipe(Effect.forkChild)
+        yield* Effect.raceFirst(
+          Deferred.await(ready),
+          Fiber.await(fiber).pipe(
+            Effect.flatMap((exit) =>
+              Effect.die(
+                new Error(
+                  `Compaction ended before followup publication: ${Exit.isSuccess(exit) ? exit.value : String(exit.cause)}`,
+                ),
+              ),
+            ),
+          ),
+        ).pipe(Effect.timeout("4 seconds"))
+        yield* Effect.sync(() => fiber.interruptUnsafe())
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.await(fiber)
+      }
+      const saved = yield* sessions.messages({ sessionID: chat.id })
+      const projected = MessageV2.filterCompacted([...saved].reverse())
+      expect(saved.filter((message) => message.info.role === "user")).toHaveLength(fail ? 2 : 3)
+      const target = saved.find((message) => message.info.role === "assistant" && message.info.summary)
+      if (!target || target.info.role !== "assistant") throw new Error("missing compaction target")
+      expect(!!target.info.error).toBe(!valid)
+      if (mode === "row") expect(target.info.error?.name).toBe("MessageAbortedError")
+      expect(saved.some((message) => KiloCompactionState.bound(message, saved))).toBe(valid)
+      if (valid) {
+        expect(
+          projected.some(
+            (message) =>
+              message.info.role === "user" &&
+              message.parts.some((part) => part.type === "text" && part.metadata?.compaction_continue),
+          ),
+        ).toBe(true)
+      } else {
+        expect(projected.filter((message) => message.info.role === "user")).toHaveLength(2)
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.id).toBe(target.info.id)
+      }
+      expect(calls).toHaveLength(before + 1)
+    }
+  }),
+)
+
+queued.instance("prompt results resolve retained workers to the aggregate compaction outcome without dispatch", () =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const prompt = yield* SessionPrompt.Service
+    for (const failed of [true, false]) {
+      const chat = yield* sessions.create({ title: "Fixture retained compaction workers" })
+      const parent = user(chat.id, "Original request")
+      const marker: MessageV2.CompactionPart = {
+        id: PartID.ascending(),
+        messageID: parent.info.id,
+        sessionID: chat.id,
+        type: "compaction",
+        auto: false,
+      }
+      parent.parts = [marker]
+      yield* store(parent)
+      const target = assistant(parent.info)
+      target.agent = "compaction"
+      target.summary = true
+      target.finish = failed ? "error" : "stop"
+      target.time.completed = Date.now()
+      if (failed)
+        target.error = new MessageV2.APIError({
+          message: "[RESPONSE_INCOMPLETE] Earlier worker failed",
+          isRetryable: false,
+        }).toObject()
+      yield* store({
+        info: target,
+        parts: [
+          KiloCompactionState.mark({ message: target, status: failed ? "candidate" : "committed", marker }),
+          { id: PartID.ascending(), sessionID: chat.id, messageID: target.id, type: "text", text: "aggregate summary" },
+        ],
+      })
+      const worker = assistant(parent.info)
+      worker.agent = "compaction"
+      worker.summary = true
+      worker.finish = "stop"
+      worker.time.completed = Date.now()
+      yield* store({
+        info: worker,
+        parts: [
+          KiloCompactionState.mark({ message: worker, status: "worker", target: target.id }),
+          {
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: worker.id,
+            type: "text",
+            text: "newer successful sibling",
+          },
+        ],
+      })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.id).toBe(target.id)
+      expect(result.info.role === "assistant" && result.info.error).toEqual(target.error)
+      expect(calls).toHaveLength(0)
+      expect((yield* MessageV2.get({ sessionID: chat.id, messageID: worker.id })).parts).toHaveLength(2)
+    }
+  }),
+)
 
 function user(sessionID: SessionID, text: string): MessageV2.WithParts & { info: MessageV2.User } {
   const info: MessageV2.User = {

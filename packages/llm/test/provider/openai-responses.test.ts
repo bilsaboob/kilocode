@@ -567,7 +567,11 @@ describe("OpenAI Responses route", () => {
       })
 
       expect(response.text).toBe("Hello!")
-      expect(response.events).toEqual([
+      // kilocode_change start - receipt-only observations are tested separately
+      expect(
+        response.events.filter((event) => !(event.type === "text-delta" && event.id === "response-receipt")),
+      ).toMatchObject([
+        // kilocode_change end
         { type: "step-start", index: 0 },
         { type: "text-start", id: "msg_1" },
         { type: "text-delta", id: "msg_1", text: "Hello" },
@@ -603,7 +607,11 @@ describe("OpenAI Responses route", () => {
 
       expect(response.reasoning).toBe("thinking")
       expect(response.text).toBe("Hello")
-      expect(response.events).toMatchObject([
+      // kilocode_change start
+      expect(
+        response.events.filter((event) => !(event.type === "text-delta" && event.id === "response-receipt")),
+      ).toMatchObject([
+        // kilocode_change end
         { type: "step-start", index: 0 },
         { type: "reasoning-start", id: "rs_1" },
         { type: "reasoning-delta", id: "rs_1", text: "thinking" },
@@ -678,7 +686,11 @@ describe("OpenAI Responses route", () => {
       )
 
       expect(response.reasoning).toBe("FirstSecond")
-      expect(response.events).toMatchObject([
+      // kilocode_change start
+      expect(
+        response.events.filter((event) => !(event.type === "text-delta" && event.id === "response-receipt")),
+      ).toMatchObject([
+        // kilocode_change end
         { type: "step-start", index: 0 },
         {
           type: "reasoning-start",
@@ -969,7 +981,11 @@ describe("OpenAI Responses route", () => {
         providerMetadata: { openai: { input_tokens: 5, output_tokens: 1 } },
       })
 
-      expect(response.events).toEqual([
+      // kilocode_change start
+      expect(
+        response.events.filter((event) => !(event.type === "text-delta" && event.id === "response-receipt")),
+      ).toMatchObject([
+        // kilocode_change end
         { type: "step-start", index: 0 },
         {
           type: "tool-input-start",
@@ -1003,11 +1019,10 @@ describe("OpenAI Responses route", () => {
           providerExecuted: undefined,
           providerMetadata: { openai: { itemId: "item_1" } },
         },
-        { type: "step-finish", index: 0, reason: "tool-calls", usage, providerMetadata: undefined },
+        { type: "step-finish", index: 0, reason: "tool-calls", usage }, // kilocode_change
         {
           type: "finish",
           reason: "tool-calls",
-          providerMetadata: undefined,
           usage,
         },
       ])
@@ -1177,7 +1192,15 @@ describe("OpenAI Responses route", () => {
         ),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "server_error: Upstream model unavailable" }])
+      // kilocode_change start - failed responses retain spending but do not finish successfully
+      expect(response.events.filter((event) => event.type === "provider-error")).toMatchObject([
+        {
+          type: "provider-error",
+          message: "[RESPONSE_FAILED] server_error: Upstream model unavailable",
+          retryable: false,
+        },
+      ])
+      // kilocode_change end
     }),
   )
 
@@ -1194,7 +1217,11 @@ describe("OpenAI Responses route", () => {
         ),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "invalid_prompt" }])
+      // kilocode_change start
+      expect(response.events.filter((event) => event.type === "provider-error")).toMatchObject([
+        { type: "provider-error", message: "[RESPONSE_FAILED] invalid_prompt", retryable: false },
+      ])
+      // kilocode_change end
     }),
   )
 
@@ -1236,7 +1263,11 @@ describe("OpenAI Responses route", () => {
         Effect.provide(fixedResponse(sseEvents({ type: "response.failed", response: { id: "resp_failed_3" } }))),
       )
 
-      expect(response.events).toEqual([{ type: "provider-error", message: "OpenAI Responses response failed" }])
+      // kilocode_change start
+      expect(response.events.filter((event) => event.type === "provider-error")).toMatchObject([
+        { type: "provider-error", message: "[RESPONSE_FAILED] OpenAI Responses response failed", retryable: false },
+      ])
+      // kilocode_change end
     }),
   )
 

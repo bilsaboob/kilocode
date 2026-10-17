@@ -7,6 +7,7 @@ import type { PlatformError } from "effect/PlatformError"
 import { AppFileSystem } from "../filesystem"
 import { Global } from "../global"
 import { Hash } from "./hash"
+import type { Flock } from "./flock" // kilocode_change
 
 export namespace EffectFlock {
   // ---------------------------------------------------------------------------
@@ -72,10 +73,25 @@ export namespace EffectFlock {
   // ---------------------------------------------------------------------------
 
   export interface Interface {
-    readonly acquire: (key: string, dir?: string) => Effect.Effect<void, LockError, Scope.Scope>
+    readonly acquire: (
+      key: string,
+      dir?: string,
+      options?: Flock.Options,
+    ) => Effect.Effect<void, LockError, Scope.Scope> // kilocode_change
     readonly withLock: {
-      (key: string, dir?: string): <A, E, R>(body: Effect.Effect<A, E, R>) => Effect.Effect<A, E | LockError, R>
-      <A, E, R>(body: Effect.Effect<A, E, R>, key: string, dir?: string): Effect.Effect<A, E | LockError, R>
+      // kilocode_change start - auth locks use the decorated filesystem without lease-age eviction
+      (
+        key: string,
+        dir?: string,
+        options?: Flock.Options,
+      ): <A, E, R>(body: Effect.Effect<A, E, R>) => Effect.Effect<A, E | LockError, R>
+      <A, E, R>(
+        body: Effect.Effect<A, E, R>,
+        key: string,
+        dir?: string,
+        options?: Flock.Options,
+      ): Effect.Effect<A, E | LockError, R>
+      // kilocode_change end
     }
   }
 
@@ -165,8 +181,13 @@ export namespace EffectFlock {
 
       type Handle = { token: string; metaPath: string; heartbeatPath: string; lockDir: string }
 
-      const tryAcquireLockDir = (lockDir: string, key: string) =>
+      const tryAcquireLockDir = (
+        lockDir: string,
+        key: string,
+        options?: Flock.Options, // kilocode_change
+      ) =>
         Effect.gen(function* () {
+          yield* Effect.sync(() => options?.signal?.throwIfAborted()) // kilocode_change
           const token = randomUUID()
           const metaPath = path.join(lockDir, "meta.json")
           const heartbeatPath = path.join(lockDir, "heartbeat")
@@ -175,6 +196,7 @@ export namespace EffectFlock {
           const created = yield* atomicMkdir(lockDir)
 
           if (!created) {
+            if (options?.reclaim === false) return yield* new NotAcquired() // kilocode_change
             if (!(yield* isStale(lockDir, heartbeatPath, metaPath))) return yield* new NotAcquired()
 
             // Stale — race for breaker ownership
@@ -217,14 +239,39 @@ export namespace EffectFlock {
 
       // -- retry wrapper (preserves Handle type) --
 
-      const acquireHandle = (lockfile: string, key: string): Effect.Effect<Handle, LockError> =>
-        tryAcquireLockDir(lockfile, key).pipe(
+      // kilocode_change start - preserve contention barriers and bounded waits for auth storage
+      const acquireHandle = (
+        lockfile: string,
+        key: string,
+        options?: Flock.Options,
+      ): Effect.Effect<Handle, LockError> => {
+        const start = wall()
+        let attempt = 0
+        return tryAcquireLockDir(lockfile, key, options).pipe(
+          Effect.tapError(() =>
+            Effect.promise(async () => {
+              await options?.onWait?.({
+                key,
+                attempt: ++attempt,
+                delay: options.baseDelayMs ?? BASE_DELAY_MS,
+                waited: wall() - start,
+              })
+            }),
+          ),
+          // kilocode_change end
           Effect.retry({
             while: (err) => err._tag === "NotAcquired",
-            schedule: retrySchedule,
+            schedule: options
+              ? Schedule.exponential(options.baseDelayMs ?? BASE_DELAY_MS, 1.7).pipe(
+                  Schedule.either(Schedule.spaced(options.maxDelayMs ?? MAX_DELAY_MS)),
+                  Schedule.jittered,
+                  Schedule.while((meta) => meta.elapsed < (options.timeoutMs ?? TIMEOUT_MS)),
+                )
+              : retrySchedule, // kilocode_change
           }),
           Effect.catchTag("NotAcquired", () => Effect.fail(new LockTimeoutError({ key }))),
         )
+      } // kilocode_change
 
       // -- release --
 
@@ -249,14 +296,15 @@ export namespace EffectFlock {
 
       // -- build service --
 
-      const acquire = Effect.fn("EffectFlock.acquire")(function* (key: string, dir?: string) {
+      const acquire = Effect.fn("EffectFlock.acquire")(function* (key: string, dir?: string, options?: Flock.Options) {
+        // kilocode_change
         const lockDir = dir ?? lockRoot
         yield* ensureDir(lockDir)
 
         const lockfile = path.join(lockDir, Hash.fast(key) + ".lock")
 
         // acquireRelease: acquire is uninterruptible, release is guaranteed
-        const handle = yield* Effect.acquireRelease(acquireHandle(lockfile, key), (handle) => release(handle))
+        const handle = yield* Effect.acquireRelease(acquireHandle(lockfile, key, options), (handle) => release(handle)) // kilocode_change
 
         // Heartbeat fiber — scoped, so it's interrupted before release runs
         yield* fs
@@ -266,10 +314,16 @@ export namespace EffectFlock {
 
       const withLock: Interface["withLock"] = Function.dual(
         (args) => Effect.isEffect(args[0]),
-        <A, E, R>(body: Effect.Effect<A, E, R>, key: string, dir?: string): Effect.Effect<A, E | LockError, R> =>
+        <A, E, R>(
+          body: Effect.Effect<A, E, R>,
+          key: string,
+          dir?: string,
+          options?: Flock.Options,
+        ): Effect.Effect<A, E | LockError, R> => // kilocode_change
           Effect.scoped(
             Effect.gen(function* () {
-              yield* acquire(key, dir)
+              yield* acquire(key, dir, options) // kilocode_change
+              yield* Effect.sync(() => options?.signal?.throwIfAborted()) // kilocode_change
               return yield* body
             }),
           ),

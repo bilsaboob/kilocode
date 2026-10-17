@@ -1,9 +1,14 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { CodexModels } from "../../src/kilocode/provider/codex-models"
 import { patchConfigModel } from "../../src/kilocode/provider/provider"
+import { AuthStore } from "../../src/kilocode/auth/store"
+import { refreshCodexAuth } from "../../src/kilocode/provider/codex-refresh"
 
 const profile = process.env.ZEN_KILO_CONTEXT_POLICY
-afterEach(() => {
+const deadline = Date.now() + 3600_000
+beforeEach(() => AuthStore.disk.set("openai", credentials()))
+afterEach(async () => {
+  await AuthStore.disk.remove("openai")
   if (profile === undefined) {
     delete process.env.ZEN_KILO_CONTEXT_POLICY
     return
@@ -17,7 +22,7 @@ function credentials(accountId = "test-account") {
     accountId,
     access: "test-access",
     refresh: "test-refresh",
-    expires: Date.now() + 3600_000,
+    expires: deadline,
   }
 }
 
@@ -52,7 +57,6 @@ describe("authenticated Codex context metadata", () => {
     const result = await CodexModels.create().load({
       auth,
       endpoint: new URL("/backend-api/codex/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
@@ -95,7 +99,6 @@ describe("authenticated Codex context metadata", () => {
     const input = {
       auth,
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
@@ -112,6 +115,7 @@ describe("authenticated Codex context metadata", () => {
 
   test("does not reuse metadata between accounts", async () => {
     let auth = credentials("first-account")
+    await AuthStore.disk.set("openai", auth)
     let calls = 0
     using server = Bun.serve({
       hostname: "127.0.0.1",
@@ -124,13 +128,13 @@ describe("authenticated Codex context metadata", () => {
     const catalog = CodexModels.create()
     const input = {
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
     }
     const first = CodexModels.lookup(await catalog.load({ ...input, auth }), "gpt-5.6-sol")
     auth = credentials("second-account")
+    await AuthStore.disk.set("openai", auth)
     const second = CodexModels.lookup(await catalog.load({ ...input, auth }), "gpt-5.6-sol")
     expect(calls).toBe(2)
     expect(first.status).toBe("ready")
@@ -156,7 +160,6 @@ describe("authenticated Codex context metadata", () => {
       catalog.load({
         auth,
         endpoint: new URL("/responses", server.url).href,
-        getAuth: async () => auth,
         refresh: async () => {
           throw new Error("Unexpected refresh")
         },
@@ -178,12 +181,10 @@ describe("authenticated Codex context metadata", () => {
 
   test("credential preparation errors do not invent a usable maximum", async () => {
     const auth = credentials()
+    await AuthStore.disk.remove("openai")
     const result = await CodexModels.create().load({
       auth,
       endpoint: "https://example.invalid/responses",
-      getAuth: async () => {
-        throw new Error("private credential error")
-      },
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
@@ -194,7 +195,7 @@ describe("authenticated Codex context metadata", () => {
     })
   })
 
-  for (const change of ["logout", "account-change"] as const) {
+  for (const change of ["logout", "account-change", "identical-login"] as const) {
     test(`rejects catalog results after ${change}`, async () => {
       let auth: ReturnType<typeof credentials> | undefined = credentials()
       const initial = auth
@@ -212,13 +213,14 @@ describe("authenticated Codex context metadata", () => {
       const pending = CodexModels.create().load({
         auth: initial,
         endpoint: new URL("/responses", server.url).href,
-        getAuth: async () => auth,
         refresh: async () => {
           throw new Error("Unexpected refresh")
         },
       })
       await entered.promise
-      auth = change === "logout" ? undefined : credentials("replacement")
+      auth = change === "logout" ? undefined : credentials(change === "account-change" ? "replacement" : "test-account")
+      if (auth) await AuthStore.disk.set("openai", auth)
+      else await AuthStore.disk.remove("openai")
       release.resolve()
       const result = await pending
       expect(CodexModels.lookup(result, "gpt-5.6-sol")).toMatchObject({ status: "unavailable" })
@@ -227,6 +229,7 @@ describe("authenticated Codex context metadata", () => {
 
   test("renews expired credentials before the metadata GET", async () => {
     let auth = { ...credentials(), expires: 0, access: "expired" }
+    await AuthStore.disk.set("openai", auth)
     let renewed = 0
     using server = Bun.serve({
       hostname: "127.0.0.1",
@@ -239,10 +242,10 @@ describe("authenticated Codex context metadata", () => {
     const result = await CodexModels.create().load({
       auth,
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         renewed++
         auth = { ...auth, access: "renewed", expires: Date.now() + 60_000 }
+        await AuthStore.disk.commit(await AuthStore.disk.snapshot("openai"), auth)
         return auth
       },
     })
@@ -252,19 +255,168 @@ describe("authenticated Codex context metadata", () => {
 
   test("does not adopt an account change hidden by mutation during credential renewal", async () => {
     const auth = { ...credentials(), expires: 0 }
+    await AuthStore.disk.set("openai", auth)
     const result = await CodexModels.create().load({
       auth,
       endpoint: "https://example.invalid/responses",
-      getAuth: async () => auth,
       refresh: async () => {
         Object.assign(auth, credentials("replacement-account"))
+        await AuthStore.disk.set("openai", auth)
         return auth
       },
     })
     expect(result).toMatchObject({
       status: "unavailable",
-      reason: "The Codex account changed while renewing credentials.",
+      reason: "Codex credentials could not be prepared for model-limit discovery.",
     })
+  })
+
+  test("catalog renewal cannot adopt an identical new login or send a catalog request", async () => {
+    const auth = { ...credentials(), expires: 0 }
+    await AuthStore.disk.set("openai", auth)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let requests = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++
+        return Response.json({ models: [model()] })
+      },
+    })
+    const pending = CodexModels.create().load({
+      auth,
+      endpoint: new URL("/responses", server.url).href,
+      refresh: (auth) =>
+        refreshCodexAuth({
+          auth,
+          account: () => "test-account",
+          refresh: async () => {
+            entered.resolve()
+            await release.promise
+            return { id_token: "", access_token: "renewed", refresh_token: "renewed", expires_in: 3600 }
+          },
+        }),
+    })
+    await entered.promise
+    await AuthStore.disk.remove("openai")
+    await AuthStore.disk.set("openai", auth)
+    release.resolve()
+    expect((await pending) instanceof Map).toBe(false)
+    expect(requests).toBe(0)
+  })
+
+  test("catalog renewal cannot silently change account in the same login generation", async () => {
+    const auth = { ...credentials(), expires: 0 }
+    await AuthStore.disk.set("openai", auth)
+    const before = await AuthStore.disk.snapshot("openai")
+    let requests = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++
+        return Response.json({ models: [model()] })
+      },
+    })
+    const result = await CodexModels.create().load({
+      auth,
+      endpoint: new URL("/responses", server.url).href,
+      refresh: (auth) =>
+        refreshCodexAuth({
+          auth,
+          account: () => "other-account",
+          refresh: async () => ({
+            id_token: "",
+            access_token: "new-account-access",
+            refresh_token: "new-account-refresh",
+            expires_in: 3600,
+          }),
+        }),
+    })
+    expect(CodexModels.lookup(result, "gpt-5.6-sol").status).toBe("unavailable")
+    expect(await AuthStore.disk.snapshot("openai")).toEqual(before)
+    expect(requests).toBe(0)
+  })
+
+  test("catalog account identity remains fenced independently of login generation", async () => {
+    const auth = credentials()
+    const catalog = CodexModels.create()
+    let requests = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++
+        return Response.json({ models: [model()] })
+      },
+    })
+    const input = { auth, endpoint: new URL("/responses", server.url).href, refresh: async () => auth }
+    const first = CodexModels.lookup(await catalog.load(input), "gpt-5.6-sol")
+    const before = await AuthStore.disk.snapshot("openai")
+    await AuthStore.disk.commit(before, { ...auth, accountId: "other-account" })
+    expect((await AuthStore.disk.snapshot("openai")).loginGeneration).toBe(before.loginGeneration)
+    expect(CodexModels.lookup(await catalog.load(input), "gpt-5.6-sol").status).toBe("unavailable")
+    const second = CodexModels.lookup(
+      await catalog.load({ ...input, auth: credentials("other-account") }),
+      "gpt-5.6-sol",
+    )
+    expect(second.binding).not.toBe(first.binding)
+    expect(requests).toBe(2)
+  })
+
+  test("in-place auth mutation without persistence cannot redirect catalog discovery", async () => {
+    const auth = { ...credentials(), expires: 0 }
+    await AuthStore.disk.set("openai", auth)
+    const before = await AuthStore.disk.snapshot("openai")
+    let requests = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++
+        return Response.json({ models: [model()] })
+      },
+    })
+    const result = await CodexModels.create().load({
+      auth,
+      endpoint: new URL("/responses", server.url).href,
+      refresh: async () => {
+        Object.assign(auth, credentials("mutated-account"))
+        return auth
+      },
+    })
+    expect(CodexModels.lookup(result, "gpt-5.6-sol").status).toBe("unavailable")
+    expect(requests).toBe(0)
+    expect(await AuthStore.disk.snapshot("openai")).toEqual(before)
+  })
+
+  test("cache bindings separate identical relogins and reject the old loader", async () => {
+    let calls = 0
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        calls++
+        return Response.json({ models: [model()] })
+      },
+    })
+    const catalog = CodexModels.create()
+    const input = {
+      auth: credentials(),
+      endpoint: new URL("/responses", server.url).href,
+      refresh: async () => {
+        throw new Error("Unexpected renewal")
+      },
+    }
+    const first = CodexModels.lookup(await catalog.load(input), "gpt-5.6-sol")
+    await AuthStore.disk.set("openai", credentials())
+    expect(CodexModels.lookup(await catalog.load(input), "gpt-5.6-sol").status).toBe("unavailable")
+    const second = CodexModels.lookup(await catalog.load({ ...input, auth: credentials() }), "gpt-5.6-sol")
+    expect(second.status).toBe("ready")
+    expect(second.binding).not.toBe(first.binding)
+    expect(calls).toBe(2)
   })
 
   test("does not invent maxima or borrow another model's metadata", async () => {
@@ -287,7 +439,6 @@ describe("authenticated Codex context metadata", () => {
     const result = await CodexModels.create().load({
       auth,
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
@@ -313,7 +464,6 @@ describe("authenticated Codex context metadata", () => {
     const result = await CodexModels.create().load({
       auth,
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },
@@ -332,7 +482,6 @@ describe("authenticated Codex context metadata", () => {
     const result = await CodexModels.create().load({
       auth,
       endpoint: new URL("/responses", server.url).href,
-      getAuth: async () => auth,
       refresh: async () => {
         throw new Error("Unexpected refresh")
       },

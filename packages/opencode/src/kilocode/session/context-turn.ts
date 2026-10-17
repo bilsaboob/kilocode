@@ -1,5 +1,6 @@
 import type { MessageV2 } from "@/session/message-v2"
 import { KiloContextPolicy } from "./context-policy"
+import { KiloCompactionState } from "./compaction-state"
 import { isDeepStrictEqual } from "node:util"
 
 export namespace KiloContextTurn {
@@ -45,8 +46,7 @@ export namespace KiloContextTurn {
         message.info.role === "assistant" &&
         message.info.parentID === source &&
         !message.info.summary &&
-        message.info.finish &&
-        !message.info.error &&
+        KiloCompactionState.successful(message.info) &&
         message.parts.some((part) => part.type === "tool") &&
         message.parts.every(
           (part) => part.type !== "tool" || part.state.status === "completed" || part.state.status === "error",
@@ -61,7 +61,7 @@ export namespace KiloContextTurn {
         message.info.parentID === source &&
         !message.info.summary &&
         !message.info.error &&
-        (!!message.info.finish || message.parts.length === 0),
+        (KiloCompactionState.successful(message.info) || message.parts.length === 0),
     )
     const boundary = safe && steps.length > 1 ? newest : index + 1
     return {
@@ -75,7 +75,7 @@ export namespace KiloContextTurn {
   function completed(messages: MessageV2.WithParts[]) {
     return new Set(
       messages.flatMap((message) =>
-        message.info.role === "assistant" && message.info.summary && message.info.finish && !message.info.error
+        message.info.role === "assistant" && KiloCompactionState.bound(message, messages)
           ? [message.info.parentID]
           : [],
       ),
@@ -85,9 +85,10 @@ export namespace KiloContextTurn {
   // Summary markers are transport history, not a replacement user submission.
   // Keep the original user/assistant/tool identities as the active turn.
   export function active(messages: MessageV2.WithParts[]) {
-    const done = completed(messages)
+    const visible = KiloCompactionState.visible(messages)
+    const done = completed(visible)
     const markers = new Set(
-      messages
+      visible
         .filter(
           (message) =>
             done.has(message.info.id) &&
@@ -95,7 +96,7 @@ export namespace KiloContextTurn {
         )
         .map((message) => message.info.id),
     )
-    return messages.filter(
+    return visible.filter(
       (message) =>
         !markers.has(message.info.id) &&
         !(message.info.role === "assistant" && message.info.summary && markers.has(message.info.parentID)),
@@ -104,13 +105,9 @@ export namespace KiloContextTurn {
 
   export function state(messages: MessageV2.WithParts[], user: MessageV2.User): KiloContextPolicy.State | undefined {
     if (!user.contextPolicy) return undefined
-    const responses = messages.filter(
-      (message) =>
-        message.info.role === "assistant" && !message.info.summary && message.info.finish && !message.info.error,
-    )
-    const progress = responses.findLast(
-      (message) => message.info.role === "assistant" && message.info.parentID === user.id,
-    )?.info.id
+    const progress = KiloCompactionState.latest(
+      messages.filter((message) => message.info.role === "assistant" && message.info.parentID === user.id),
+    )?.id
     const done = completed(messages)
     const attempted = messages.some(
       (message) =>
@@ -121,7 +118,7 @@ export namespace KiloContextTurn {
         ),
     )
     const plan = partition(messages, user.id)
-    const latest = responses.at(-1)?.info
+    const latest = KiloCompactionState.latest(messages)
     return {
       progress,
       currentTokens: KiloContextPolicy.count(latest?.role === "assistant" ? latest.tokens : undefined),
@@ -153,10 +150,9 @@ export namespace KiloContextTurn {
     const summary = messages.findIndex(
       (message) =>
         message.info.role === "assistant" &&
-        message.info.summary &&
         message.info.parentID === part.messageID &&
-        message.info.finish &&
-        !message.info.error,
+        KiloCompactionState.bound(message, messages) &&
+        KiloCompactionState.completed(message, part),
     )
     if (summary < 0) return messages
     if (source < 0 || tail <= source) throw KiloContextPolicy.blocked("The retained tool-history boundary is missing")
@@ -175,7 +171,7 @@ export namespace KiloContextTurn {
         : {
             ...message,
             parts: message.parts.map((item) =>
-              item.type !== "text"
+              item.type !== "text" || item.ignored
                 ? item
                 : {
                     ...item,

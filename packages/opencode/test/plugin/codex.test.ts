@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { fixture } from "../kilocode/fixture/auth-store" // kilocode_change
 import {
   CodexAuthPlugin,
   parseJwtClaims,
@@ -147,6 +148,8 @@ describe("plugin.codex", () => {
       access: "",
       expires: 0,
     }
+    await using f = await fixture(auth) // kilocode_change
+    const entered = Promise.withResolvers<void>() // kilocode_change
     const authUpdates: Array<{
       body: { refresh: string; access: string; expires: number; accountId?: string }
     }> = []
@@ -164,6 +167,7 @@ describe("plugin.codex", () => {
         if (url.pathname === "/oauth/token") {
           expect(await request.text()).toContain("refresh_token=refresh-old")
           refreshRequests += 1
+          entered.resolve() // kilocode_change
           await refreshReady
           return Response.json({
             id_token: createTestJwt({ chatgpt_account_id: "acc-123" }),
@@ -211,16 +215,17 @@ describe("plugin.codex", () => {
         $: {} as never,
       },
       {
+        store: f.store, // kilocode_change
         issuer: server.url.origin,
         codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
       },
     )
-    const loaded = await hooks.auth!.loader!(async () => auth as never, {} as never)
+    const loaded = await hooks.auth!.loader!(async () => (await f.store.all()).openai as never, {} as never) // kilocode_change
 
     const first = loaded.fetch!("https://api.openai.com/v1/responses")
     const second = loaded.fetch!("https://api.openai.com/v1/responses")
 
-    await waitFor(() => refreshRequests === 1)
+    await entered.promise // kilocode_change
     expect(apiRequests).toHaveLength(0)
 
     resolveRefresh!()
@@ -229,7 +234,11 @@ describe("plugin.codex", () => {
     expect(refreshRequests).toBe(1)
     // kilocode_change start - automatic refresh must not trigger interactive auth invalidation
     expect(authUpdates).toHaveLength(0)
-    expect(auth).toMatchObject({ refresh: "refresh-new", access: "access-new", accountId: "acc-123" })
+    expect((await f.store.all()).openai).toMatchObject({
+      refresh: "refresh-new",
+      access: "access-new",
+      accountId: "acc-123",
+    })
     // kilocode_change end
     expect(apiRequests).toEqual([
       { authorization: "Bearer access-new", accountId: "acc-123" },
@@ -237,11 +246,3 @@ describe("plugin.codex", () => {
     ])
   })
 })
-
-async function waitFor(predicate: () => boolean) {
-  const started = Date.now()
-  while (!predicate()) {
-    if (Date.now() - started > 1_000) throw new Error("timed out waiting for condition")
-    await new Promise((resolve) => setTimeout(resolve, 1))
-  }
-}

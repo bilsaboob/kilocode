@@ -1,100 +1,116 @@
-import fs from "fs/promises"
-import path from "path"
-import z from "zod"
+import fs from "node:fs/promises"
+import { readSync } from "node:fs"
+import path from "node:path"
+import { z } from "zod"
 
-const Auth = z.object({
-  type: z.literal("oauth"),
-  refresh: z.string(),
-  access: z.string(),
-  expires: z.number(),
-  accountId: z.string().optional(),
-})
-const Tokens = z.object({
-  id_token: z.string(),
-  access_token: z.string(),
-  refresh_token: z.string(),
-  expires_in: z.number().optional(),
-})
-
-const Msg = z.object({
-  root: z.string(),
-  url: z.string(),
-  ready: z.string(),
-  start: z.string(),
-  lock: z
-    .object({
-      staleMs: z.number(),
-      timeoutMs: z.number(),
-      baseDelayMs: z.number(),
-      maxDelayMs: z.number(),
-    })
-    .optional(),
-})
-
-function input() {
-  const raw = process.argv[2]
-  if (!raw) throw new Error("Missing Codex auth refresh worker input")
-  return Msg.parse(JSON.parse(raw))
-}
-
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms))
-}
-
-async function wait(file: string) {
-  const stop = Date.now() + 10_000
-  while (Date.now() < stop) {
-    if (
-      await fs
-        .stat(file)
-        .then(() => true)
-        .catch(() => false)
-    )
-      return
-    await sleep(10)
-  }
-  throw new Error(`Timed out waiting for file: ${file}`)
-}
-
-async function main() {
-  const msg = input()
-  process.env.XDG_DATA_HOME = path.join(msg.root, "share")
-  process.env.XDG_CACHE_HOME = path.join(msg.root, "cache")
-  process.env.XDG_CONFIG_HOME = path.join(msg.root, "config")
-  process.env.XDG_STATE_HOME = path.join(msg.root, "state")
-  process.env.KILO_TEST_HOME = path.join(msg.root, "home")
-
-  const { Path } = await import("@opencode-ai/core/global")
-  const { refreshCodexAuth } = await import("../../../src/kilocode/provider/codex-refresh")
-  const file = path.join(Path.data, "auth.json")
-  const read = async () => {
-    const data = z.object({ openai: Auth }).parse(JSON.parse(await fs.readFile(file, "utf8")))
-    return data.openai
-  }
-  await fs.writeFile(msg.ready, String(process.pid))
-  await wait(msg.start)
-  const auth = await read()
-  const next = await refreshCodexAuth({
-    getAuth: read,
-    auth,
-    refresh: async (token) => {
-      const response = await fetch(msg.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ refresh_token: token }).toString(),
-      })
-      if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`)
-      return Tokens.parse(await response.json())
-    },
-    account: () => undefined,
-    lock: msg.lock,
+const input = z
+  .object({
+    root: z.string(),
+    state: z.string(),
+    role: z.enum(["refresh", "hold", "set", "service", "logout", "relogin"]),
+    stale: z.boolean().optional(),
+    provider: z.string().default("openai"),
+    url: z.string().optional(),
   })
+  .parse(JSON.parse(process.argv[2]))
 
-  process.stdout.write(JSON.stringify(next))
-}
+delete process.env.KILO_AUTH_CONTENT
+process.env.XDG_DATA_HOME = path.join(input.root, "share")
+process.env.XDG_CACHE_HOME = path.join(input.root, input.state, "cache")
+process.env.XDG_CONFIG_HOME = path.join(input.root, input.state, "config")
+process.env.XDG_STATE_HOME = path.join(input.root, input.state, "state")
+process.env.KILO_TEST_HOME = path.join(input.root, input.state, "home")
+process.env.KILO_DB = ":memory:"
 
-await main().catch((err) => {
-  const text = err instanceof Error ? (err.stack ?? err.message) : String(err)
-  process.stderr.write(text)
-  process.exit(1)
+const { AuthStore, AuthStaleError } = await import("../../../src/kilocode/auth/store")
+const { Global } = await import("@opencode-ai/core/global")
+const { Flock } = await import("@opencode-ai/core/util/flock")
+const file = path.join(Global.Path.data, "auth.json")
+const store = AuthStore.create(file, {
+  onWait: () => {
+    process.send?.("waiting")
+  },
 })
+const auth = input.role === "refresh" ? (await store.all()).openai : undefined
+const start = new Promise<void>((resolve) => process.once("message", () => resolve()))
+process.send?.("ready")
+await start
+
+try {
+  if (input.role === "hold") {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await using _lock = await Flock.acquire("auth-store", {
+      dir: path.join(path.dirname(file), "auth-locks"),
+      reclaim: false,
+      staleMs: 10,
+    })
+    await new Promise<void>((resolve) => process.send?.("held", () => resolve()))
+    // Block the event loop (and heartbeat) until the parent releases stdin.
+    readSync(0, Buffer.alloc(1), 0, 1, null)
+  }
+  if (input.role === "set") await store.set(input.provider, { type: "api", key: input.provider })
+  if (input.role === "service") {
+    const { Effect } = await import("effect")
+    const { Auth } = await import("../../../src/auth")
+    await Effect.runPromise(
+      Auth.Service.use((service) => service.set(input.provider, { type: "api", key: input.provider })).pipe(
+        Effect.provide(Auth.defaultLayer),
+      ),
+    )
+  }
+  if (input.role === "logout" || input.role === "relogin") {
+    const { Effect } = await import("effect")
+    const { Auth } = await import("../../../src/auth")
+    await Effect.runPromise(
+      Auth.Service.use((auth) =>
+        Effect.gen(function* () {
+          yield* auth.remove("openai")
+          if (input.role === "relogin")
+            yield* auth.set("openai", {
+              type: "oauth",
+              access: "old-access",
+              refresh: "old-refresh",
+              expires: 0,
+              accountId: "test-account",
+            })
+        }),
+      ).pipe(Effect.provide(Auth.defaultLayer)),
+    )
+  }
+  if (input.role === "refresh") {
+    if (auth?.type !== "oauth" || !input.url) throw new Error("Invalid refresh fixture")
+    const { refreshCodexAuth } = await import("../../../src/kilocode/provider/codex-refresh")
+    const next = await refreshCodexAuth({
+      store,
+      auth,
+      account: () => undefined,
+      lock: {
+        staleMs: 10,
+        onWait: () => {
+          process.send?.("waiting")
+        },
+      },
+      refresh: async (token, signal) => {
+        const response = await fetch(input.url!, {
+          method: "POST",
+          signal,
+          body: new URLSearchParams({ refresh_token: token }),
+        })
+        if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`)
+        return z
+          .object({ id_token: z.string(), access_token: z.string(), refresh_token: z.string(), expires_in: z.number() })
+          .parse(await response.json())
+      },
+    }).catch((error) => {
+      if (input.stale && error instanceof AuthStaleError) {
+        process.send?.("stale")
+        return undefined
+      }
+      throw error
+    })
+    if (input.stale ? next !== undefined : next?.access !== "next-access") throw new Error("Unexpected fixture result")
+  }
+  process.send?.("done")
+} finally {
+  process.disconnect?.()
+}

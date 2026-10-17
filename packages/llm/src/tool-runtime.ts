@@ -83,6 +83,7 @@ export const stream = <T extends Tools>(options: StreamOptions<T>): Stream.Strea
     Stream.unwrap(
       Effect.gen(function* () {
         const state: StepState = {
+          failed: false, // kilocode_change
           assistantContent: [],
           toolCalls: [],
           finishReason: undefined,
@@ -98,6 +99,7 @@ export const stream = <T extends Tools>(options: StreamOptions<T>): Stream.Strea
 
         const continuation = Stream.unwrap(
           Effect.gen(function* () {
+            if (state.failed) return Stream.empty // kilocode_change - a provider failure has already emitted its terminal
             const totalUsage = addUsage(usage, state.usage)
             const totalProviderMetadata = mergeProviderMetadata(providerMetadata, state.providerMetadata)
             const finishStream = Stream.fromIterable([
@@ -155,6 +157,7 @@ const indexStep = (event: LLMEvent, index: number): LLMEvent => {
 }
 
 interface StepState {
+  failed: boolean // kilocode_change
   assistantContent: ContentPart[]
   toolCalls: ToolCallPart[]
   finishReason: FinishReason | undefined
@@ -163,6 +166,13 @@ interface StepState {
 }
 
 const accumulate = (state: StepState, event: LLMEvent) => {
+  // kilocode_change start - receipt observations never become prompt content or permit tool replay
+  if (event.type === "provider-error") {
+    state.failed = true
+    return
+  }
+  if (event.type === "text-delta" && event.text === "" && event.providerMetadata?.kiloResponse) return // kilocode_change - receipt observations are not prompt content
+  // kilocode_change end
   if (event.type === "text-delta") {
     appendStreamingText(state, "text", event.text, undefined)
     return

@@ -5,6 +5,7 @@ import type { LLM } from "@/session/llm"
 import { MessageV2 } from "@/session/message-v2"
 import type { SessionProcessor } from "@/session/processor"
 import type { MessageID, SessionID } from "@/session/schema"
+import { KiloResponse } from "./response"
 
 type Update = <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
 type UpdateMessage = <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -15,6 +16,7 @@ export namespace KiloCompactionPayloadRecovery {
   export function matches(error: MessageV2.Assistant["error"]) {
     if (!error) return false
     if (error.name !== "ContextOverflowError" && error.name !== "APIError") return false
+    if (KiloResponse.blocked(error)) return false
     return pattern.test([error.data.message, error.data.responseBody].filter(Boolean).join("\n"))
   }
 
@@ -26,28 +28,25 @@ export namespace KiloCompactionPayloadRecovery {
     ].join("\n\n")
   }
 
-  export function strip(input: { messages: MessageV2.WithParts[]; update: Update }) {
-    return Effect.forEach(
-      input.messages,
-      (msg) =>
-        Effect.forEach(msg.parts, (part) => {
-          if (part.type === "tool" && part.state.status === "completed" && !part.state.time.compacted) {
-            part.state.time.compacted = Date.now()
-            return input.update(part)
+  export function strip(messages: MessageV2.WithParts[]) {
+    return messages.map((msg) => ({
+      ...msg,
+      parts: msg.parts.map((part): MessageV2.Part => {
+        if (part.type === "tool" && part.state.status === "completed" && !part.state.time.compacted) {
+          return { ...part, state: { ...part.state, time: { ...part.state.time, compacted: Date.now() } } }
+        }
+        if (part.type === "file" && MessageV2.isMedia(part.mime)) {
+          return {
+            id: part.id,
+            messageID: part.messageID,
+            sessionID: part.sessionID,
+            type: "text",
+            text: `[Attached ${part.mime}: ${part.filename ?? "file"}]`,
           }
-          if (part.type === "file" && MessageV2.isMedia(part.mime)) {
-            return input.update({
-              id: part.id,
-              messageID: part.messageID,
-              sessionID: part.sessionID,
-              type: "text",
-              text: `[Attached ${part.mime}: ${part.filename ?? "file"}]`,
-            })
-          }
-          return Effect.void
-        }),
-      { concurrency: 1 },
-    )
+        }
+        return part
+      }),
+    }))
   }
 
   export function process(input: {
@@ -96,8 +95,10 @@ export namespace KiloCompactionPayloadRecovery {
           input.processor.message.error = undefined
           input.processor.message.finish = undefined
           yield* input.updateMessage(input.processor.message)
-          yield* strip({ messages: input.recovery, update: input.updatePart })
-          const stripped = yield* MessageV2.toModelMessagesEffect(input.recovery, input.model, {
+          for (const part of MessageV2.parts(input.processor.message.id)) {
+            if (part.type === "text" && !part.ignored) yield* input.updatePart({ ...part, ignored: true })
+          }
+          const stripped = yield* MessageV2.toModelMessagesEffect(strip(input.recovery), input.model, {
             stripMedia: true,
             toolOutputMaxChars: 0,
           })

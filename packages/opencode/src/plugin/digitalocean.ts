@@ -285,7 +285,7 @@ function parseRoutersJSON(raw: string | undefined): RouterEntry[] {
   }
 }
 
-export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks> {
+export async function DigitalOceanAuthPlugin(_input: PluginInput /* kilocode_change */): Promise<Hooks> {
   return {
     provider: {
       id: "digitalocean",
@@ -307,17 +307,7 @@ export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks>
           const result = await listRouters(oauthAccess)
           if (result.ok) {
             routers = result.routers
-            const updated: Record<string, string> = {
-              ...metadata,
-              routers: JSON.stringify(routers.map((r) => ({ name: r.name, uuid: r.uuid, description: r.description }))),
-              routers_fetched_at: String(Date.now()),
-            }
-            await input.client.auth
-              .set({
-                path: { id: "digitalocean" },
-                body: { type: "api", key: ctx.auth.key, metadata: updated },
-              })
-              .catch((err) => log.warn("failed to persist refreshed routers", { error: err }))
+            // kilocode_change - discovery is read-only; never restore captured credentials after a late response
           } else if (result.status === 401 || result.status === 403) {
             log.warn("digitalocean oauth bearer rejected; using cached routers", { status: result.status })
           } else if (result.status !== 0) {

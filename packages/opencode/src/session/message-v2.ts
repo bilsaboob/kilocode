@@ -23,9 +23,12 @@ import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { SessionNetwork } from "./network" // kilocode_change
 import { CodexAuthExpiredError } from "@/kilocode/provider/codex-refresh" // kilocode_change
+import { AuthSourceError, AuthStaleError, AuthStorageError } from "@/kilocode/auth/store" // kilocode_change
 import { KiloSessionMessageOrder } from "@/kilocode/session/message-order" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
+import { KiloCompactionState } from "@/kilocode/session/compaction-state" // kilocode_change
+import { KiloResponse } from "@/kilocode/session/response" // kilocode_change
 import * as TextStream from "@/kilocode/text-stream" // kilocode_change
 import { Effect, Schema, Types } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
@@ -817,7 +820,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     return { type: "json", value: output as never }
   }
 
-  for (const msg of input) {
+  for (const msg of KiloCompactionState.visible(input)) {
+    // kilocode_change - staged followups cannot run before commit
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -867,6 +871,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     }
 
     if (msg.info.role === "assistant") {
+      if (msg.info.summary && !KiloCompactionState.bound(msg, input)) continue // kilocode_change - reject workers and unbound summaries
       const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
       const media: Array<{ mime: string; url: string; filename?: string }> = []
 
@@ -1142,34 +1147,24 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
 })
 
 export function filterCompacted(msgs: Iterable<WithParts>) {
-  const result = [] as WithParts[]
-  const completed = new Set<string>()
-  let retain: MessageID | undefined
-  for (const msg of msgs) {
-    result.push(msg)
-    if (retain) {
-      if (msg.info.id === retain) break
-      continue
-    }
-    if (msg.info.role === "user" && completed.has(msg.info.id)) {
-      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
-      if (!part) continue
-      if (!part.tail_start_id) break
-      retain = part.tail_start_id
-      if (msg.info.id === retain) break
-      continue
-    }
-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
-      break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
-      completed.add(msg.info.parentID)
-  }
-  result.reverse()
+  const result = KiloCompactionState.history(msgs) // kilocode_change - bounded traversal with committed summary and followup validation
   KiloSessionMessageOrder.annotate(result) // kilocode_change - preserve chronology before retained-tail projection
   const compactionIndex = result.findLastIndex(
-    (msg) =>
+    (msg, index) =>
       msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
+      // kilocode_change start - an unfinished tail marker must never remove history
+      msg.parts.some(
+        (item): item is CompactionPart =>
+          item.type === "compaction" &&
+          item.tail_start_id !== undefined &&
+          result.some(
+            (summary, position) =>
+              position > index &&
+              KiloCompactionState.bound(summary, result) &&
+              KiloCompactionState.completed(summary, item),
+          ),
+      ),
+    // kilocode_change end
   )
   const compaction = result[compactionIndex]
   const part = compaction?.parts.find(
@@ -1180,7 +1175,8 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
         (msg, index) =>
           index > compactionIndex &&
           msg.info.role === "assistant" &&
-          msg.info.summary &&
+          KiloCompactionState.bound(msg, result) &&
+          KiloCompactionState.completed(msg, part) && // kilocode_change
           msg.info.parentID === compaction.info.id,
       )
     : -1
@@ -1242,6 +1238,30 @@ export function fromError(
           cause: e,
         },
       ).toObject()
+    // kilocode_change start - a terminal receipt outranks network and overflow heuristics
+    case KiloResponse.blocked(e): {
+      const value = e as { message?: unknown; data?: { message?: unknown } }
+      const message =
+        e instanceof Error
+          ? e.message
+          : typeof value.data?.message === "string"
+            ? value.data.message
+            : typeof value.message === "string"
+              ? value.message
+              : "[RESPONSE_FAILED] The response did not complete."
+      const api = APICallError.isInstance(e) ? e : undefined
+      return new APIError(
+        {
+          message,
+          isRetryable: false,
+          statusCode: api?.statusCode,
+          responseHeaders: api?.responseHeaders,
+          responseBody: api?.responseBody,
+        },
+        { cause: e },
+      ).toObject()
+    }
+    // kilocode_change end
     case OutputLengthError.isInstance(e):
       return e
     case LoadAPIKeyError.isInstance(e):
@@ -1253,9 +1273,12 @@ export function fromError(
         { cause: e },
       ).toObject()
     case e instanceof CodexAuthExpiredError: // kilocode_change start
+    case e instanceof AuthSourceError:
+    case e instanceof AuthStaleError:
+    case e instanceof AuthStorageError:
       return new AuthError(
         {
-          providerID: "openai",
+          providerID: e instanceof CodexAuthExpiredError ? "openai" : ctx.providerID,
           message: e.message,
         },
         { cause: e },

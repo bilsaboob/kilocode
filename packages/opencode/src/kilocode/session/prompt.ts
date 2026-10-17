@@ -23,6 +23,7 @@ import NATIVE_PLAN_PROMPT from "@/kilocode/session/native-plan-prompt.txt"
 import CODE_SWITCH from "@/session/prompt/code-switch.txt"
 import { SessionKnowledge } from "./knowledge"
 import { KiloStructuredCompaction } from "./structured-compaction"
+import { KiloCompactionState } from "./compaction-state"
 
 export namespace KiloSessionPrompt {
   const modes = ["ask", "plan", "architect"]
@@ -417,7 +418,7 @@ export namespace KiloSessionPrompt {
    * assistant.
    */
   export function hasCompletedSummary(msgs: MessageV2.WithParts[]): boolean {
-    return msgs.some((m) => m.info.role === "assistant" && m.info.summary === true && !!m.info.finish && !m.info.error)
+    return msgs.some((m) => KiloCompactionState.bound(m, msgs))
   }
 
   /**
@@ -438,7 +439,7 @@ export namespace KiloSessionPrompt {
   export function trimBeforeLastSummary(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
     const summary = msgs.reduce<{ msg: MessageV2.WithParts; index: number } | undefined>((latest, msg, index) => {
       const info = msg.info
-      if (info.role !== "assistant" || info.summary !== true || !info.finish || info.error) return latest
+      if (info.role !== "assistant" || !KiloCompactionState.bound(msg, msgs)) return latest
       if (!latest || KiloSessionMessageOrder.compare(msg, latest.msg, index, latest.index) > 0) return { msg, index }
       return latest
     }, undefined)

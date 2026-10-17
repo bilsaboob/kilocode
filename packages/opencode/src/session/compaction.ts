@@ -24,8 +24,9 @@ import { KiloCompactionChunks } from "@/kilocode/session/compaction-chunks"
 import { KiloStructuredCompaction } from "@/kilocode/session/structured-compaction"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { KiloContextTurn } from "@/kilocode/session/context-turn"
+import { KiloCompactionState } from "@/kilocode/session/compaction-state"
 import { SessionStatus } from "./status"
-import { Exit } from "effect"
+import { Exit, Cause } from "effect"
 import { SessionExport } from "@/kilocode/session-export"
 import { KiloSession } from "@/kilocode/session"
 // kilocode_change end
@@ -109,13 +110,7 @@ export type PruneReason = "normal" | "post-compaction" | "payload-limit"
 // kilocode_change end
 
 function summaryText(message: MessageV2.WithParts) {
-  const text = message.parts
-    .filter((part): part is MessageV2.TextPart => part.type === "text")
-    .map((part) => part.text.trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim()
-  return text || undefined
+  return KiloCompactionState.text(message) || undefined // kilocode_change - internal receipts are not summary text
 }
 
 function completedCompactions(messages: MessageV2.WithParts[]) {
@@ -129,7 +124,7 @@ function completedCompactions(messages: MessageV2.WithParts[]) {
 
   return messages.flatMap((msg, assistantIndex): CompletedCompaction[] => {
     if (msg.info.role !== "assistant") return []
-    if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+    if (!KiloCompactionState.bound(msg, messages)) return [] // kilocode_change
     const userIndex = users.get(msg.info.parentID)
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
@@ -347,7 +342,7 @@ export const layer = Layer.effect(
         const msg = msgs[msgIndex]
         if (msg.info.role === "user") turns++
         if (turns < 2) continue
-        if (msg.info.role === "assistant" && msg.info.summary) break loop
+        if (KiloCompactionState.bound(msg, msgs)) break loop // kilocode_change - failed workers are not committed history
         for (let partIndex = msg.parts.length - 1; partIndex >= 0; partIndex--) {
           const part = msg.parts[partIndex]
           if (part.type !== "tool") continue
@@ -526,6 +521,28 @@ export const layer = Layer.effect(
       }
       // kilocode_change end
       yield* session.updateMessage(msg)
+      // kilocode_change start - generation is staged until a complete, usable summary is committed
+      const receipt = yield* session.updatePart(
+        KiloCompactionState.mark({ message: msg, status: "candidate", marker: compactionPart }),
+      )
+      let committed = false
+      yield* Effect.addFinalizer((exit) =>
+        Effect.gen(function* () {
+          if (committed || Exit.isSuccess(exit)) return
+          const saved = yield* MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).pipe(Effect.orDie)
+          if (KiloCompactionState.completed(saved, compactionPart)) {
+            committed = true
+            return
+          }
+          msg.error ??= Cause.hasInterrupts(exit.cause)
+            ? new MessageV2.AbortedError({ message: "Compaction interrupted" }).toObject()
+            : MessageV2.fromError(Cause.squash(exit.cause), { providerID: model.providerID })
+          msg.finish = "error"
+          msg.time.completed = Date.now()
+          yield* session.updateMessage(msg)
+        }),
+      )
+      // kilocode_change end
       const processor = yield* processors.create({
         assistantMessage: msg,
         sessionID: input.sessionID,
@@ -591,51 +608,89 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
-        yield* session.updatePart({
-          ...compactionPart,
-          tail_start_id: selected.tail_start_id,
-        })
+      // kilocode_change start - no replay, pruning, or success events before the commit boundary
+      if (fallback !== "continue" || processor.message.error) return "stop"
+      const generated = yield* MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).pipe(Effect.orDie)
+      if (!KiloCompactionState.ready(generated)) {
+        processor.message.error = new MessageV2.APIError({
+          message:
+            "[COMPACTION_INCOMPLETE] The summarizer did not produce a complete, nonempty result. Original history was preserved.",
+          isRetryable: false,
+        }).toObject()
+        processor.message.finish = "error"
+        yield* session.updateMessage(processor.message)
+        return "stop"
       }
+      if (selected.tail_start_id && !input.messages.some((item) => item.info.id === selected.tail_start_id)) {
+        processor.message.error = KiloContextPolicy.blocked("The committed compaction boundary is missing").toObject()
+        processor.message.finish = "error"
+        yield* session.updateMessage(processor.message)
+        return "stop"
+      }
+      if (compactionPart) {
+        compactionPart.tail_start_id = selected.tail_start_id
+        yield* session.updatePart(compactionPart)
+      }
+      let followup: MessageID | undefined
+      const packet: PartID[] = []
+      // kilocode_change end
 
       // kilocode_change start
       if (fallback === "continue" && input.auto && !integrity?.completed && !compactionPart?.context) {
         // kilocode_change end
         if (replay) {
           // kilocode_change start - compact oversized replay turns instead of looping into replay overflow
-          replay =
-            integrity?.replay ??
-            (yield* KiloCompactionChunks.replay({
-              processors,
-              session,
-              user: userMessage,
-              agent,
-              sessionID: input.sessionID,
-              model,
-              cfg,
-              outputTokenMax: flags.outputTokenMax,
-              messages: selected.head,
-              prompt: nextPrompt,
-              target: processor.message,
-              updateMessage: session.updateMessage,
-              updatePart: session.updatePart,
-              replay,
-            }))
+          const prepared = yield* (
+            integrity?.replay
+              ? Effect.succeed(integrity.replay)
+              : KiloCompactionChunks.replay({
+                  processors,
+                  session,
+                  user: userMessage,
+                  agent,
+                  sessionID: input.sessionID,
+                  model,
+                  cfg,
+                  outputTokenMax: flags.outputTokenMax,
+                  messages: selected.head,
+                  prompt: nextPrompt,
+                  target: processor.message,
+                  updateMessage: session.updateMessage,
+                  updatePart: session.updatePart,
+                  replay,
+                })
+          ).pipe(Effect.exit)
+          if (Exit.isFailure(prepared)) {
+            if (Cause.hasInterrupts(prepared.cause)) return yield* Effect.failCause(prepared.cause)
+            processor.message.error = MessageV2.fromError(Cause.squash(prepared.cause), {
+              providerID: model.providerID,
+            })
+            processor.message.finish = "error"
+            processor.message.time.completed = Date.now()
+            yield* session.updateMessage(processor.message)
+            return "stop"
+          }
+          replay = prepared.value
           // kilocode_change end
           const original = replay.info
-          const replayMsg = yield* session.updateMessage({
-            id: MessageID.ascending(),
-            role: "user",
-            sessionID: input.sessionID,
-            time: { created: Date.now() },
-            agent: original.agent,
-            model: original.model,
-            format: original.format,
-            tools: original.tools,
-            system: original.system,
-            contextPolicy: original.contextPolicy, // kilocode_change
-          })
-          KiloSessionPromptQueue.retarget(input.sessionID, replayMsg.id) // kilocode_change - expose replay to scope()
+          const replayMsg = yield* KiloCompactionState.publish({
+            session,
+            target: msg.id,
+            message: {
+              // kilocode_change
+              id: MessageID.ascending(),
+              role: "user",
+              sessionID: input.sessionID,
+              time: { created: Date.now() },
+              agent: original.agent,
+              model: original.model,
+              format: original.format,
+              tools: original.tools,
+              system: original.system,
+              contextPolicy: original.contextPolicy, // kilocode_change
+            },
+          }) // kilocode_change
+          followup = replayMsg.id // kilocode_change - stage the packet until its aggregate summary commits
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             // kilocode_change start - preserve media for preflight replay but strip it after provider overflow
@@ -643,12 +698,13 @@ export const layer = Layer.effect(
               input.overflow && part.type === "file" && MessageV2.isMedia(part.mime)
                 ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
                 : part
-            yield* session.updatePart({
+            const saved = yield* session.updatePart({
               ...replayPart,
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
             })
+            packet.push(saved.id)
             // kilocode_change end
           }
         }
@@ -675,22 +731,27 @@ export const layer = Layer.effect(
               { enabled: true },
             )).enabled
           ) {
-            const continueMsg = yield* session.updateMessage({
-              id: MessageID.ascending(),
-              role: "user",
-              sessionID: input.sessionID,
-              time: { created: Date.now() },
-              agent: userMessage.agent,
-              model: userMessage.model,
-              contextPolicy: userMessage.contextPolicy, // kilocode_change
-            })
-            KiloSessionPromptQueue.retarget(input.sessionID, continueMsg.id) // kilocode_change - expose auto-continue to scope()
+            const continueMsg = yield* KiloCompactionState.publish({
+              session,
+              target: msg.id,
+              message: {
+                // kilocode_change
+                id: MessageID.ascending(),
+                role: "user",
+                sessionID: input.sessionID,
+                time: { created: Date.now() },
+                agent: userMessage.agent,
+                model: userMessage.model,
+                contextPolicy: userMessage.contextPolicy, // kilocode_change
+              },
+            }) // kilocode_change
+            followup = continueMsg.id // kilocode_change - stage auto-continue until commit
             const text =
               (input.overflow
                 ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
                 : "") +
               "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
-            yield* session.updatePart({
+            const saved = yield* session.updatePart({
               id: PartID.ascending(),
               messageID: continueMsg.id,
               sessionID: input.sessionID,
@@ -706,6 +767,7 @@ export const layer = Layer.effect(
                 end: Date.now(),
               },
             })
+            packet.push(saved.id) // kilocode_change
           }
         }
       }
@@ -713,6 +775,32 @@ export const layer = Layer.effect(
       // kilocode_change start - compaction already invalidates cache, so collapse stale tool outputs too
       if (processor.message.error) return "stop"
       if (fallback === "continue") {
+        if (followup && !packet.length) {
+          processor.message.error = new MessageV2.APIError({
+            message: "[COMPACTION_INCOMPLETE] The followup packet is empty. Original history was preserved.",
+            isRetryable: false,
+          }).toObject()
+          processor.message.finish = "error"
+          yield* session.updateMessage(processor.message)
+          return "stop"
+        }
+        processor.message.time.completed = Date.now()
+        yield* session.updateMessage(processor.message)
+        // A persisted commit must never be relabeled aborted by late cancellation.
+        yield* Effect.gen(function* () {
+          yield* session.updatePart(
+            KiloCompactionState.mark({
+              message: processor.message,
+              status: "committed",
+              marker: compactionPart,
+              id: receipt.id,
+              followup,
+              packet,
+            }),
+          )
+          committed = true
+          if (followup) KiloSessionPromptQueue.retarget(input.sessionID, followup)
+        }).pipe(Effect.uninterruptible)
         const summary = summaryText(
           (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
             (item) => item.info.id === msg.id,
@@ -830,7 +918,8 @@ export const layer = Layer.effect(
       prune,
       // kilocode_change start - automatic reduction is nonterminal; manual/blocked/Stop must settle idle
       process: (input) =>
-        processCompaction(input).pipe(
+        processCompaction({ ...input, messages: KiloCompactionState.visible(input.messages) }).pipe(
+          Effect.scoped,
           Effect.onExit((exit) =>
             input.auto && Exit.isSuccess(exit) && exit.value === "continue"
               ? Effect.void

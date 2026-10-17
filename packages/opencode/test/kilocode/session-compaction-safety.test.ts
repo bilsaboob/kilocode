@@ -3,8 +3,11 @@
 // re-shipping multi-MB base-64 images after a successful summary.
 
 import { describe, expect, test } from "bun:test"
+import { Effect } from "effect"
 import { KiloSessionPrompt } from "../../src/kilocode/session/prompt"
 import { KiloSessionMessageOrder } from "../../src/kilocode/session/message-order"
+import { KiloCompactionState } from "../../src/kilocode/session/compaction-state"
+import { KiloCompactionChunks } from "../../src/kilocode/session/compaction-chunks"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -176,7 +179,10 @@ function assistant(
   parts: MessageV2.Part[] = [],
   opts?: { summary?: boolean; finish?: string; error?: MessageV2.Assistant["error"] },
 ): MessageV2.WithParts {
-  return { info: assistantInfo(id, parentID, opts), parts }
+  return {
+    info: assistantInfo(id, parentID, opts),
+    parts: !parts.length && opts?.summary ? [textPart(id, "summary body")] : parts,
+  }
 }
 
 function created(msg: MessageV2.WithParts, time: number) {
@@ -210,6 +216,198 @@ describe("KiloSessionPrompt.hasCompletedSummary", () => {
   test("returns true when summary has finish and no error", () => {
     const msgs = [user("msg_u1"), assistant("msg_a1", "msg_u1", [], { summary: true, finish: "end_turn" })]
     expect(KiloSessionPrompt.hasCompletedSummary(msgs)).toBe(true)
+  })
+})
+
+describe("compaction commit boundary", () => {
+  test("stops reading at a verified retained boundary instead of materializing obsolete history", () => {
+    const marker = compactionPart("msg_marker", "msg_tail")
+    const parent = user("msg_marker", [marker])
+    const summary = assistant("msg_summary", "msg_marker", [textPart("msg_summary", "summary")], {
+      summary: true,
+      finish: "stop",
+    })
+    if (summary.info.role !== "assistant") throw new Error("expected assistant")
+    summary.parts.push(KiloCompactionState.mark({ message: summary.info, status: "committed", marker }))
+    function* history() {
+      yield summary
+      yield parent
+      yield user("msg_tail", [textPart("msg_tail", "retained")])
+      throw new Error("obsolete history was unnecessarily loaded")
+    }
+    expect(MessageV2.filterCompacted(history()).map((message) => message.info.id)).toEqual([
+      parent.info.id,
+      summary.info.id,
+      MessageID.make("msg_tail"),
+    ])
+  })
+
+  test.each(["changed", "missing"])(
+    "rejects a %s marker consistently before model projection and splitting",
+    async (state) => {
+      const marker = compactionPart("msg_marker", "msg_tail")
+      const parent = user("msg_marker", [marker])
+      const summary = assistant("msg_summary", "msg_marker", [textPart("msg_summary", "UNBOUND SUMMARY")], {
+        summary: true,
+        finish: "stop",
+      })
+      if (summary.info.role !== "assistant") throw new Error("expected assistant")
+      summary.parts.push(KiloCompactionState.mark({ message: summary.info, status: "committed", marker }))
+      const history = [
+        user("msg_original", [textPart("msg_original", "original evidence")]),
+        user("msg_tail"),
+        parent,
+        summary,
+      ]
+      if (state === "missing") parent.parts = []
+      else marker.tail_start_id = MessageID.make("msg_other")
+      expect(KiloCompactionState.bound(summary, history)).toBe(false)
+      expect(MessageV2.filterCompacted([...history].reverse())).toEqual(history)
+      expect(KiloSessionPrompt.trimBeforeLastSummary(history)).toBe(history)
+      expect(JSON.stringify(await MessageV2.toModelMessages(history, model))).not.toContain("UNBOUND SUMMARY")
+      const chunks = await Effect.runPromise(KiloCompactionChunks.split({ messages: history, model, size: 1 }))
+      expect(JSON.stringify(chunks)).not.toContain("UNBOUND SUMMARY")
+    },
+  )
+
+  test("staged followups are invisible until the complete bound summary commits", async () => {
+    const marker = compactionPart("msg_marker", "msg_original")
+    const parent = user("msg_marker", [marker])
+    const summary = assistant("msg_summary", "msg_marker", [textPart("msg_summary", "committed body")], {
+      summary: true,
+      finish: "stop",
+    })
+    const next = user("msg_followup", [textPart("msg_followup", "FOLLOWUP PACKET")])
+    if (summary.info.role !== "assistant" || next.info.role !== "user") throw new Error("invalid fixture")
+    const receipt = KiloCompactionState.mark({ message: summary.info, status: "candidate", marker })
+    summary.parts.push(receipt)
+    next.parts.push(KiloCompactionState.followup(next.info, summary.info.id))
+    const history = [user("msg_original", [textPart("msg_original", "original")]), parent, summary, next]
+    expect(MessageV2.filterCompacted([...history].reverse()).some((message) => message.info.id === next.info.id)).toBe(
+      false,
+    )
+    expect(JSON.stringify(await MessageV2.toModelMessages(history, model))).not.toContain("FOLLOWUP PACKET")
+    summary.parts[1] = KiloCompactionState.mark({
+      message: summary.info,
+      status: "committed",
+      marker,
+      id: receipt.id,
+      followup: next.info.id,
+      packet: [next.parts[0].id],
+    })
+    expect(KiloCompactionState.bound(summary, history)).toBe(true)
+    expect(MessageV2.filterCompacted([...history].reverse()).some((message) => message.info.id === next.info.id)).toBe(
+      true,
+    )
+    expect(JSON.stringify(await MessageV2.toModelMessages(history, model))).toContain("FOLLOWUP PACKET")
+    expect(KiloCompactionState.bound(summary, history.slice(0, -1))).toBe(false)
+    const before = JSON.stringify(history)
+    const chunks = await Effect.runPromise(KiloCompactionChunks.split({ messages: history, model, size: 100_000 }))
+    expect(JSON.stringify(await MessageV2.toModelMessages(chunks[0].messages, model))).toContain("FOLLOWUP PACKET")
+    const later = compactionPart("msg_later", next.info.id)
+    const laterSummary = assistant("msg_later_summary", "msg_later", [textPart("msg_later_summary", "newer summary")], {
+      summary: true,
+      finish: "stop",
+    })
+    if (laterSummary.info.role !== "assistant") throw new Error("expected assistant")
+    laterSummary.parts.push(
+      KiloCompactionState.mark({ message: laterSummary.info, status: "committed", marker: later }),
+    )
+    const projected = MessageV2.filterCompacted([...history, user("msg_later", [later]), laterSummary].reverse())
+    expect(JSON.stringify(await MessageV2.toModelMessages(projected, model))).toContain("FOLLOWUP PACKET")
+    expect(JSON.stringify(history)).toBe(before)
+    expect(KiloCompactionState.bound(summary, [...history.slice(0, -1), { ...next, parts: next.parts.slice(1) }])).toBe(
+      false,
+    )
+  })
+
+  test("spending and uncommitted workers never replace the latest successful context baseline", () => {
+    const good = created(assistant("msg_good", "msg_user", [], { finish: "tool-calls" }), 2)
+    if (good.info.role !== "assistant") throw new Error("expected assistant")
+    const failed = created(assistant("msg_failed", "msg_user", [], { finish: "length" }), 3)
+    const worker = created(assistant("msg_worker", "msg_marker", [], { summary: true, finish: "stop" }), 4)
+    if (worker.info.role !== "assistant") throw new Error("expected assistant")
+    worker.parts.push(KiloCompactionState.mark({ message: worker.info, status: "worker" }))
+    const history = KiloSessionMessageOrder.annotate([user("msg_user"), good, failed, user("msg_marker"), worker])
+    expect(KiloCompactionState.latest([worker, ...history.slice(0, -1)])).toBe(good.info)
+    const summary = created(assistant("msg_summary", "msg_marker", [], { summary: true, finish: "stop" }), 5)
+    expect(KiloCompactionState.latest([...history, summary])).toBeUndefined()
+  })
+
+  test.each(["length", "unknown", "content-filter", "tool-calls", undefined])(
+    "does not project a %s summary",
+    async (finish) => {
+      const marker = compactionPart("msg_marker", "msg_tail")
+      const history = [
+        user("msg_original", [
+          textPart("msg_original", "preserve original evidence"),
+          filePart("msg_original", "image/png", "original.png"),
+        ]),
+        assistant("msg_reply", "msg_original", [toolPart("msg_reply", "completed")], { finish: "tool-calls" }),
+        user("msg_tail", [textPart("msg_tail", "pending user request")]),
+        user("msg_marker", [marker]),
+        assistant("msg_partial", "msg_marker", [textPart("msg_partial", "UNCOMMITTED SUMMARY")], {
+          summary: true,
+          finish,
+        }),
+      ]
+      const before = JSON.stringify(history)
+      expect(MessageV2.filterCompacted([...history].reverse())).toEqual(history)
+      expect(KiloSessionPrompt.trimBeforeLastSummary(history)).toBe(history)
+      expect(KiloSessionPrompt.maybeStripHistoricalMedia(history)).toBe(history)
+      expect(JSON.stringify(await MessageV2.toModelMessages(history, model))).not.toContain("UNCOMMITTED SUMMARY")
+      expect(JSON.stringify(history)).toBe(before)
+    },
+  )
+
+  test.each(["candidate", "worker", "committed"] as const)(
+    "requires a bound committed summary, not just successful %s output",
+    (status) => {
+      const marker = compactionPart("msg_marker", "msg_tail")
+      const summary = assistant("msg_summary", "msg_marker", [textPart("msg_summary", "summary body")], {
+        summary: true,
+        finish: "stop",
+      })
+      if (summary.info.role !== "assistant") throw new Error("expected assistant")
+      summary.parts.push(KiloCompactionState.mark({ message: summary.info, status, marker }))
+      const history = [user("msg_original"), user("msg_tail"), user("msg_marker", [marker]), summary]
+      const committed = status === "committed"
+      expect(KiloSessionPrompt.hasCompletedSummary(history)).toBe(committed)
+      expect(
+        MessageV2.filterCompacted([...history].reverse()).some(
+          (message) => message.info.id === MessageID.make("msg_original"),
+        ),
+      ).toBe(!committed)
+      expect(KiloCompactionState.completed(summary, { ...marker, tail_start_id: MessageID.make("msg_other") })).toBe(
+        false,
+      )
+    },
+  )
+
+  test("rejects empty and aborted summaries without dropping the prior valid boundary", () => {
+    const prior = user("msg_prior", [compactionPart("msg_prior", "msg_tail")])
+    const original = assistant("msg_prior_summary", "msg_prior", [], { summary: true, finish: "end_turn" })
+    for (const failed of [
+      assistant("msg_empty", "msg_new", [textPart("msg_empty", " ")], { summary: true, finish: "stop" }),
+      assistant("msg_aborted", "msg_new", [textPart("msg_aborted", "partial")], {
+        summary: true,
+        finish: "stop",
+        error: new MessageV2.AbortedError({ message: "Stopped" }).toObject(),
+      }),
+    ]) {
+      const history = [
+        user("msg_old"),
+        user("msg_tail"),
+        prior,
+        original,
+        user("msg_new", [compactionPart("msg_new", "msg_prior_summary")]),
+        failed,
+      ]
+      const projected = MessageV2.filterCompacted([...history].reverse())
+      expect(projected.some((message) => message.info.id === MessageID.make("msg_tail"))).toBe(true)
+      expect(projected.find((message) => message.info.id === original.info.id)).toBe(original)
+      expect(KiloCompactionState.completed(failed)).toBe(false)
+    }
   })
 })
 

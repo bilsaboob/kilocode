@@ -193,9 +193,11 @@ function createCompactionMarker(sessionID: SessionID) {
   )
 }
 
+// kilocode_change start - successful test processors persist a usable summary before its commit
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
+  session: SessionNs.Interface,
 ) {
   const msg = input.assistantMessage
   return {
@@ -205,18 +207,36 @@ function fake(
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     metadata: Effect.fn("TestSessionProcessor.metadata")(() => Effect.void), // kilocode_change
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-    process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
+    process: Effect.fn("TestSessionProcessor.process")(function* () {
+      if (result === "continue") {
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: msg.sessionID,
+          type: "text",
+          text: "summary",
+        })
+        msg.finish = "stop"
+        msg.time.completed = Date.now()
+        yield* session.updateMessage(msg)
+      }
+      return result
+    }),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
 function layer(result: "continue" | "compact") {
-  return Layer.succeed(
+  return Layer.effect(
     SessionProcessorModule.SessionProcessor.Service,
-    SessionProcessorModule.SessionProcessor.Service.of({
-      create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result))),
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      return SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result, session))),
+      })
     }),
-  )
+  ).pipe(Layer.provide(SessionNs.defaultLayer))
 }
+// kilocode_change end
 
 function cfg(compaction?: Config.Info["compaction"]) {
   const base = Schema.decodeUnknownSync(Config.Info)({}) as Config.Info
@@ -915,14 +935,15 @@ describe("session.compaction.process", () => {
 
       expect(result).toBe("continue")
       expect(last?.info.role).toBe("user")
-      expect(last?.parts[0]).toMatchObject({
+      expect(last?.parts.find((part) => part.type === "text" && !part.ignored)).toMatchObject({
+        // kilocode_change - ignore the internal commit link
         type: "text",
         synthetic: true,
         metadata: { compaction_continue: true },
       })
-      if (last?.parts[0]?.type === "text") {
-        expect(last.parts[0].text).toContain("Continue if you have next steps")
-      }
+      expect(
+        last?.parts.find((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)?.text,
+      ).toContain("Continue if you have next steps") // kilocode_change
     }),
   )
 
@@ -1218,9 +1239,9 @@ describe("session.compaction.process", () => {
 
       expect(result).toBe("continue")
       expect(last?.info.role).toBe("user")
-      if (last?.parts[0]?.type === "text") {
-        expect(last.parts[0].text).toContain("previous request exceeded the provider's size limit")
-      }
+      expect(
+        last?.parts.find((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)?.text,
+      ).toContain("previous request exceeded the provider's size limit") // kilocode_change
     }),
   )
 

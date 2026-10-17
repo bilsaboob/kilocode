@@ -40,6 +40,7 @@ export namespace Flock {
 
   export interface Options {
     dir?: string
+    reclaim?: boolean // kilocode_change - auth transactions must never evict a paused owner
     signal?: AbortSignal
     staleMs?: number
     timeoutMs?: number
@@ -49,6 +50,7 @@ export namespace Flock {
   }
 
   type Opts = {
+    reclaim: boolean // kilocode_change
     staleMs: number
     timeoutMs: number
     baseDelayMs: number
@@ -157,9 +159,11 @@ export namespace Flock {
         throw err
       }
 
-      if (!(await stale(lockDir, heartbeatPath, metaPath, opts.staleMs))) {
+      // kilocode_change start - auth locks never use lease-age eviction
+      if (!opts.reclaim || !(await stale(lockDir, heartbeatPath, metaPath, opts.staleMs))) {
         return { acquired: false }
       }
+      // kilocode_change end
 
       const breakerPath = lockDir + ".breaker"
       try {
@@ -310,6 +314,7 @@ export namespace Flock {
   export async function acquire(key: string, input: Options = {}): Promise<Lease> {
     input.signal?.throwIfAborted()
     const cfg: Opts = {
+      reclaim: input.reclaim ?? true, // kilocode_change
       staleMs: input.staleMs ?? defaultOpts.staleMs,
       timeoutMs: input.timeoutMs ?? defaultOpts.timeoutMs,
       baseDelayMs: input.baseDelayMs ?? defaultOpts.baseDelayMs,

@@ -2,8 +2,7 @@ import { createHash } from "node:crypto"
 import { Schema } from "effect"
 import { z } from "zod"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import { Auth } from "@/auth"
-import { makeRuntime } from "@/effect/run-service"
+import { AuthStaleError, AuthStore } from "@/kilocode/auth/store"
 
 export namespace CodexModels {
   export const Capability = Schema.Union([
@@ -39,7 +38,6 @@ export namespace CodexModels {
   type Input = {
     auth: Credentials
     endpoint: string
-    getAuth: () => Promise<Credentials | undefined>
     refresh: (auth: Credentials) => Promise<Credentials>
     timeout?: number
   }
@@ -48,7 +46,6 @@ export namespace CodexModels {
   const version = "0.162.0"
   const ttl = 5 * 60 * 1000
   const maximum = 16 * 1024 * 1024
-  const storage = makeRuntime(Auth.Service, Auth.defaultLayer)
   const row = z.object({
     slug: z.string().min(1).max(256),
     context_window: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullish(),
@@ -60,19 +57,14 @@ export namespace CodexModels {
     return createHash("sha256").update(JSON.stringify(value)).digest("hex")
   }
 
-  function same(auth: Pick<Credentials, "accountId" | "refresh">, current: Credentials | undefined) {
-    if (!current) return false
-    if (auth.accountId || current.accountId) return auth.accountId === current.accountId
-    return auth.refresh === current.refresh
+  function identity(auth: AuthStore.Snapshot["value"]) {
+    return auth?.type === "oauth"
+      ? digest(auth.accountId ? ["account", auth.accountId] : ["refresh", auth.refresh])
+      : undefined
   }
 
   export function unavailable(reason: string): Capability {
     return Object.freeze({ status: "unavailable", reason })
-  }
-
-  export async function current(): Promise<Credentials | undefined> {
-    const auth = await storage.runPromise((store) => store.get("openai"))
-    return auth?.type === "oauth" ? auth : undefined
   }
 
   async function body(response: Response) {
@@ -102,18 +94,27 @@ export namespace CodexModels {
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown
   }
 
-  export function create(now = Date.now) {
+  export function create(now = Date.now, supplied?: ReturnType<typeof AuthStore.create>) {
     const cache = new Map<string, { time: number; models: Map<string, Capability> }>()
     const pending = new Map<string, Promise<Map<string, Capability> | Capability>>()
+    const origins = new WeakMap<Credentials, Promise<AuthStore.Snapshot>>()
 
-    async function query(input: Input): Promise<Map<string, Capability> | Capability> {
-      const expected = { accountId: input.auth.accountId, refresh: input.auth.refresh }
-      const current = await input.getAuth()
-      if (!same(expected, current)) return unavailable("The Codex account changed before loading model limits.")
-      const auth = current && current.access && current.expires > now() ? current : await input.refresh(input.auth)
-      if (!same(expected, auth) || !same(expected, await input.getAuth()))
-        return unavailable("The Codex account changed while renewing credentials.")
-      const scope = { accountId: auth.accountId, refresh: auth.refresh }
+    async function query(
+      input: Input,
+      expected: AuthStore.Snapshot,
+      store: ReturnType<typeof AuthStore.create>,
+    ): Promise<Map<string, Capability> | Capability> {
+      const check = async () => {
+        const current = await store.check(expected)
+        if (identity(expected.value) !== identity(current.value)) throw new AuthStaleError()
+        return current
+      }
+      const current = (await check()).value
+      if (current?.type !== "oauth") return unavailable("The Codex account changed before loading model limits.")
+      const auth = current.access && current.expires > now() ? current : await input.refresh(current)
+      await check()
+      if (identity(expected.value) !== identity(auth)) throw new AuthStaleError()
+      await store.check(await store.snapshot("openai", auth), true)
       if (!URL.canParse(input.endpoint)) return unavailable("The Codex model-catalog endpoint is unsupported.")
       const url = new URL(input.endpoint)
       if (
@@ -129,14 +130,13 @@ export namespace CodexModels {
       url.search = ""
       url.hash = ""
       url.searchParams.set("client_version", version)
-      const key = digest([url.href, scope.accountId || digest(scope.refresh)])
+      const key = digest([url.href, AuthStore.generation(expected), identity(expected.value)])
       const found = cache.get(key)
       if (found && now() - found.time < ttl) return new Map(found.models)
       const existing = pending.get(key)
       if (existing) {
         const result = await existing
-        if (!same(scope, await input.getAuth()))
-          return unavailable("The Codex account changed while loading model limits.")
+        await check()
         return result instanceof Map ? new Map(result) : result
       }
 
@@ -198,9 +198,7 @@ export namespace CodexModels {
               }),
             )
           }
-          if (!same(scope, await input.getAuth())) {
-            return unavailable("The Codex account changed while loading model limits.")
-          }
+          await check()
           cache.delete(key)
           cache.set(key, { time: now(), models })
           if (cache.size > 32) {
@@ -220,14 +218,21 @@ export namespace CodexModels {
 
     return {
       load: async (input: Input): Promise<Map<string, Capability> | Capability> => {
-        const binding = digest([input.endpoint, version, input.auth.accountId || digest(input.auth.refresh)])
-        const result = await query(input).catch(() =>
-          unavailable("Codex credentials could not be prepared for model-limit discovery."),
-        )
-        if (!(result instanceof Map)) return Object.freeze({ ...result, binding })
-        const models = new Map([...result].map(([key, value]) => [key, Object.freeze({ ...value, binding })]))
-        scopes.set(models, binding)
-        return models
+        const store = supplied ?? AuthStore.from(input.auth)
+        return store.run(async () => {
+          const origin = origins.get(input.auth) ?? store.snapshot("openai", input.auth)
+          origins.set(input.auth, origin)
+          const expected = await origin.catch(() => undefined)
+          if (!expected) return unavailable("Codex credentials could not be prepared for model-limit discovery.")
+          const binding = digest([input.endpoint, version, AuthStore.generation(expected), identity(expected.value)])
+          const result = await query(input, expected, store).catch(() =>
+            unavailable("Codex credentials could not be prepared for model-limit discovery."),
+          )
+          if (!(result instanceof Map)) return Object.freeze({ ...result, binding })
+          const models = new Map([...result].map(([key, value]) => [key, Object.freeze({ ...value, binding })]))
+          scopes.set(models, binding)
+          return models
+        })
       },
     }
   }

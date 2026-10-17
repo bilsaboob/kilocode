@@ -1,13 +1,11 @@
-import path from "path"
-import { Effect, Layer, Record, Result, Schema, Context } from "effect"
+import { Effect, Layer, Schema, Context } from "effect" // kilocode_change
 import { NonNegativeInt } from "@opencode-ai/core/schema"
-import { Global } from "@opencode-ai/core/global"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { EffectFlock } from "@opencode-ai/core/util/effect-flock" // kilocode_change
 import { Telemetry } from "@kilocode/kilo-telemetry" // kilocode_change
+import { AuthStore } from "@/kilocode/auth/store" // kilocode_change
 
 export const OAUTH_DUMMY_KEY = "kilo-oauth-dummy-key" // kilocode_change
-
-const file = path.join(Global.Path.data, "auth.json")
 
 const fail = (message: string) => (cause: unknown) => new AuthError({ message, cause })
 
@@ -52,40 +50,37 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Au
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const fsys = yield* AppFileSystem.Service
-    const decode = Schema.decodeUnknownOption(Info)
-
+    // kilocode_change start - capture sandbox policy at each operation, never at layer construction
+    const fs = yield* AppFileSystem.Service
+    const flock = yield* EffectFlock.Service
+    const storage = AuthStore.make().pipe(
+      Effect.provideService(AppFileSystem.Service, fs),
+      Effect.provideService(EffectFlock.Service, flock),
+    )
+    // kilocode_change end
     const all = Effect.fn("Auth.all")(function* () {
-      if (process.env.KILO_AUTH_CONTENT) {
-        try {
-          return JSON.parse(process.env.KILO_AUTH_CONTENT)
-        } catch (err) {}
-      }
-
-      const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
-      return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      // kilocode_change start - bind effective reads to serialized disk authority
+      const store = yield* storage
+      return yield* Effect.tryPromise({ try: () => store.all(), catch: fail("Failed to read auth data") })
+      // kilocode_change end
     })
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {
-      return (yield* all())[providerID]
+      return (yield* all())[AuthStore.normalize(providerID)] // kilocode_change
     })
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
-      const norm = key.replace(/\/+$/, "")
-      const data = yield* all()
-      if (norm !== key) delete data[key]
-      delete data[norm + "/"]
-      yield* fsys
-        .writeJson(file, { ...data, [norm]: info }, 0o600)
-        .pipe(Effect.mapError(fail("Failed to write auth data")))
+      // kilocode_change start - explicit writes always revoke prior refresh authority
+      const store = yield* storage
+      yield* Effect.tryPromise({ try: () => store.set(key, info), catch: fail("Failed to write auth data") })
+      // kilocode_change end
     })
 
     const remove = Effect.fn("Auth.remove")(function* (key: string) {
-      const norm = key.replace(/\/+$/, "")
-      const data = yield* all()
-      delete data[key]
-      delete data[norm]
-      yield* fsys.writeJson(file, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
+      // kilocode_change start - tombstones also advance on repeated logout
+      const store = yield* storage
+      yield* Effect.tryPromise({ try: () => store.remove(key), catch: fail("Failed to write auth data") })
+      // kilocode_change end
 
       // kilocode_change start - Track logout and reset telemetry identity for Kilo
       if (key === "kilo") {
@@ -99,6 +94,10 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(AppFileSystem.defaultLayer))
+// kilocode_change start - both credential and lock IO use decorated Effect services
+export const defaultLayer = layer.pipe(
+  Layer.provide(Layer.mergeAll(AppFileSystem.defaultLayer, EffectFlock.defaultLayer)),
+)
+// kilocode_change end
 
 export * as Auth from "."

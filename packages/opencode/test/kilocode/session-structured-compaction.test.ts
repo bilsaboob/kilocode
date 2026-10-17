@@ -67,9 +67,10 @@ function turn(
 }
 
 function response(source: ReturnType<typeof turn>, input: Partial<MessageV2.Assistant> = {}): MessageV2.WithParts {
+  const id = MessageID.ascending()
   return {
     info: {
-      id: MessageID.ascending(),
+      id,
       sessionID: source.info.sessionID,
       parentID: source.info.id,
       role: "assistant",
@@ -83,7 +84,17 @@ function response(source: ReturnType<typeof turn>, input: Partial<MessageV2.Assi
       time: { created: 2 },
       ...input,
     },
-    parts: [],
+    parts: input.summary
+      ? [
+          {
+            id: PartID.ascending(),
+            sessionID: source.info.sessionID,
+            messageID: id,
+            type: "text",
+            text: "Completed summary.",
+          },
+        ]
+      : [],
   }
 }
 

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import type { PluginInput } from "@kilocode/plugin"
 import { CodexAuthPlugin } from "../../src/plugin/openai/codex"
+import { fixture } from "./fixture/auth-store"
 
 test("identifies Codex refresh requests as Kilo", async () => {
   const original = globalThis.fetch
@@ -12,6 +13,7 @@ test("identifies Codex refresh requests as Kilo", async () => {
     refresh: "old-refresh",
     expires: 0,
   }
+  await using f = await fixture(auth)
   const input = {
     client: {
       auth: {
@@ -40,7 +42,7 @@ test("identifies Codex refresh requests as Kilo", async () => {
   )
 
   try {
-    const plugin = await CodexAuthPlugin(input)
+    const plugin = await CodexAuthPlugin(input, { store: f.store })
     const loaded = await plugin.auth!.loader!(async () => auth, {} as never)
     await loaded.fetch("https://api.openai.com/v1/responses")
   } finally {

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { fixture, fault } from "../kilocode/fixture/auth-store" // kilocode_change
+import { AuthStorageError } from "../../src/kilocode/auth/store" // kilocode_change
 import {
   accessTokenIsExpiring,
   buildAuthorizeUrl,
@@ -253,45 +255,62 @@ describe("plugin.xai", () => {
 
     test("deduplicates concurrent refreshes within a loader instance", async () => {
       const { input, setCalls } = makeInput()
+      // kilocode_change start
+      await using f = await fixture({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }, "xai")
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      // kilocode_change end
       let tokenRequests = 0
       const apiRequests: Headers[] = []
       using server = makeServer(async (request, url) => {
         if (url.pathname === "/oauth2/token") {
           tokenRequests++
           expect(await request.text()).toContain("refresh_token=rt-old")
-          await new Promise((resolve) => setTimeout(resolve, 30))
+          entered.resolve() // kilocode_change
+          await release.promise // kilocode_change
           return Response.json({ access_token: "new-access", refresh_token: "rt-new", expires_in: 3600 })
         }
         apiRequests.push(request.headers)
         return new Response("{}", { status: 200 })
       })
+      // kilocode_change start
       const opts = await (
-        await XaiAuthPlugin(input, serverOptions(server))
-      ).auth!.loader!(async () => ({ type: "oauth" as const, access: "old", refresh: "rt-old", expires: 0 }), {} as any)
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
+      ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
+      // kilocode_change end
 
-      await Promise.all([
+      // kilocode_change start
+      const requests = Promise.all([
         opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
         opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
       ])
+      await entered.promise
+      release.resolve()
+      await requests
+      // kilocode_change end
 
       expect(tokenRequests).toBe(1)
       expect(apiRequests.map((headers) => headers.get("authorization"))).toEqual([
         "Bearer new-access",
         "Bearer new-access",
       ])
-      expect(setCalls).toHaveLength(1)
-      expect((setCalls[0].body as any).refresh).toBe("rt-new")
+      expect(setCalls).toHaveLength(0) // kilocode_change - renewal must not use interactive auth routes
+      expect((await f.store.all()).xai).toMatchObject({ refresh: "rt-new" }) // kilocode_change
     })
 
-    test("does not share refresh single-flight across loader instances", async () => {
+    test("does not share refresh single-flight across credential stores", async () => {
+      // kilocode_change
       const { input } = makeInput()
+      // kilocode_change start
+      await using a = await fixture({ type: "oauth", access: "old-a", refresh: "rt-a", expires: 0 }, "xai")
+      await using b = await fixture({ type: "oauth", access: "old-b", refresh: "rt-b", expires: 0 }, "xai")
+      // kilocode_change end
       const tokenRequests: string[] = []
       const apiRequests: string[] = []
       using server = makeServer(async (request, url) => {
         if (url.pathname === "/oauth2/token") {
           const refreshToken = new URLSearchParams(await request.text()).get("refresh_token")!
           tokenRequests.push(refreshToken)
-          await new Promise((resolve) => setTimeout(resolve, 20))
           return Response.json({
             access_token: `access-${refreshToken}`,
             refresh_token: `next-${refreshToken}`,
@@ -301,12 +320,15 @@ describe("plugin.xai", () => {
         apiRequests.push(request.headers.get("authorization")!)
         return new Response("{}", { status: 200 })
       })
-      const hooks = await XaiAuthPlugin(input, serverOptions(server))
+      const hooks = await XaiAuthPlugin(input, { ...serverOptions(server), store: a.store }) // kilocode_change
       const first = await hooks.auth!.loader!(
         async () => ({ type: "oauth", access: "old-a", refresh: "rt-a", expires: 0 }),
         {} as any,
       )
-      const second = await hooks.auth!.loader!(
+      const second = await (
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: b.store })
+      ).auth!.loader!(
+        // kilocode_change
         async () => ({ type: "oauth", access: "old-b", refresh: "rt-b", expires: 0 }),
         {} as any,
       )
@@ -322,6 +344,7 @@ describe("plugin.xai", () => {
 
     test("starts a new refresh after success and clears the refresh promise after failure", async () => {
       const { input } = makeInput()
+      await using f = await fixture({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }, "xai") // kilocode_change
       let tokenRequests = 0
       using server = makeServer((_, url) => {
         if (url.pathname === "/oauth2/token") {
@@ -335,11 +358,14 @@ describe("plugin.xai", () => {
         }
         return new Response("{}", { status: 200 })
       })
+      // kilocode_change start
       const opts = await (
-        await XaiAuthPlugin(input, serverOptions(server))
-      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }), {} as any)
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
+      ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
+      // kilocode_change end
 
       await opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })
+      await f.store.commit(await f.store.snapshot("xai"), { type: "oauth", access: "old", refresh: "rt-1", expires: 0 }) // kilocode_change
       await expect(opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })).rejects.toThrow(
         /xAI token refresh failed \(503\)/,
       )
@@ -347,26 +373,45 @@ describe("plugin.xai", () => {
       expect(tokenRequests).toBe(3)
     })
 
-    test("handles refresh response variants and persistence failure", async () => {
-      const { input, setCalls } = makeInput({ failSet: true })
+    test("does not expose refreshed tokens after persistence failure", async () => {
+      // kilocode_change
+      const { input, setCalls } = makeInput() // kilocode_change
+      // kilocode_change start
+      await using f = await fixture({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }, "xai")
+      using broken = await fault(f.file, f.file, "rename")
+      // kilocode_change end
       const captured: Headers[] = []
       using server = makeServer((request, url) => {
         if (url.pathname === "/oauth2/token") return Response.json({ access_token: "new-access", expires_in: 3600 })
         captured.push(request.headers)
         return new Response("{}", { status: 200 })
       })
+      // kilocode_change start
       const opts = await (
-        await XaiAuthPlugin(input, serverOptions(server))
-      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }), {} as any)
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: broken.store })
+      ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
+      // kilocode_change end
 
-      const resp = await opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })
-      expect(resp.status).toBe(200)
-      expect(captured[0].get("authorization")).toBe("Bearer new-access")
-      expect((setCalls[0].body as any).refresh).toBe("rt-old")
+      // kilocode_change start
+      await expect(opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })).rejects.toBeInstanceOf(
+        AuthStorageError,
+      )
+      expect(captured).toEqual([])
+      expect(setCalls).toEqual([])
+      // kilocode_change end
     })
 
     test("refreshes based on stored expiry or JWT expiry and skips refresh when both are fresh", async () => {
       const { input, setCalls } = makeInput()
+      // kilocode_change start
+      const auth = {
+        type: "oauth" as const,
+        access: makeJwt({ exp: Math.floor((Date.now() + 30_000) / 1000) }),
+        refresh: "rt-old",
+        expires: Date.now() + 24 * 3600 * 1000,
+      }
+      await using f = await fixture(auth, "xai")
+      // kilocode_change end
       let tokenRequests = 0
       using server = makeServer((_, url) => {
         if (url.pathname === "/oauth2/token") {
@@ -390,30 +435,30 @@ describe("plugin.xai", () => {
       expect(tokenRequests).toBe(0)
 
       const jwtExpiring = await (
-        await XaiAuthPlugin(input, serverOptions(server))
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
       ).auth!.loader!(
-        async () => ({
-          type: "oauth",
-          access: makeJwt({ exp: Math.floor((Date.now() + 30_000) / 1000) }),
-          refresh: "rt-old",
-          expires: Date.now() + 24 * 3600 * 1000,
-        }),
+        // kilocode_change
+        async () => (await f.store.all()).xai, // kilocode_change
         {} as any,
       )
+      // kilocode_change start
       const missingExpires = await (
-        await XaiAuthPlugin(input, serverOptions(server))
-      ).auth!.loader!(async () => ({ type: "oauth", access: "opaque-token", refresh: "rt", expires: 0 }), {} as any)
+        await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
+      ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
+      // kilocode_change end
       await jwtExpiring.fetch!(new URL("/chat/completions", server.url), { headers: {} })
+      await f.store.set("xai", { type: "oauth", access: "opaque-token", refresh: "rt", expires: 0 }) // kilocode_change
       await missingExpires.fetch!(new URL("/chat/completions", server.url), { headers: {} })
       expect(tokenRequests).toBe(2)
-      expect(setCalls).toHaveLength(2)
+      expect(setCalls).toHaveLength(0) // kilocode_change
     })
 
     test("network failure during refresh surfaces the underlying fetch error", async () => {
       const { input } = makeInput()
+      await using f = await fixture({ type: "oauth", access: "old", refresh: "rt", expires: 0 }, "xai") // kilocode_change
       const opts = await (
-        await XaiAuthPlugin(input, { tokenUrl: "http://127.0.0.1:9/oauth2/token" })
-      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt", expires: 0 }), {} as any)
+        await XaiAuthPlugin(input, { tokenUrl: "http://127.0.0.1:9/oauth2/token", store: f.store })
+      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt", expires: 0 }), {} as any) // kilocode_change
 
       await expect(opts.fetch!("https://api.x.ai/v1/chat/completions", { headers: {} })).rejects.toThrow()
     })

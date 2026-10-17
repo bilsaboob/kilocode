@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
-import { Effect, Layer, ManagedRuntime } from "effect"
+import { Deferred, Effect, Fiber, Layer, ManagedRuntime } from "effect"
 import * as Stream from "effect/Stream"
 import { LLMEvent, type LLMEvent as Event } from "@opencode-ai/llm"
 import { Agent } from "../../src/agent/agent"
@@ -14,6 +14,7 @@ import { provideTestInstance } from "../fixture/fixture"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Snapshot } from "../../src/snapshot"
 import { KiloCompactionChunks } from "../../src/kilocode/session/compaction-chunks"
+import { KiloCompactionState } from "../../src/kilocode/session/compaction-state"
 import { KiloSessionCompaction } from "../../src/kilocode/session/compaction"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -132,7 +133,7 @@ function llm() {
   }
 }
 
-function reply(text: string, capture?: (input: LLM.StreamInput) => void) {
+function reply(text: string, capture?: (input: LLM.StreamInput) => void, reason: "stop" | "length" = "stop") {
   return (input: LLM.StreamInput) => {
     capture?.(input)
     const usage = { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
@@ -140,13 +141,13 @@ function reply(text: string, capture?: (input: LLM.StreamInput) => void) {
       LLMEvent.textStart({ id: "txt-0" }),
       LLMEvent.textDelta({ id: "txt-0", text }),
       LLMEvent.textEnd({ id: "txt-0" }),
-      LLMEvent.stepFinish({ index: 0, reason: "stop", usage }),
-      LLMEvent.finish({ reason: "stop", usage }),
+      LLMEvent.stepFinish({ index: 0, reason, usage }),
+      LLMEvent.finish({ reason, usage }),
     )
   }
 }
 
-function fakeRuntime(outputTokenMax?: number) {
+function fakeRuntime(outputTokenMax?: number, finish: "stop" | "tool-calls" = "stop") {
   const calls: string[] = []
   const outputs: number[] = []
   const bus = Bus.layer
@@ -181,7 +182,9 @@ function fakeRuntime(outputTokenMax?: number) {
                   type: "text",
                   text,
                 })
-                input.assistantMessage.finish = "stop"
+                input.assistantMessage.finish = finish
+                input.assistantMessage.time.completed = Date.now()
+                yield* sessions.updateMessage(input.assistantMessage)
                 return "continue" as const
               }),
             ),
@@ -223,7 +226,12 @@ function liveRuntime(layer: Layer.Layer<LLM.Service>, context = 10_000) {
     Layer.provide(Image.defaultLayer),
     Layer.provide(SyncEvent.defaultLayer),
   )
-  const model = ProviderTest.model({ providerID, id: modelID, limit: { context, output: 1_000 } })
+  const model = ProviderTest.model({
+    providerID,
+    id: modelID,
+    limit: { context, output: 1_000 },
+    cost: { input: 1, output: 2, cache: { read: 0, write: 0 } },
+  })
   return ManagedRuntime.make(
     Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status).pipe(
       Layer.provide(ProviderTest.fake({ model }).layer),
@@ -253,6 +261,98 @@ afterEach(() => {
 })
 
 describe("KiloCompactionChunks", () => {
+  test.each(["stop", "length", "cancel"] as const)(
+    "retains worker spending exactly once after %s without installing partial history",
+    async (outcome) => {
+      const stub = llm()
+      let calls = 0
+      const ready = await Effect.runPromise(Deferred.make<void>())
+      const pending = await Effect.runPromise(Deferred.make<void>())
+      const reason = outcome === "length" ? "length" : "stop"
+      const usage = { inputTokens: 100, outputTokens: 20, totalTokens: 120 }
+      stub.push(() => {
+        calls++
+        const stream = Stream.make(
+          LLMEvent.textStart({ id: "text" }),
+          LLMEvent.textDelta({ id: "text", text: "worker summary" }),
+          LLMEvent.textEnd({ id: "text" }),
+          LLMEvent.stepFinish({ index: 0, reason, usage }),
+        )
+        return outcome === "cancel"
+          ? stream.pipe(
+              Stream.concat(Stream.fromEffect(Deferred.succeed(ready, undefined)).pipe(Stream.drain)),
+              Stream.concat(Stream.fromEffect(Deferred.await(pending)).pipe(Stream.drain)),
+            )
+          : stream.pipe(Stream.concat(Stream.make(LLMEvent.finish({ reason, usage }))))
+      })
+      await using tmp = await tmpdir()
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await svc.create({})
+          const original = await user(session.id, "original evidence " + "x".repeat(80_000))
+          const baseline = await assistant(session.id, original.id, tmp.path, "completed original response")
+          const before = JSON.stringify(await svc.messages({ sessionID: session.id }))
+          await Effect.runPromise(
+            KiloSessionCompaction.create({
+              session: store,
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: false,
+            }),
+          )
+          const rt = liveRuntime(stub.layer)
+          try {
+            const messages = await svc.messages({ sessionID: session.id })
+            const parent = messages.at(-1)!.info.id
+            const process = SessionCompaction.Service.use((service) =>
+              service.process({ parentID: parent, messages, sessionID: session.id, auto: false }),
+            )
+            if (outcome === "cancel") {
+              await rt.runPromise(
+                Effect.gen(function* () {
+                  const fiber = yield* process.pipe(Effect.forkChild)
+                  yield* Deferred.await(ready)
+                  yield* Fiber.interrupt(fiber)
+                }),
+              )
+            } else {
+              expect(await rt.runPromise(process)).toBe(outcome === "stop" ? "continue" : "stop")
+            }
+            const saved = await svc.messages({ sessionID: session.id })
+            const receipts = saved
+              .flatMap((message) => message.parts)
+              .filter((part): part is MessageV2.StepFinishPart => part.type === "step-finish")
+            expect(calls).toBe(1)
+            expect(receipts).toHaveLength(1)
+            expect(receipts[0].tokens.input).toBe(100)
+            expect(receipts[0].tokens.output).toBe(20)
+            expect(receipts[0].cost).toBeCloseTo(0.00014, 10)
+            const totals = await run(SessionNs.Service.use((service) => service.get(session.id)))
+            expect(totals.cost).toBeCloseTo(receipts[0].cost, 10)
+            expect(saved.some((message) => KiloCompactionState.bound(message, saved))).toBe(outcome === "stop")
+            expect(
+              JSON.stringify(
+                saved.filter((message) => message.info.id === original.id || message.info.id === baseline.id),
+              ),
+            ).toBe(before)
+            expect(KiloCompactionState.latest(saved)?.id).toBe(outcome === "stop" ? undefined : baseline.id)
+            const projected = JSON.stringify(
+              await MessageV2.toModelMessages(
+                MessageV2.filterCompacted([...saved].reverse()),
+                ProviderTest.model({ providerID, id: modelID }),
+              ),
+            )
+            expect(projected.includes("worker summary")).toBe(outcome === "stop")
+          } finally {
+            await rt.dispose()
+          }
+        },
+      })
+    },
+  )
+
   test("splits oversized history into chronological chunks", async () => {
     const model = ProviderTest.model({ providerID, id: modelID, limit: { context: 7_000, output: 1_000 } })
     const sessionID = SessionID.make("ses_chunks_split")
@@ -330,15 +430,16 @@ describe("KiloCompactionChunks", () => {
           )
 
           const all = await svc.messages({ sessionID: session.id })
-          const summaries = all.filter((msg) => msg.info.role === "assistant" && msg.info.summary)
+          const summaries = all.filter((msg) => KiloCompactionState.bound(msg, all))
           const parts = summaries
             .flatMap((msg) => msg.parts)
-            .filter((part): part is MessageV2.TextPart => part.type === "text")
+            .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)
 
           expect(result).toBe("continue")
           expect(calls.length).toBeGreaterThanOrEqual(1)
           expect(calls.at(-1)).toContain("Create a new anchored summary")
           expect(summaries).toHaveLength(1)
+          expect(all.filter((msg) => msg.info.role === "assistant" && msg.info.summary).length).toBeGreaterThan(1)
           expect(parts.map((part) => part.text)).toEqual(["final summary"])
         } finally {
           await rt.dispose()
@@ -393,57 +494,62 @@ describe("KiloCompactionChunks", () => {
     })
   })
 
-  test("uses a worker even when fallback selection produces one oversized chunk", async () => {
-    await using tmp = await tmpdir()
-    await provideTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        const session = await svc.create({})
-        const first = await user(session.id, "first " + "a".repeat(20_000))
-        await assistant(session.id, first.id, tmp.path, "reply " + "b".repeat(20_000))
-        await Effect.runPromise(
-          KiloSessionCompaction.create({
-            session: store,
-            sessionID: session.id,
-            agent: "build",
-            model: ref,
-            auto: false,
-          }),
-        )
-
-        const { rt, calls } = fakeRuntime()
-        try {
-          const msgs = await svc.messages({ sessionID: session.id })
-          const parent = msgs.at(-1)?.info.id
-          expect(parent).toBeTruthy()
-          const result = await rt.runPromise(
-            SessionCompaction.Service.use((svc) =>
-              svc.process({
-                parentID: parent!,
-                messages: msgs,
-                sessionID: session.id,
-                auto: false,
-              }),
-            ),
+  test.each(["stop", "tool-calls"] as const)(
+    "only installs a completed summary from a worker finishing with %s",
+    async (finish) => {
+      await using tmp = await tmpdir()
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await svc.create({})
+          const first = await user(session.id, "first " + "a".repeat(20_000))
+          await assistant(session.id, first.id, tmp.path, "reply " + "b".repeat(20_000))
+          await Effect.runPromise(
+            KiloSessionCompaction.create({
+              session: store,
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: false,
+            }),
           )
 
-          const all = await svc.messages({ sessionID: session.id })
-          const summaries = all.filter((msg) => msg.info.role === "assistant" && msg.info.summary)
-          const parts = summaries
-            .flatMap((msg) => msg.parts)
-            .filter((part): part is MessageV2.TextPart => part.type === "text")
+          const { rt, calls } = fakeRuntime(undefined, finish)
+          try {
+            const msgs = await svc.messages({ sessionID: session.id })
+            const parent = msgs.at(-1)?.info.id
+            expect(parent).toBeTruthy()
+            const result = await rt.runPromise(
+              SessionCompaction.Service.use((svc) =>
+                svc.process({
+                  parentID: parent!,
+                  messages: msgs,
+                  sessionID: session.id,
+                  auto: false,
+                }),
+              ),
+            )
 
-          expect(result).toBe("continue")
-          expect(calls.length).toBeGreaterThan(0)
-          expect(calls[0]).toContain("Summarize conversation chunk")
-          expect(summaries).toHaveLength(1)
-          expect(parts.map((part) => part.text)).toEqual(["final summary"])
-        } finally {
-          await rt.dispose()
-        }
-      },
-    })
-  })
+            const all = await svc.messages({ sessionID: session.id })
+            const summaries = all.filter((msg) => KiloCompactionState.bound(msg, all))
+            const parts = summaries
+              .flatMap((msg) => msg.parts)
+              .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)
+
+            expect(result).toBe(finish === "stop" ? "continue" : "stop")
+            expect(calls.length).toBeGreaterThan(0)
+            expect(calls[0]).toContain("Summarize conversation chunk")
+            expect(summaries).toHaveLength(finish === "stop" ? 1 : 0)
+            expect(parts.map((part) => part.text)).toEqual(finish === "stop" ? ["final summary"] : [])
+            if (finish === "tool-calls")
+              expect(calls.every((call) => call.includes("Summarize conversation chunk"))).toBe(true)
+          } finally {
+            await rt.dispose()
+          }
+        },
+      })
+    },
+  )
 
   test("serializes oversized fallback chunks before summarizing", async () => {
     await using tmp = await tmpdir()
@@ -533,38 +639,53 @@ describe("KiloCompactionChunks", () => {
     })
   })
 
-  test("compacts oversized replay turns after overflow compaction", async () => {
-    const stub = llm()
-    const calls: string[] = []
-    stub.push(reply("history summary"))
-    stub.push(reply("replay summary", (input) => calls.push(JSON.stringify(input.messages))))
+  test.each(["stop", "length", "cancel"] as const)(
+    "commits overflow history only after replay preparation ends with %s",
+    async (outcome) => {
+      const stub = llm()
+      const calls: string[] = []
+      const ready = await Effect.runPromise(Deferred.make<void>())
+      const pending = await Effect.runPromise(Deferred.make<void>())
+      stub.push(reply("history summary"))
+      stub.push((input) => {
+        const stream = reply(
+          "replay summary",
+          (input) => calls.push(JSON.stringify(input.messages)),
+          outcome === "length" ? "length" : "stop",
+        )(input)
+        return outcome === "cancel"
+          ? stream.pipe(
+              Stream.concat(Stream.fromEffect(Deferred.succeed(ready, undefined)).pipe(Stream.drain)),
+              Stream.concat(Stream.fromEffect(Deferred.await(pending)).pipe(Stream.drain)),
+            )
+          : stream
+      })
 
-    await using tmp = await tmpdir()
-    await provideTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        const session = await svc.create({})
-        const old = await user(session.id, "old context")
-        await assistant(session.id, old.id, tmp.path, "old reply")
-        const large = await user(session.id, "large replay " + "x".repeat(40_000))
-        await Effect.runPromise(
-          KiloSessionCompaction.create({
-            session: store,
-            sessionID: session.id,
-            agent: "build",
-            model: ref,
-            auto: true,
-            overflow: true,
-          }),
-        )
+      await using tmp = await tmpdir()
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const session = await svc.create({})
+          const old = await user(session.id, "old context")
+          await assistant(session.id, old.id, tmp.path, "old reply")
+          const large = await user(session.id, "large replay " + "x".repeat(40_000))
+          await Effect.runPromise(
+            KiloSessionCompaction.create({
+              session: store,
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: true,
+              overflow: true,
+            }),
+          )
 
-        const rt = liveRuntime(stub.layer)
-        try {
-          const msgs = await svc.messages({ sessionID: session.id })
-          const parent = msgs.at(-1)?.info.id
-          expect(parent).toBeTruthy()
-          const result = await rt.runPromise(
-            SessionCompaction.Service.use((svc) =>
+          const rt = liveRuntime(stub.layer)
+          try {
+            const msgs = await svc.messages({ sessionID: session.id })
+            const parent = msgs.at(-1)?.info.id
+            expect(parent).toBeTruthy()
+            const process = SessionCompaction.Service.use((svc) =>
               svc.process({
                 parentID: parent!,
                 messages: msgs,
@@ -572,22 +693,77 @@ describe("KiloCompactionChunks", () => {
                 auto: true,
                 overflow: true,
               }),
-            ),
-          )
+            )
+            if (outcome === "cancel") {
+              await rt.runPromise(
+                Effect.gen(function* () {
+                  const fiber = yield* process.pipe(Effect.forkChild)
+                  yield* Deferred.await(ready).pipe(Effect.timeout("4 seconds"))
+                  yield* Fiber.interrupt(fiber)
+                }),
+              )
+            } else {
+              expect(await rt.runPromise(process)).toBe(outcome === "stop" ? "continue" : "stop")
+            }
 
-          const all = await svc.messages({ sessionID: session.id })
-          const replay = all.findLast((msg) => msg.info.role === "user" && msg.info.id !== large.id)
-          const part = replay?.parts.find((part): part is MessageV2.TextPart => part.type === "text")
+            const all = await svc.messages({ sessionID: session.id })
+            const replay = all.findLast((msg) => msg.info.role === "user" && msg.info.id !== large.id)
+            const part = replay?.parts.find((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)
 
-          expect(result).toBe("continue")
-          expect(calls).toHaveLength(1)
-          expect(calls[0]).toContain("Summarize conversation chunk 1 of 1")
-          expect(part?.text).toContain("compacted representation")
-          expect(part?.text).toContain("replay summary")
-        } finally {
-          await rt.dispose()
-        }
-      },
-    })
-  })
+            expect(calls).toHaveLength(1)
+            expect(calls[0]).toContain("Summarize conversation chunk 1 of 1")
+            if (outcome === "stop") {
+              expect(part?.text).toContain("compacted representation")
+              expect(part?.text).toContain("replay summary")
+              expect(all.some((message) => KiloCompactionState.bound(message, all))).toBe(true)
+              const reads: string[] = []
+              stub.push(reply("second summary", (input) => reads.push(JSON.stringify(input.messages))))
+              await Effect.runPromise(
+                KiloSessionCompaction.create({
+                  session: store,
+                  sessionID: session.id,
+                  agent: "build",
+                  model: ref,
+                  auto: false,
+                }),
+              )
+              const history = MessageV2.filterCompacted([...(await svc.messages({ sessionID: session.id }))].reverse())
+              const result = await rt.runPromise(
+                SessionCompaction.Service.use((service) =>
+                  service.process({
+                    parentID: history.at(-1)!.info.id,
+                    sessionID: session.id,
+                    messages: history,
+                    auto: false,
+                  }),
+                ),
+              )
+              if (result !== "continue")
+                throw new Error(
+                  JSON.stringify(
+                    (await svc.messages({ sessionID: session.id })).flatMap((message) =>
+                      message.info.role === "assistant" && message.info.error ? [message.info.error] : [],
+                    ),
+                  ),
+                )
+              const retained = MessageV2.filterCompacted([...(await svc.messages({ sessionID: session.id }))].reverse())
+              expect(
+                reads.join("\n") +
+                  JSON.stringify(
+                    await MessageV2.toModelMessages(retained, ProviderTest.model({ providerID, id: modelID })),
+                  ),
+              ).toContain("replay summary")
+            } else {
+              expect(all.some((message) => KiloCompactionState.bound(message, all))).toBe(false)
+              const projected = MessageV2.filterCompacted([...all].reverse())
+              expect(projected.some((message) => message.info.id === large.id)).toBe(true)
+              expect(projected.some((message) => message.info.id === old.id)).toBe(true)
+            }
+          } finally {
+            await rt.dispose()
+          }
+        },
+      })
+    },
+  )
 })

@@ -338,7 +338,11 @@ it.live("session.processor effect tests preserve text start time", () =>
         gate.resolve()
 
         const exit = yield* Fiber.await(run)
-        const text = MessageV2.parts(msg.id).find((part): part is MessageV2.TextPart => part.type === "text")
+        // kilocode_change start - receipt metadata is not assistant prose
+        const text = MessageV2.parts(msg.id).find(
+          (part): part is MessageV2.TextPart => part.type === "text" && !part.ignored,
+        )
+        // kilocode_change end
 
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(text?.text).toBe("hello")
@@ -476,7 +480,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
 
         const parts = MessageV2.parts(msg.id)
         const reasoning = parts.find((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
-        const text = parts.find((part): part is MessageV2.TextPart => part.type === "text")
+        const text = parts.find((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored) // kilocode_change - accounting receipts are not assistant output
 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(1)

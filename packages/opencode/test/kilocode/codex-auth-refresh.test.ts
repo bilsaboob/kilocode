@@ -1,346 +1,347 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { CodexAuthExpiredError, refreshCodexAuth } from "../../src/kilocode/provider/codex-refresh"
+import { AuthSourceError, AuthStaleError, AuthStorageError } from "../../src/kilocode/auth/store"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderID } from "../../src/provider/schema"
-import { spawn } from "child_process"
-import fs from "fs/promises"
-import os from "os"
-import path from "path"
+import { expired, fixture, tokens, fault } from "./fixture/auth-store"
 
-type Auth = {
-  type: "oauth"
-  refresh: string
-  access: string
-  expires: number
-  accountId?: string
-}
-
-type Lock = {
-  staleMs: number
-  timeoutMs: number
-  baseDelayMs: number
-  maxDelayMs: number
-}
-
-const expired = (): Auth => ({
-  type: "oauth",
-  access: "old-access",
-  refresh: "old-refresh",
-  expires: 0,
-})
-
-const root = path.join(import.meta.dir, "../..")
-const worker = path.join(import.meta.dir, "fixture/codex-auth-refresh-worker.ts")
-
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms))
-}
-
-async function wait(file: string) {
-  const stop = Date.now() + 10_000
-  while (Date.now() < stop) {
-    if (
-      await fs
-        .stat(file)
-        .then(() => true)
-        .catch(() => false)
-    )
-      return
-    await sleep(10)
-  }
-  throw new Error(`Timed out waiting for file: ${file}`)
-}
-
-function run(input: { root: string; url: string; ready: string; start: string; lock?: Lock }) {
-  const proc = spawn(process.execPath, [worker, JSON.stringify(input)], {
-    cwd: root,
-    windowsHide: true,
-  })
-  const stdout: Buffer[] = []
-  const stderr: Buffer[] = []
-  proc.stdout?.on("data", (data) => stdout.push(Buffer.from(data)))
-  proc.stderr?.on("data", (data) => stderr.push(Buffer.from(data)))
-  return {
-    proc,
-    done: new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-      proc.on("close", (code) => {
-        resolve({
-          code: code ?? 1,
-          stdout: Buffer.concat(stdout).toString(),
-          stderr: Buffer.concat(stderr).toString(),
-        })
+describe("Codex auth refresh authority", () => {
+  test("serializes auth authority failures as nonretryable ProviderAuthError without tokens", () => {
+    for (const error of [
+      new CodexAuthExpiredError(),
+      new AuthSourceError(),
+      new AuthStaleError(),
+      new AuthStorageError(),
+    ]) {
+      const result = MessageV2.fromError(error, { providerID: ProviderID.make("openai") })
+      expect(result).toMatchObject({
+        name: "ProviderAuthError",
+        data: { providerID: "openai", message: error.message },
       })
-    }),
-  }
-}
-
-async function race(input: { reuse: "early" | "late"; delay: number; lock?: Lock }) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-auth-refresh-"))
-  const calls: string[] = []
-  const used = new Set<string>()
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(req) {
-      const body = new URLSearchParams(await req.text())
-      const token = body.get("refresh_token")
-      if (!token) return new Response("missing refresh token", { status: 400 })
-      calls.push(token)
-      if (used.has(token)) {
-        if (input.reuse === "late") await sleep(input.delay + 50)
-        return new Response("refresh token reused", { status: 401 })
-      }
-      used.add(token)
-      await sleep(input.delay)
-      return Response.json({
-        id_token: "",
-        access_token: "next-access",
-        refresh_token: "next-refresh",
-        expires_in: 60,
-      })
-    },
-  })
-
-  try {
-    const data = path.join(dir, "share", "kilo")
-    const start = path.join(dir, "start")
-    const first = path.join(dir, "first")
-    const second = path.join(dir, "second")
-    await fs.mkdir(data, { recursive: true })
-    await fs.writeFile(path.join(data, "auth.json"), JSON.stringify({ openai: expired() }))
-    const url = `http://127.0.0.1:${server.port}/oauth/token`
-    const a = run({ root: dir, url, ready: first, start, lock: input.lock })
-    const b = run({ root: dir, url, ready: second, start, lock: input.lock })
-    try {
-      await Promise.all([wait(first), wait(second)])
-      await fs.writeFile(start, "")
-      const out = await Promise.all([a.done, b.done])
-      return { calls, out }
-    } finally {
-      if (a.proc.exitCode === null) a.proc.kill()
-      if (b.proc.exitCode === null) b.proc.kill()
+      expect(JSON.stringify(result)).not.toContain("old-refresh")
     }
-  } finally {
-    await server.stop(true)
-    await fs.rm(dir, { recursive: true, force: true })
-  }
-}
-
-describe("Codex auth refresh", () => {
-  test("serializes expired Codex auth as ProviderAuthError", () => {
-    const result = MessageV2.fromError(new CodexAuthExpiredError(), { providerID: ProviderID.make("openai") })
-
-    expect(result).toStrictEqual({
-      name: "ProviderAuthError",
-      data: {
-        providerID: "openai",
-        message:
-          "Your ChatGPT sign-in expired or was revoked. Sign in with ChatGPT again to continue using Codex models.",
-      },
-    })
   })
 
   test("coalesces concurrent refreshes and persists rotated tokens", async () => {
-    const calls: string[] = []
-    const writes: Auth[] = []
-    const first = expired()
-    const second = expired()
-    const refresh = async (token: string) => {
-      calls.push(token)
-      await new Promise((resolve) => setTimeout(resolve, 1))
-      return { id_token: "", access_token: "next-access", refresh_token: "next-refresh", expires_in: 60 }
-    }
-
-    const [a, b] = await Promise.all([
-      refreshCodexAuth({
-        persist: async (auth) => writes.push(auth),
-        getAuth: async () => first,
-        auth: first,
-        refresh,
-        account: () => undefined,
-      }),
-      refreshCodexAuth({
-        persist: async (auth) => writes.push(auth),
-        getAuth: async () => second,
-        auth: second,
-        refresh,
-        account: () => undefined,
-      }),
-    ])
-
-    expect(calls).toEqual(["old-refresh"])
-    expect(writes).toHaveLength(1)
-    expect(a.access).toBe("next-access")
-    expect(b.refresh).toBe("next-refresh")
-    expect(first.access).toBe("next-access")
-    expect(second.access).toBe("next-access")
-  })
-
-  test("uses a newer stored token after refresh 401", async () => {
-    const fresh = {
-      type: "oauth" as const,
-      access: "fresh-access",
-      refresh: "fresh-refresh",
-      expires: Date.now() + 60_000,
-    }
+    await using f = await fixture(expired())
     const auth = expired()
-    let count = 0
-    const getAuth = async () => {
-      count++
-      return count === 1 ? auth : fresh
-    }
-
-    const result = await refreshCodexAuth({
-      persist: async () => {},
-      getAuth,
+    const copy = expired()
+    await Promise.all([f.store.snapshot("openai", auth), f.store.snapshot("openai", copy)])
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let calls = 0
+    const input = {
+      store: f.store,
       auth,
+      account: () => undefined,
       refresh: async () => {
-        throw new Error("Token refresh failed: 401")
+        calls++
+        entered.resolve()
+        await release.promise
+        return tokens()
       },
-      account: () => undefined,
+    }
+    const first = refreshCodexAuth(input)
+    await entered.promise
+    const second = refreshCodexAuth({ ...input, auth: copy })
+    release.resolve()
+    const results = await Promise.all([first, second])
+    expect(calls).toBe(1)
+    expect(results.map((a) => a.access)).toEqual(["next-access", "next-access"])
+    expect((await f.store.all()).openai).toEqual(results[0])
+  })
+
+  for (const change of ["logout", "api", "account", "identical", "logout-login"] as const) {
+    test(`delayed renewal cannot overwrite ${change}`, async () => {
+      await using f = await fixture(expired())
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const auth = (await f.store.all()).openai
+      if (auth.type !== "oauth") throw new Error("Fixture is not OAuth")
+      const result = refreshCodexAuth({
+        store: f.store,
+        auth,
+        account: () => undefined,
+        refresh: async () => {
+          entered.resolve()
+          await release.promise
+          return tokens()
+        },
+      }).catch((err) => err)
+      await entered.promise
+      if (change === "logout" || change === "logout-login") await f.store.remove("openai")
+      if (change === "api") await f.store.set("openai", { type: "api", key: "replacement" })
+      if (change === "account") await f.store.set("openai", { ...expired(), accountId: "other-account" })
+      if (change === "identical" || change === "logout-login") await f.store.set("openai", expired())
+      const expected = await f.store.all()
+      release.resolve()
+      expect(await result).toBeInstanceOf(AuthStaleError)
+      expect(await f.store.all()).toEqual(expected)
+      expect(auth).toEqual(expired())
     })
+  }
 
-    expect(result).toBe(fresh)
-  })
+  for (const change of ["generation", "revision"] as const) {
+    test(`same-token new ${change} cannot join old pending refresh`, async () => {
+      await using f = await fixture(expired())
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let calls = 0
+      const refresh = async () => {
+        if (++calls === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        return tokens()
+      }
+      const input = { store: f.store, auth: expired(), account: () => undefined, refresh }
+      const first = refreshCodexAuth(input).catch((err) => err)
+      await entered.promise
+      if (change === "generation") await f.store.set("openai", expired())
+      else await f.store.commit(await f.store.snapshot("openai"), expired())
+      const second = refreshCodexAuth({ ...input, auth: (await f.store.all()).openai as ReturnType<typeof expired> })
+      release.resolve()
+      expect(await first).toBeInstanceOf(AuthStaleError)
+      expect((await second).access).toBe("next-access")
+      expect(calls).toBe(2)
+    })
+  }
 
-  test("does not expose renewed credentials when persistence fails", async () => {
-    const auth = expired()
-    const failure = new Error("credential storage unavailable")
-    const result = await refreshCodexAuth({
-      persist: async () => {
-        throw failure
-      },
-      getAuth: async () => auth,
-      auth,
-      refresh: async () => ({ id_token: "", access_token: "next-access", refresh_token: "next-refresh" }),
+  for (const change of ["generation", "revision", "account"] as const) {
+    test(`401 fallback respects ${change} authority`, async () => {
+      await using f = await fixture(expired())
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const result = refreshCodexAuth({
+        store: f.store,
+        auth: expired(),
+        account: () => undefined,
+        refresh: async () => {
+          entered.resolve()
+          await release.promise
+          throw new Error("Token refresh failed: 401")
+        },
+      }).catch((err) => err)
+      await entered.promise
+      const next = {
+        ...expired(),
+        access: "same-token-new-revision",
+        expires: Date.now() + 60_000,
+        ...(change === "account" && { accountId: "other-account" }),
+      }
+      if (change === "generation") await f.store.set("openai", next)
+      else await f.store.commit(await f.store.snapshot("openai"), next)
+      release.resolve()
+      if (change !== "revision") expect(await result).toBeInstanceOf(AuthStaleError)
+      else expect(await result).toEqual(next)
+    })
+  }
+
+  test("missing or API auth before exchange makes zero requests", async () => {
+    await using f = await fixture()
+    let calls = 0
+    const input = {
+      store: f.store,
+      auth: expired(),
       account: () => undefined,
-    }).catch((err) => err)
-
-    expect(result).toBe(failure)
-    expect(auth).toEqual(expired())
+      refresh: async () => {
+        calls++
+        return tokens()
+      },
+    }
+    await expect(refreshCodexAuth(input)).rejects.toBeInstanceOf(AuthStaleError)
+    await f.store.set("openai", { type: "api", key: "replacement" })
+    await expect(refreshCodexAuth(input)).rejects.toBeInstanceOf(AuthStaleError)
+    expect(calls).toBe(0)
   })
 
-  test("throws reauth error when refresh 401 has no newer stored token", async () => {
-    const auth = expired()
+  test("a changed same-generation account cannot be adopted before exchange", async () => {
+    await using f = await fixture(expired())
+    const auth = (await f.store.all()).openai
+    if (auth.type !== "oauth") throw new Error("Invalid fixture")
+    await f.store.commit(await f.store.snapshot("openai"), {
+      ...expired(),
+      accountId: "other-account",
+      expires: Date.now() + 60_000,
+    })
+    let calls = 0
     await expect(
       refreshCodexAuth({
-        persist: async () => {},
-        getAuth: async () => auth,
+        store: f.store,
         auth,
+        account: () => undefined,
+        refresh: async () => {
+          calls++
+          return tokens()
+        },
+      }),
+    ).rejects.toBeInstanceOf(AuthStaleError)
+    expect(calls).toBe(0)
+  })
+
+  test("storage failure advances authority but exposes no new credentials", async () => {
+    await using f = await fixture(expired())
+    const before = await f.store.snapshot("openai")
+    using broken = await fault(f.file, f.file, "rename")
+    const auth = expired()
+    await expect(
+      refreshCodexAuth({ store: broken.store, auth, account: () => undefined, refresh: async () => tokens() }),
+    ).rejects.toBeInstanceOf(AuthStorageError)
+    expect(auth).toEqual(expired())
+    expect(JSON.parse(await fs.readFile(f.file, "utf8")).openai).toEqual(expired())
+    const meta = JSON.parse(await fs.readFile(`${f.dir}/auth.revisions.json`, "utf8"))
+    expect(meta.providers.openai.tokenRevision).toBe(before.tokenRevision + 1)
+    await expect(f.store.snapshot("openai")).rejects.toBeInstanceOf(AuthStorageError)
+    broken[Symbol.dispose]()
+    await f.store.set("openai", expired())
+    await expect(f.store.check(before)).rejects.toBeInstanceOf(AuthStaleError)
+  })
+
+  test("environment-backed renewal fails before exchange", async () => {
+    await using f = await fixture(expired())
+    const saved = process.env.KILO_AUTH_CONTENT
+    let calls = 0
+    try {
+      process.env.KILO_AUTH_CONTENT = JSON.stringify({ openai: expired() })
+      await expect(
+        refreshCodexAuth({
+          store: f.store,
+          auth: expired(),
+          account: () => undefined,
+          refresh: async () => {
+            calls++
+            return tokens()
+          },
+        }),
+      ).rejects.toBeInstanceOf(AuthSourceError)
+      expect(calls).toBe(0)
+      expect(JSON.parse(await fs.readFile(f.file, "utf8")).openai).toEqual(expired())
+    } finally {
+      if (saved === undefined) delete process.env.KILO_AUTH_CONTENT
+      else process.env.KILO_AUTH_CONTENT = saved
+    }
+  })
+
+  test("401 without a newer revision requires sign-in", async () => {
+    await using f = await fixture(expired())
+    await expect(
+      refreshCodexAuth({
+        store: f.store,
+        auth: expired(),
+        account: () => undefined,
         refresh: async () => {
           throw new Error("Token refresh failed: 401")
         },
-        account: () => undefined,
       }),
     ).rejects.toBeInstanceOf(CodexAuthExpiredError)
   })
 
-  test("refreshes a newer stored token instead of the stale caller token", async () => {
-    const auth = expired()
-    const fresh = { ...expired(), refresh: "fresh-refresh", accountId: "account-1" }
-    const calls: string[] = []
-
-    const result = await refreshCodexAuth({
-      persist: async () => {},
-      getAuth: async () => fresh,
-      auth,
-      refresh: async (token) => {
-        calls.push(token)
-        return { id_token: "", access_token: "next-access", refresh_token: "next-refresh", expires_in: 60 }
-      },
-      account: () => undefined,
-    })
-
-    expect(calls).toEqual(["fresh-refresh"])
-    expect(result.accountId).toBe("account-1")
+  test("transient failures and aborts release pending entries and exchange locks", async () => {
+    await using f = await fixture(expired())
+    const input = { store: f.store, auth: expired(), account: () => undefined }
+    await expect(
+      refreshCodexAuth({
+        ...input,
+        refresh: async () => {
+          throw new Error("offline")
+        },
+      }),
+    ).rejects.toThrow("offline")
+    await expect(
+      refreshCodexAuth({
+        ...input,
+        timeout: 1,
+        refresh: async (_, signal) =>
+          new Promise<never>((_, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+          }),
+      }),
+    ).rejects.toMatchObject({ name: "TimeoutError" })
+    expect((await refreshCodexAuth({ ...input, refresh: async () => tokens() })).access).toBe("next-access")
   })
 
-  test("releases the lock and pending entry after a transient failure", async () => {
-    const auth = expired()
-    const calls: string[] = []
-    const failed = await refreshCodexAuth({
-      persist: async () => {},
-      getAuth: async () => auth,
-      auth,
-      refresh: async (token) => {
-        calls.push(token)
-        throw new Error("offline")
-      },
-      account: () => undefined,
-    }).catch((err) => err)
-
-    expect(failed).toEqual(new Error("offline"))
-
-    await refreshCodexAuth({
-      persist: async () => {},
-      getAuth: async () => auth,
-      auth,
-      refresh: async (token) => {
-        calls.push(token)
-        return { id_token: "", access_token: "next-access", refresh_token: "next-refresh", expires_in: 60 }
-      },
-      account: () => undefined,
+  for (const method of ["write", "rename"] as const) {
+    test(`sidecar ${method} failure accepts no result and leaves credentials and authority unchanged`, async () => {
+      await using f = await fixture(expired())
+      const before = await f.store.snapshot("openai")
+      using failure = await fault(f.file, path.join(f.dir, "auth.revisions.json"), method)
+      await expect(
+        refreshCodexAuth({
+          store: failure.store,
+          auth: expired(),
+          account: () => undefined,
+          refresh: async () => tokens(),
+        }),
+      ).rejects.toBeInstanceOf(AuthStorageError)
+      expect(await f.store.snapshot("openai")).toEqual(before)
+      expect((await f.store.all()).openai).toEqual(expired())
+      expect((await fs.readdir(f.dir)).filter((name) => name.endsWith(".tmp"))).toEqual([])
     })
+  }
 
-    expect(calls).toEqual(["old-refresh", "old-refresh"])
-  })
-
-  test("aborts a stalled refresh and releases the lock", async () => {
-    const auth = expired()
-    const calls: string[] = []
-    const failed = await refreshCodexAuth({
-      persist: async () => {},
-      getAuth: async () => auth,
-      auth,
-      refresh: async (token, signal) => {
-        calls.push(token)
-        return new Promise<never>((_, reject) => {
-          signal.addEventListener("abort", () => reject(signal.reason), { once: true })
-        })
-      },
-      account: () => undefined,
-      timeout: 20,
-    }).catch((err) => err)
-
-    expect(failed).toBeInstanceOf(DOMException)
-    expect(failed.name).toBe("TimeoutError")
-
-    await refreshCodexAuth({
-      persist: async () => {},
-      getAuth: async () => auth,
-      auth,
-      refresh: async (token) => {
-        calls.push(token)
-        return { id_token: "", access_token: "next-access", refresh_token: "next-refresh", expires_in: 60 }
-      },
-      account: () => undefined,
-    })
-
-    expect(calls).toEqual(["old-refresh", "old-refresh"])
-  })
-
-  test("serializes refreshes across processes before token reuse", async () => {
-    for (const reuse of ["early", "late"] as const) {
-      for (let trial = 0; trial < 5; trial++) {
-        const result = await race({ reuse, delay: 100 })
-        expect(result.calls).toEqual(["old-refresh"])
-        expect(result.out.map((x) => x.code)).toEqual([0, 0])
-        expect(result.out.map((x) => x.stderr)).toEqual(["", ""])
+  for (const change of ["logout-login", "revision"] as const) {
+    test(`every final waiter rechecks authority after commit and before adoption: ${change}`, async () => {
+      await using f = await fixture(expired())
+      const one = expired()
+      const two = expired()
+      await Promise.all([f.store.snapshot("openai", one), f.store.snapshot("openai", two)])
+      const waiting = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const adopt = f.store.adopt.bind(f.store)
+      let waiters = 0
+      using _barrier = spyOn(f.store, "adopt").mockImplementation(async (snapshot) => {
+        if (++waiters === 2) waiting.resolve()
+        await release.promise
+        return adopt(snapshot)
+      })
+      const input = { store: f.store, account: () => undefined, refresh: async () => tokens() }
+      const results = [refreshCodexAuth({ ...input, auth: one }), refreshCodexAuth({ ...input, auth: two })].map(
+        (result) => result.catch((error) => error),
+      )
+      await waiting.promise
+      const committed = await f.store.snapshot("openai")
+      expect(committed.value?.type === "oauth" && committed.value.access).toBe("next-access")
+      if (change === "logout-login") {
+        await f.store.remove("openai")
+        await f.store.set("openai", expired())
+      } else {
+        await f.store.commit(committed, { ...expired(), access: "newer", expires: Date.now() + 60_000 })
       }
-    }
-  }, 30_000)
+      const expected = await f.store.all()
+      release.resolve()
+      for (const result of results) expect(await result).toBeInstanceOf(AuthStaleError)
+      expect(await f.store.all()).toEqual(expected)
+      expect([one, two]).toEqual([expired(), expired()])
+    })
+  }
 
-  test("keeps the process lock alive during a delayed token response", async () => {
-    const lock = {
-      staleMs: 300,
-      timeoutMs: 10_000,
-      baseDelayMs: 20,
-      maxDelayMs: 30,
+  test("an outstanding disk renewal fails closed when the effective source becomes env", async () => {
+    await using f = await fixture(expired())
+    const before = await f.store.snapshot("openai")
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const result = refreshCodexAuth({
+      store: f.store,
+      auth: expired(),
+      account: () => undefined,
+      refresh: async () => {
+        entered.resolve()
+        await release.promise
+        return tokens()
+      },
+    }).catch((error) => error)
+    await entered.promise
+    const saved = process.env.KILO_AUTH_CONTENT
+    try {
+      process.env.KILO_AUTH_CONTENT = JSON.stringify({ openai: { ...expired(), access: "env" } })
+      release.resolve()
+      expect(await result).toBeInstanceOf(AuthSourceError)
+    } finally {
+      if (saved === undefined) delete process.env.KILO_AUTH_CONTENT
+      else process.env.KILO_AUTH_CONTENT = saved
     }
-    const result = await race({ reuse: "early", delay: 1_000, lock })
-
-    expect(result.calls).toEqual(["old-refresh"])
-    expect(result.out.map((x) => x.code)).toEqual([0, 0])
-    expect(result.out.map((x) => x.stderr)).toEqual(["", ""])
-  }, 15_000)
+    expect(await f.store.snapshot("openai")).toEqual(before)
+  })
 })

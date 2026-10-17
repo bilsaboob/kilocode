@@ -202,6 +202,7 @@ const OpenAIResponsesErrorPayload = Schema.Struct({
   code: optionalNull(Schema.String),
   message: optionalNull(Schema.String),
   param: optionalNull(Schema.String),
+  type: optionalNull(Schema.String), // kilocode_change
 })
 
 const OpenAIResponsesEvent = Schema.Struct({
@@ -215,7 +216,7 @@ const OpenAIResponsesEvent = Schema.Struct({
       Schema.Struct({
         id: Schema.optional(Schema.String),
         service_tier: optionalNull(Schema.String),
-        incomplete_details: optionalNull(Schema.Struct({ reason: Schema.String })),
+        incomplete_details: optionalNull(Schema.Struct({ reason: optionalNull(Schema.String) })), // kilocode_change
         usage: optionalNull(OpenAIResponsesUsage),
         error: optionalNull(OpenAIResponsesErrorPayload),
       }),
@@ -234,6 +235,8 @@ interface ParserState {
   readonly lifecycle: Lifecycle.State
   readonly reasoningItems: Readonly<Record<string, ReasoningStreamItem>>
   readonly store: boolean | undefined
+  readonly responseID?: string // kilocode_change
+  readonly terminal: boolean // kilocode_change
 }
 
 type ReasoningSummaryStatus = "active" | "can-conclude" | "concluded"
@@ -449,6 +452,16 @@ const fromRequest = Effect.fn("OpenAIResponses.fromRequest")(function* (request:
 // non-cached breakdown.
 const mapUsage = (usage: OpenAIResponsesUsage | null | undefined) => {
   if (!usage) return undefined
+  // kilocode_change start - absent usage is not a reported zero
+  if (
+    usage.input_tokens === undefined &&
+    usage.output_tokens === undefined &&
+    usage.total_tokens === undefined &&
+    usage.input_tokens_details?.cached_tokens === undefined &&
+    usage.output_tokens_details?.reasoning_tokens === undefined
+  )
+    return undefined
+  // kilocode_change end
   const cached = usage.input_tokens_details?.cached_tokens
   const reasoning = usage.output_tokens_details?.reasoning_tokens
   const nonCached = ProviderShared.subtractTokens(usage.input_tokens, cached)
@@ -464,6 +477,10 @@ const mapUsage = (usage: OpenAIResponsesUsage | null | undefined) => {
 }
 
 const mapFinishReason = (event: OpenAIResponsesEvent, hasFunctionCall: boolean): FinishReason => {
+  // kilocode_change start - incomplete tool calls are not successful
+  if (event.type === "response.incomplete")
+    return event.response?.incomplete_details?.reason === "max_output_tokens" ? "length" : "error"
+  // kilocode_change end
   const reason = event.response?.incomplete_details?.reason
   if (reason === undefined || reason === null) return hasFunctionCall ? "tool-calls" : "stop"
   if (reason === "max_output_tokens") return "length"
@@ -549,11 +566,46 @@ type StepResult = readonly [ParserState, ReadonlyArray<LLMEvent>]
 
 const NO_EVENTS: StepResult["1"] = []
 
-// `response.completed` / `response.incomplete` are clean finishes that emit a
-// `finish` event; `response.failed` is a hard failure that emits a
-// `provider-error`. All three end the stream — kept in one set so `step` and
-// the protocol's `terminal` predicate stay in sync.
+// kilocode_change - only completed responses succeed; incomplete/failed retain usage and fail closed.
 const TERMINAL_TYPES = new Set(["response.completed", "response.incomplete", "response.failed"])
+
+// kilocode_change start - bounded receipt metadata, never the raw response payload
+const bounded = (value: string | null | undefined, max = 256) => value?.replace(/[\u0000-\u001f]/g, " ").slice(0, max)
+const receipt = (state: ParserState, event: OpenAIResponsesEvent, status: string): ProviderMetadata => ({
+  openai: {
+    responseId: bounded(event.response?.id ?? state.responseID),
+    serviceTier: bounded(event.response?.service_tier),
+  },
+  kiloResponse: {
+    source: ADAPTER,
+    status,
+    responseID: bounded(event.response?.id ?? state.responseID),
+    reason: bounded(event.response?.incomplete_details?.reason),
+    usage: event.response?.usage
+      ? {
+          inputTokens: event.response.usage.input_tokens,
+          outputTokens: event.response.usage.output_tokens,
+          totalTokens: event.response.usage.total_tokens,
+          cacheReadInputTokens: event.response.usage.input_tokens_details?.cached_tokens,
+          reasoningTokens: event.response.usage.output_tokens_details?.reasoning_tokens,
+        }
+      : undefined,
+    error: event.response?.error
+      ? {
+          code: bounded(event.response.error.code),
+          message: bounded(event.response.error.message, 1024),
+          param: bounded(event.response.error.param),
+          type: bounded(event.response.error.type),
+        }
+      : undefined,
+  },
+})
+
+const onCreated = (state: ParserState, event: OpenAIResponsesEvent): StepResult => [
+  { ...state, responseID: bounded(event.response?.id) ?? state.responseID },
+  [LLMEvent.textDelta({ id: "response-receipt", text: "", providerMetadata: receipt(state, event, "created") })],
+]
+// kilocode_change end
 
 const onOutputTextDelta = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
   if (!event.delta) return [state, NO_EVENTS]
@@ -817,18 +869,35 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
 
 const onResponseFinish = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
   const events: LLMEvent[] = []
+  // kilocode_change start
+  const missing = event.type === "response.completed" && !event.response
+  const status = missing ? "missing" : event.type === "response.incomplete" ? "incomplete" : "completed"
+  const metadata = receipt(state, event, status)
+  events.push(LLMEvent.textDelta({ id: "response-receipt", text: "", providerMetadata: metadata }))
+  // kilocode_change end
   const lifecycle = Lifecycle.finish(state.lifecycle, events, {
-    reason: mapFinishReason(event, state.hasFunctionCall),
+    reason: missing ? "error" : mapFinishReason(event, state.hasFunctionCall), // kilocode_change
     usage: mapUsage(event.response?.usage),
-    providerMetadata:
-      event.response?.id || event.response?.service_tier
-        ? openaiMetadata({
-            responseId: event.response.id,
-            serviceTier: event.response.service_tier,
-          })
-        : undefined,
+    providerMetadata: metadata, // kilocode_change
   })
-  return [{ ...state, lifecycle }, events]
+  // kilocode_change start - expose usage before one failure terminal, never a success finish
+  if (status !== "completed") {
+    return [
+      { ...state, lifecycle, terminal: true },
+      [
+        ...events.filter((event) => event.type !== "finish"),
+        LLMEvent.providerError({
+          message: missing
+            ? "[RESPONSE_TERMINAL_MISSING] Malformed provider terminal response"
+            : `[RESPONSE_INCOMPLETE] ${bounded(event.response?.incomplete_details?.reason) ?? "Provider response did not complete"}`,
+          retryable: false,
+          providerMetadata: metadata,
+        }),
+      ],
+    ]
+  }
+  return [{ ...state, lifecycle, terminal: true }, events]
+  // kilocode_change end
 }
 
 // Build a single human-readable message from whatever the provider supplied.
@@ -844,17 +913,37 @@ const providerErrorMessage = (event: OpenAIResponsesEvent, fallback: string): st
   return message || code || fallback
 }
 
-const onResponseFailed = (state: ParserState, event: OpenAIResponsesEvent): StepResult => [
-  state,
-  [LLMEvent.providerError({ message: providerErrorMessage(event, "OpenAI Responses response failed") })],
-]
+// kilocode_change start - retain failed-response usage before reporting its original diagnostic
+const onResponseFailed = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
+  const events: LLMEvent[] = []
+  const metadata = receipt(state, event, "failed")
+  events.push(LLMEvent.textDelta({ id: "response-receipt", text: "", providerMetadata: metadata }))
+  const lifecycle = Lifecycle.finish(state.lifecycle, events, {
+    reason: "error",
+    usage: mapUsage(event.response?.usage),
+    providerMetadata: metadata,
+  })
+  return [
+    { ...state, lifecycle, terminal: true },
+    [
+      ...events.filter((event) => event.type !== "finish"),
+      LLMEvent.providerError({
+        message: `[RESPONSE_FAILED] ${bounded(providerErrorMessage(event, "OpenAI Responses response failed"), 1280)}`,
+        retryable: false,
+        providerMetadata: metadata,
+      }),
+    ],
+  ]
+}
+// kilocode_change end
 
 const onError = (state: ParserState, event: OpenAIResponsesEvent): StepResult => [
-  state,
+  { ...state, terminal: true }, // kilocode_change
   [LLMEvent.providerError({ message: providerErrorMessage(event, "OpenAI Responses stream error") })],
 ]
 
 const step = (state: ParserState, event: OpenAIResponsesEvent) => {
+  if (event.type === "response.created") return Effect.succeed(onCreated(state, event)) // kilocode_change
   if (event.type === "response.output_text.delta") return Effect.succeed(onOutputTextDelta(state, event))
   if (
     event.type === "response.reasoning_text.delta" ||
@@ -904,9 +993,23 @@ export const protocol = Protocol.make({
       lifecycle: Lifecycle.initial(),
       reasoningItems: {},
       store: OpenAIOptions.store(request),
+      terminal: false, // kilocode_change
+      responseID: undefined as string | undefined, // kilocode_change
     }),
     step,
     terminal: (event) => TERMINAL_TYPES.has(event.type),
+    // kilocode_change start - EOF and response.done-only streams are not successful completions
+    onHalt: (state) =>
+      state.terminal
+        ? []
+        : [
+            LLMEvent.providerError({
+              message: "[RESPONSE_TERMINAL_MISSING] Provider stream ended without a valid terminal response",
+              retryable: false,
+              providerMetadata: receipt(state, { type: "missing" }, "missing"),
+            }),
+          ],
+    // kilocode_change end
   },
 })
 

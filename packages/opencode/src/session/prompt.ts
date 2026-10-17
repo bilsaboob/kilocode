@@ -9,6 +9,7 @@ import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_
 import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
+import { KiloCompactionState } from "@/kilocode/session/compaction-state" // kilocode_change
 import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
@@ -1513,7 +1514,20 @@ export const layer = Layer.effect(
       // kilocode_change start - retry when cancel races before shellImpl writes messages
       for (let attempt = 0; attempt < 10; attempt++) {
         const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user")
-        if (Option.isSome(match)) return match.value
+        if (Option.isSome(match)) {
+          const target = KiloCompactionState.target(match.value)
+          if (!target) return match.value
+          const result = yield* MessageV2.get({ sessionID, messageID: target })
+          if (
+            result.info.role !== "assistant" ||
+            !result.info.summary ||
+            KiloCompactionState.target(result) ||
+            match.value.info.role !== "assistant" ||
+            result.info.parentID !== match.value.info.parentID
+          )
+            throw new Error("Invalid compaction result target")
+          return result
+        }
         const msgs = yield* sessions.messages({ sessionID, limit: 1 })
         if (msgs.length > 0) return msgs[0]
         yield* Effect.sleep("50 millis")
@@ -1653,23 +1667,23 @@ export const layer = Layer.effect(
           continue
         }
 
+        const baseline = KiloCompactionState.latest(msgs) // kilocode_change - terminal spending is not a successful context baseline
         if (
-          lastFinished &&
+          baseline && // kilocode_change
           !lastUser.contextPolicy && // kilocode_change - estimate complete request before deciding soft compaction
-          lastFinished.summary !== true &&
-          (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+          (yield* compaction.isOverflow({ tokens: baseline.tokens, model })) // kilocode_change
         ) {
           // kilocode_change start
           const guard = KiloSessionPrompt.guardCompactionAttempt({
             sessionID,
             attempts: compactionAttempts,
             closeReasons,
-            message: lastFinished,
+            message: baseline,
           })
           if (guard.exhausted) {
             // lastFinished is a prior turn's assistant — record exhaustion on the
             // message whose size tipped us past the compaction cap.
-            yield* sessions.updateMessage(lastFinished)
+            yield* sessions.updateMessage(baseline)
             yield* bus.publish(Session.Event.Error, { sessionID, error: guard.error })
             break
           }

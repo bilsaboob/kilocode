@@ -1,14 +1,34 @@
-import type { ModelMessage } from "ai"
+import { APICallError, type ModelMessage } from "ai"
+import { Effect } from "effect"
 import * as Stream from "effect/Stream"
 import type { LLMEvent } from "@opencode-ai/llm"
 import type { Logger } from "@opencode-ai/core/util/log"
 import type { Provider } from "@/provider/provider"
+import type { MessageV2 } from "@/session/message-v2"
 import { KiloSessionOverflow } from "./overflow"
 
 const SAFETY = 2048
 const MIN_OUTPUT = 1024
 
 export namespace KiloLLM {
+  export function validateStructuredOutput(
+    input: { user: Pick<MessageV2.User, "format">; toolChoice?: "auto" | "required" | "none" },
+    tools: Record<string, unknown>,
+  ) {
+    if (input.user.format?.type !== "json_schema" || input.toolChoice !== "required" || tools.StructuredOutput)
+      return Effect.void
+    // Use the existing nonretryable API error channel without claiming a provider request or response.
+    return Effect.fail(
+      new APICallError({
+        message:
+          "[STRUCTURED_OUTPUT_UNAVAILABLE] json_schema requires the StructuredOutput finalization tool, but it is unavailable after permission and user.tools filtering. Ensure the tool is registered, explicitly permitted, and not disabled by user.tools before retrying. No model request was sent.",
+        url: "",
+        requestBodyValues: {},
+        isRetryable: false,
+      }),
+    )
+  }
+
   // Stream failures and interruptions propagate while text deltas are collected.
   export function text(stream: Stream.Stream<LLMEvent, unknown>) {
     return stream.pipe(

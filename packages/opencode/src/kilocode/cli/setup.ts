@@ -7,6 +7,10 @@ import { migrateLegacyKiloAuth, ENV_FEATURE, ENV_VERSION } from "@kilocode/kilo-
 import { AppRuntime } from "@/effect/app-runtime"
 import { Config } from "@/config/config"
 import { Auth } from "@/auth"
+import { Effect } from "effect"
+import { AuthStore } from "@/kilocode/auth/store"
+import { AuthIO } from "@/kilocode/auth/io"
+import { legacy } from "@/kilocode/auth/mutations"
 import { InstanceRuntime } from "@/project/instance-runtime"
 import { SessionExport } from "@/kilocode/session-export"
 import { createHelpCommand } from "@/kilocode/help-command"
@@ -57,10 +61,8 @@ export namespace KiloCli {
     })
 
     // Migrate legacy Kilo CLI auth (~/.kilocode/cli/config.json) into auth.json if present.
-    await migrateLegacyKiloAuth(
-      async () => (await AppRuntime.runPromise(Auth.Service.use((s) => s.get("kilo")))) !== undefined,
-      async (auth) => AppRuntime.runPromise(Auth.Service.use((s) => s.set("kilo", auth))),
-    )
+    const migration = legacy(await AppRuntime.runPromise(AuthStore.make().pipe(Effect.provide(AuthIO.layer))))
+    await migrateLegacyKiloAuth(migration.exists, migration.persist)
 
     const auth = await AppRuntime.runPromise(Auth.Service.use((s) => s.get("kilo")))
     if (auth) {

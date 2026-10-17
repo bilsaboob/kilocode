@@ -5,6 +5,10 @@ import path from "path"
 import fs from "fs/promises"
 import { afterAll } from "bun:test"
 import { remove as cleanup } from "./kilocode/cleanup" // kilocode_change
+// kilocode_change start - isolate inherited auth overrides before any source imports
+const authContent = process.env.KILO_AUTH_CONTENT
+delete process.env.KILO_AUTH_CONTENT
+// kilocode_change end
 
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
@@ -15,6 +19,10 @@ afterAll(async () => {
   await SessionExport.shutdown() // kilocode_change
   Database.close()
   await cleanup(dir) // kilocode_change
+  // kilocode_change start - restore only after isolated source cleanup finishes
+  if (authContent === undefined) delete process.env.KILO_AUTH_CONTENT
+  else process.env.KILO_AUTH_CONTENT = authContent
+  // kilocode_change end
 })
 
 process.env["XDG_DATA_HOME"] = path.join(dir, "share")

@@ -3,6 +3,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { OAUTH_DUMMY_KEY } from "../auth"
 import { createServer } from "http"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { refreshOAuth } from "@/kilocode/auth/refresh" // kilocode_change
+import { AuthStaleError, type AuthStore } from "@/kilocode/auth/store" // kilocode_change
 
 const log = Log.create({ service: "plugin.xai" })
 
@@ -45,6 +47,7 @@ const REDIRECT_URI = `http://${OAUTH_HOST}:${OAUTH_PORT}${OAUTH_REDIRECT_PATH}`
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 120_000
 
 interface XaiAuthPluginOptions {
+  store?: ReturnType<typeof AuthStore.create> // kilocode_change - real isolated stores for tests
   authorizeUrl?: string
   tokenUrl?: string
   deviceAuthorizationUrl?: string
@@ -568,12 +571,6 @@ function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResp
   })
 }
 
-interface RefreshResult {
-  access: string
-  refresh: string
-  expires: number
-}
-
 export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOptions = {}): Promise<Hooks> {
   return {
     auth: {
@@ -581,10 +578,6 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
       async loader(getAuth) {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
-
-        // Single-flight refresh: collapse concurrent fetches from this loaded
-        // provider onto one HTTP call so we don't replay a rotating refresh_token.
-        let refreshPromise: Promise<RefreshResult> | undefined
 
         return {
           // Dummy bearer keeps the AI SDK from bailing on "missing apiKey"; the
@@ -595,6 +588,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
             let currentAuth = await getAuth()
+            if (!currentAuth) throw new AuthStaleError() // kilocode_change
             // Auth can flip from oauth to api mid-session (user re-runs
             // /connect with a pasted key). When that happens, pass the
             // request through untouched so the AI SDK's own apiKey-based
@@ -611,37 +605,28 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
               currentAuth.expires - Date.now() <= ACCESS_TOKEN_REFRESH_SKEW_MS ||
               accessTokenIsExpiring(currentAuth.access)
             if (expiresSoon) {
-              if (!refreshPromise) {
-                const refreshToken = currentAuth.refresh
-                log.info("refreshing xai access token")
-                refreshPromise = refreshAccessToken(refreshToken, options)
-                  .then(async (tokens) => {
-                    const refreshedExpires = Date.now() + (tokens.expires_in ?? 3600) * 1000
-                    const refreshedRefresh = tokens.refresh_token || refreshToken
-                    // Persist the rotated pair as best-effort. xAI has already consumed the
-                    // old refresh_token by the time we get here; an auth.set failure leaves
-                    // the on-disk state stale but the in-memory result is still valid for
-                    // this turn. The next live refresh against the stale disk state will
-                    // 4xx and force re-login — a known cross-process limitation.
-                    await input.client.auth
-                      .set({
-                        path: { id: "xai" },
-                        body: {
-                          type: "oauth",
-                          access: tokens.access_token,
-                          refresh: refreshedRefresh,
-                          expires: refreshedExpires,
-                        },
-                      })
-                      .catch((err) => log.warn("failed to persist refreshed xai tokens", { error: err }))
-                    return { access: tokens.access_token, refresh: refreshedRefresh, expires: refreshedExpires }
-                  })
-                  .finally(() => {
-                    refreshPromise = undefined
-                  })
-              }
-              const refreshed = await refreshPromise
-              currentAuth = { ...currentAuth, ...refreshed }
+              // kilocode_change start - never publish tokens unless the original login still owns the write
+              currentAuth = await refreshOAuth({
+                provider: "xai",
+                auth: currentAuth,
+                store: options.store,
+                expired: (auth) =>
+                  !auth.expires ||
+                  auth.expires - Date.now() <= ACCESS_TOKEN_REFRESH_SKEW_MS ||
+                  accessTokenIsExpiring(auth.access),
+                refresh: async (auth) => {
+                  const tokens = await refreshAccessToken(auth.refresh, options)
+                  return {
+                    type: "oauth",
+                    access: tokens.access_token,
+                    refresh: tokens.refresh_token || auth.refresh,
+                    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+                    ...(auth.accountId && { accountId: auth.accountId }),
+                    ...(auth.enterpriseUrl && { enterpriseUrl: auth.enterpriseUrl }),
+                  }
+                },
+              })
+              // kilocode_change end
             }
 
             // Copy the caller's headers into a fresh Headers (case-insensitive)

@@ -29,6 +29,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import * as Log from "@opencode-ai/core/util/log"
 import { Auth } from "@/auth"
+import * as mutation from "@/kilocode/auth/mutations"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
 import { Identifier } from "@/id/id"
@@ -322,15 +323,10 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
       const info = yield* auth.get("kilo").pipe(Effect.mapError(() => new HttpApiError.Unauthorized({})))
       if (!info || info.type !== "oauth") return yield* Effect.fail(new HttpApiError.Unauthorized({}))
 
-      yield* auth
-        .set("kilo", {
-          type: "oauth",
-          refresh: info.refresh,
-          access: info.access,
-          expires: info.expires,
-          ...(ctx.payload.organizationId && { accountId: ctx.payload.organizationId }),
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.Unauthorized({})))
+      yield* Effect.tryPromise({
+        try: () => mutation.organization(info, ctx.payload.organizationId),
+        catch: () => new HttpApiError.Unauthorized({}),
+      })
 
       yield* cache.clear("kilo")
       clearModesCache()

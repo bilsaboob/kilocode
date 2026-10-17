@@ -24,6 +24,7 @@ import { Auth } from "@/auth"
 import { InstanceState } from "@/effect/instance-state"
 import { KiloSession } from "@/kilocode/session"
 import { KiloLLM } from "@/kilocode/session/llm"
+import { KiloResponse } from "@/kilocode/session/response"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { SessionExport } from "@/kilocode/session-export"
@@ -55,6 +56,7 @@ export type StreamInput = {
   preflight?: boolean // kilocode_change - enable proactive threshold compaction for normal session turns
   context?: KiloContextPolicy.State // kilocode_change
   sessionTitle?: string // kilocode_change
+  responses?: KiloResponse.Collector // kilocode_change - early accounting survives SDK buffering and cancellation
 }
 
 export type StreamRequest = StreamInput & {
@@ -124,6 +126,7 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+      yield* KiloLLM.validateStructuredOutput(input, base.tools) // kilocode_change
 
       // kilocode_change start - compact at the configured threshold before contacting the provider
       const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
@@ -441,6 +444,7 @@ const live: Layer.Layer<
         model: wrapLanguageModel({
           model: language,
           middleware: [
+            KiloResponse.middleware(input.responses!), // kilocode_change - observe before SDK tool/abort filtering
             {
               specificationVersion: "v3" as const,
               async transformParams(args) {
@@ -491,9 +495,15 @@ const live: Layer.Layer<
               (ctrl) => Effect.sync(() => ctrl.abort()),
             )
 
-            const result = yield* run({ ...input, abort: ctrl.signal })
+            // kilocode_change start - keep observed receipts available to the processor's cancellation finalizer
+            const responses = input.responses ?? KiloResponse.collector()
+            const result = yield* run({ ...input, responses, abort: ctrl.signal })
+            // kilocode_change end
 
-            if (result.type === "native") return result.stream
+            // kilocode_change start - native receipt observations precede processor finalization too
+            if (result.type === "native")
+              return result.stream.pipe(Stream.tap((event) => Effect.sync(() => responses.native(event))))
+            // kilocode_change end
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
@@ -503,6 +513,16 @@ const live: Layer.Layer<
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),
+              // kilocode_change start - missing terminal is never a successful generation
+              Stream.concat(
+                Stream.unwrap(
+                  Effect.sync(() => {
+                    const error = responses.end()
+                    return error ? Stream.fail(error) : Stream.empty
+                  }),
+                ),
+              ),
+              // kilocode_change end
             )
           }),
         ),

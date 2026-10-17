@@ -3,6 +3,7 @@ import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
 import { isKiloError } from "@/kilocode/kilo-errors" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
+import { KiloResponse } from "@/kilocode/session/response" // kilocode_change
 import { SessionNetwork } from "./network" // kilocode_change
 import { iife } from "@/util/iife"
 import { isRecord } from "@/util/record"
@@ -67,6 +68,7 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
 
 // kilocode_change - Kilo does not emit OpenCode Go actions
 export function retryable(error: Err, _provider?: string): Retryable | undefined {
+  if (KiloResponse.blocked(error)) return undefined // kilocode_change - terminal receipts never authorize paid replay
   if (KiloContextPolicy.Blocked.isInstance(error)) return undefined // kilocode_change
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
