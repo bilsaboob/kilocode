@@ -1,5 +1,6 @@
 import { InstanceState } from "@/effect/instance-state"
 import { Identifier } from "@/id/id"
+import { KiloRuntime } from "@/kilocode/runtime/control" // kilocode_change
 import { Cause, Clock, Context, Deferred, Effect, Fiber, Layer, Scope, SynchronizedRef } from "effect"
 
 export type Status = "running" | "completed" | "error" | "cancelled"
@@ -147,6 +148,7 @@ export const layer = Layer.effect(
                     }),
                 }),
                 Effect.asVoid,
+                KiloRuntime.work, // kilocode_change - hold actual detached work through finalization
                 Effect.forkIn(s.scope, { startImmediately: true }),
               )
               const job = {
@@ -166,7 +168,7 @@ export const layer = Layer.effect(
           )
         }),
       )
-    })
+    }, KiloRuntime.work) // kilocode_change - reserve before asynchronous admission and fork
 
     const wait: Interface["wait"] = Effect.fn("BackgroundJob.wait")(function* (input) {
       const job = (yield* SynchronizedRef.get((yield* InstanceState.get(state)).jobs)).get(input.id)

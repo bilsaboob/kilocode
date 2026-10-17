@@ -4,6 +4,8 @@ import type { MessageID, SessionID } from "@/session/schema"
 import { KiloStructuredCompaction } from "./structured-compaction"
 import { KiloResponse } from "./response"
 import { KiloContextPolicy } from "./context-policy"
+import { KiloRuntime } from "@/kilocode/runtime/control"
+import { Effect, type Fiber } from "effect"
 
 export namespace KiloSessionRecovery {
   export const COOLDOWN = 10 * 60 * 1000
@@ -39,7 +41,9 @@ export namespace KiloSessionRecovery {
     count: number
     topic: string
     token: number
+    source: MessageID
     paused: boolean
+    release?: () => void
   }
 
   type Part = {
@@ -48,6 +52,58 @@ export namespace KiloSessionRecovery {
     synthetic?: boolean
     ignored?: boolean
     metadata?: Record<string, unknown>
+  }
+
+  const keys = new Set([
+    "session_resume",
+    "resume_kind",
+    "auto_resume",
+    "recovery_token",
+    "anchor_user_message_id",
+    "interrupted_assistant_message_id",
+  ])
+
+  export function marked(part: Part) {
+    return !!part.metadata && Object.keys(part.metadata).some((key) => keys.has(key))
+  }
+
+  export function input(parts: readonly Part[]) {
+    const kinds = new Set<Kind>()
+    const tokens = new Set<number>()
+    const manual = intent(
+      parts
+        .filter((part) => part.type === "text" && !part.synthetic)
+        .map((part) => part.text ?? "")
+        .join(" "),
+    )
+    for (const part of parts) {
+      if (!marked(part)) continue
+      if (part.type !== "text") return false
+      const data = part.metadata!
+      if (Object.hasOwn(data, "session_resume") && data.session_resume !== true) return false
+      if (Object.hasOwn(data, "auto_resume") && data.auto_resume !== true) return false
+      if (Object.hasOwn(data, "resume_kind") && data.resume_kind !== "manual" && data.resume_kind !== "automatic")
+        return false
+      for (const key of ["anchor_user_message_id", "interrupted_assistant_message_id"]) {
+        if (Object.hasOwn(data, key) && (typeof data[key] !== "string" || !data[key].startsWith("msg"))) return false
+      }
+      if (
+        Object.hasOwn(data, "recovery_token") &&
+        (typeof data.recovery_token !== "number" ||
+          !Number.isSafeInteger(data.recovery_token) ||
+          data.recovery_token <= 0)
+      )
+        return false
+      if (data.auto_resume === true || data.resume_kind === "automatic") {
+        if (data.resume_kind === "manual" || (data.auto_resume !== true && data.session_resume !== true)) return false
+        kinds.add("automatic")
+        if (typeof data.recovery_token === "number") tokens.add(data.recovery_token)
+        continue
+      }
+      if (data.session_resume !== true && !manual) return false
+      kinds.add("manual")
+    }
+    return kinds.size <= 1 && (kinds.has("automatic") ? tokens.size === 1 : tokens.size === 0)
   }
 
   const leads = new Set(["please"])
@@ -83,12 +139,26 @@ export namespace KiloSessionRecovery {
     | { action: "pause"; count: number; topic: string }
 
   function marker(parts: readonly Part[]) {
-    const part = parts.find((item) => item.type === "text" && item.metadata?.auto_resume === true)
+    if (!input(parts)) return undefined
+    const part = parts.find(
+      (item) =>
+        item.type === "text" &&
+        typeof item.metadata?.recovery_token === "number" &&
+        (item.metadata.auto_resume === true ||
+          (item.metadata.session_resume === true && item.metadata.resume_kind === "automatic")),
+    )
     const token = part?.metadata?.recovery_token
     return typeof token === "number" ? token : undefined
   }
 
   export function detect(parts: readonly Part[]): Kind | undefined {
+    if (
+      parts.some(
+        (part) =>
+          part.type === "text" && (part.metadata?.auto_resume === true || part.metadata?.resume_kind === "automatic"),
+      )
+    )
+      return "automatic"
     const tagged = parts.find((part) => part.type === "text" && part.metadata?.session_resume === true)
     if (tagged) return tagged.metadata?.resume_kind === "automatic" ? "automatic" : "manual"
     if (marker(parts) !== undefined) return "automatic"
@@ -127,11 +197,13 @@ export namespace KiloSessionRecovery {
     sessionID: SessionID
     resumeMessageID: MessageID
     messages: MessageV2.WithParts[]
+    source?: MessageID
     activity?: Activity[]
     shared?: Map<string, SessionID[]>
   }): Anchor {
     const index = input.messages.findLastIndex((message) => {
       if (message.info.role !== "user") return false
+      if (input.source) return message.info.id === input.source
       if (detect(message.parts)) return false
       return message.parts.some(
         (part) => part.type === "text" && !part.synthetic && !part.ignored && Boolean(part.text.trim()),
@@ -195,15 +267,16 @@ export namespace KiloSessionRecovery {
   }
 
   export function parts(parts: readonly Part[], kind: Kind, anchor: Anchor, token?: number) {
+    const current = kind === "automatic" ? (token ?? marker(parts)) : undefined
     return parts.map((part) => {
       if (part.type !== "text") return part
       return {
         ...part,
         metadata: {
-          ...part.metadata,
+          ...Object.fromEntries(Object.entries(part.metadata ?? {}).filter(([key]) => !keys.has(key))),
           session_resume: true,
           resume_kind: kind,
-          ...(token !== undefined ? { recovery_token: token, auto_resume: true } : {}),
+          ...(current !== undefined ? { recovery_token: current, auto_resume: true } : {}),
           ...(anchor.userMessageID ? { anchor_user_message_id: anchor.userMessageID } : {}),
           ...(anchor.assistantMessageID ? { interrupted_assistant_message_id: anchor.assistantMessageID } : {}),
         },
@@ -220,6 +293,7 @@ export namespace KiloSessionRecovery {
   }
 
   export function begin(sessionID: SessionID, parts: readonly Part[]) {
+    if (!input(parts)) return "stale" as const
     const token = marker(parts)
     if (token === undefined) {
       reset(sessionID)
@@ -273,13 +347,19 @@ export namespace KiloSessionRecovery {
     const count = (current?.count ?? 0) + 1
     const topic = current?.topic ?? summarize(input.messages)
     if (count > 3) {
-      states.set(input.sessionID, { count, topic, token: current?.token ?? ++seq, paused: true })
+      states.set(input.sessionID, {
+        count,
+        topic,
+        token: current?.token ?? ++seq,
+        source: input.message.parentID,
+        paused: true,
+      })
       return { action: "pause", count, topic }
     }
 
     const token = ++seq
     const delay = count === 3 ? COOLDOWN : 0
-    states.set(input.sessionID, { count, topic, token, paused: false })
+    states.set(input.sessionID, { count, topic, token, source: input.message.parentID, paused: false })
     return { action: "resume", count, delay, token, topic }
   }
 
@@ -288,7 +368,45 @@ export namespace KiloSessionRecovery {
     return Boolean(current && !current.paused && current.token === token)
   }
 
+  export function origin(sessionID: SessionID, parts: readonly Part[]) {
+    const token = marker(parts)
+    const state = states.get(sessionID)
+    return token !== undefined && state && !state.paused && state.token === token ? state.source : undefined
+  }
+
+  export function accept(sessionID: SessionID, parts: readonly Part[]) {
+    return input(parts) && (detect(parts) !== "automatic" || origin(sessionID, parts) !== undefined)
+  }
+
+  export function pending(sessionID: SessionID) {
+    return Boolean(states.get(sessionID)?.release)
+  }
+
+  export function fork<A, E, R>(
+    sessionID: SessionID,
+    token: number,
+    work: Effect.Effect<A, E, R>,
+    start: (work: Effect.Effect<A, E, R>) => Fiber.Fiber<A, E>,
+  ) {
+    const state = states.get(sessionID)
+    if (!state || state.paused || state.token !== token) return
+    const held = KiloRuntime.enter()
+    const release = () => {
+      held()
+      if (state.release === release) state.release = undefined
+    }
+    state.release?.()
+    state.release = release
+    try {
+      return start(work.pipe(Effect.ensuring(Effect.sync(release))))
+    } catch (error) {
+      release()
+      throw error
+    }
+  }
+
   export function valid(sessionID: SessionID, parts: readonly Part[]) {
+    if (!input(parts)) return false
     const token = marker(parts)
     return token === undefined || claim(sessionID, token)
   }
@@ -316,6 +434,7 @@ export namespace KiloSessionRecovery {
   }
 
   export function reset(sessionID: SessionID) {
+    states.get(sessionID)?.release?.()
     states.delete(sessionID)
   }
 

@@ -220,13 +220,10 @@ export function registerKiloCommands(useSDK: () => UseSDK) {
                 onSelect={async (orgId) => {
                   try {
                     // Switch to team immediately using server endpoint
-                    await sdk.client.kilo.organization.set({
-                      organizationId: orgId,
-                    })
+                    await sdk.client.kilo.organization.set({ organizationId: orgId }, { throwOnError: true })
 
                     // Refresh provider state to reload models with new organization context
-                    await sdk.client.instance.dispose()
-                    await sync.bootstrap()
+                    await sync.bootstrap({ fatal: false })
 
                     // Show success toast
                     const teamName = orgId

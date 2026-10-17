@@ -6,6 +6,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CopilotModels } from "./models"
 import { MessageV2 } from "@/session/message-v2"
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 
 const log = Log.create({ service: "plugin.copilot" })
 
@@ -89,9 +91,12 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
 
         return {
           apiKey: "",
-          async fetch(request: RequestInfo | URL, init?: RequestInit) {
-            const info = await getAuth()
-            if (info.type !== "oauth") return fetch(request, init)
+          // kilocode_change start - a cached loader must not select a newer login
+          fetch: AuthRequest.delegate(async (request: RequestInfo | URL, init?: RequestInit) => {
+            const info = await AuthRequest.credential(init, getAuth)
+            if (!info) throw new AuthOutcome.Failure("authority-changed")
+            if (info.type !== "oauth") return AuthRequest.fetch(fetch, request, init)
+            // kilocode_change end
 
             const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
             const { isVision, isAgent } = iife(() => {
@@ -149,7 +154,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
 
             const headers: Record<string, string> = {
               "x-initiator": isAgent ? "agent" : "user",
-              ...(init?.headers as Record<string, string>),
+              ...Object.fromEntries(new Headers(init?.headers)), // kilocode_change
               "User-Agent": `opencode/${InstallationVersion}`,
               Authorization: `Bearer ${info.refresh}`,
               "Openai-Intent": "conversation-edits",
@@ -162,11 +167,13 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
             delete headers["x-api-key"]
             delete headers["authorization"]
 
-            return fetch(request, {
+            // kilocode_change start - recheck at the actual transport boundary.
+            return AuthRequest.fetch(fetch, request, {
               ...init,
               headers,
             })
-          },
+            // kilocode_change end
+          }), // kilocode_change
         }
       },
       methods: [

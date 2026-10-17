@@ -53,6 +53,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
+import { KiloAuth } from "../../src/kilocode/auth/authority"
+import { KiloCompactionBudget } from "../../src/kilocode/session/compaction-budget"
 
 Log.init({ print: false })
 
@@ -261,6 +263,7 @@ const user = Effect.fn("prompt-safety.user")(function* (
     sessionID,
     agent: "code",
     model: ref,
+    authAuthority: yield* KiloAuth.capture(ref),
     time: { created: Date.now() },
     tools: {},
     editorContext: input?.editorContext,
@@ -273,6 +276,7 @@ const user = Effect.fn("prompt-safety.user")(function* (
     text,
     synthetic: input?.synthetic,
   } satisfies MessageV2.TextPart)
+  yield* KiloCompactionBudget.admit({ sessionID, messageID: msg.id })
   return msg
 })
 
@@ -344,238 +348,256 @@ const file = Effect.fn("prompt-safety.file")(function* (
 })
 
 describe("SessionPrompt compaction safety", () => {
-  it.live("compacts estimated outgoing context before the provider request", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({
-          title: "Preflight compaction",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
+  it.live(
+    "compacts estimated outgoing context before the provider request",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({
+            title: "Preflight compaction",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
 
-        const old = yield* user(chat.id, "x".repeat(240_000))
-        yield* assistant(chat.id, old.id, { text: "old answer" })
-        const current = yield* user(chat.id, "continue")
-        yield* file(chat.id, current.id, { mime: "image/png", name: "current.png", body: "CURRENTIMAGE" })
-        yield* llm.text("compacted history")
-        yield* llm.text("final answer")
+          const old = yield* user(chat.id, "x".repeat(240_000))
+          yield* assistant(chat.id, old.id, { text: "old answer" })
+          const current = yield* user(chat.id, "continue")
+          yield* file(chat.id, current.id, { mime: "image/png", name: "current.png", body: "CURRENTIMAGE" })
+          yield* llm.text("compacted history")
+          yield* llm.text("final answer")
 
-        const result = yield* prompt.loop({ sessionID: chat.id })
+          const result = yield* prompt.loop({ sessionID: chat.id })
 
-        expect(yield* llm.calls).toBe(2)
-        expect(result.parts.some((part) => part.type === "text" && part.text === "final answer")).toBe(true)
-        const inputs = yield* llm.inputs
-        expect(JSON.stringify(inputs.at(-1)?.messages)).toContain("CURRENTIMAGE")
-        const msgs = yield* sessions.messages({ sessionID: chat.id })
-        expect(msgs.some((msg) => msg.info.role === "assistant" && msg.info.summary === true)).toBe(true)
-        const marker = msgs.flatMap((msg) => msg.parts).find((part) => part.type === "compaction")
-        expect(marker?.type).toBe("compaction")
-        if (marker?.type === "compaction") expect(marker.overflow).toBe(false)
-      }),
-      {
-        git: true,
-        config: (url) => ({
-          ...providerCfg(url),
-          compaction: {
-            auto: true,
-            threshold_percent: 70,
-            tail_turns: 0,
-            preserve_recent_tokens: 0,
-          },
+          expect(yield* llm.calls).toBe(2)
+          expect(result.parts.some((part) => part.type === "text" && part.text === "final answer")).toBe(true)
+          const inputs = yield* llm.inputs
+          expect(JSON.stringify(inputs.at(-1)?.messages)).toContain("CURRENTIMAGE")
+          const msgs = yield* sessions.messages({ sessionID: chat.id })
+          expect(msgs.some((msg) => msg.info.role === "assistant" && msg.info.summary === true)).toBe(true)
+          const marker = msgs.flatMap((msg) => msg.parts).find((part) => part.type === "compaction")
+          expect(marker?.type).toBe("compaction")
+          if (marker?.type === "compaction") expect(marker.overflow).toBe(false)
         }),
-      },
-    ),
+        {
+          git: true,
+          config: (url) => ({
+            ...providerCfg(url),
+            compaction: {
+              auto: true,
+              threshold_percent: 70,
+              tail_turns: 0,
+              preserve_recent_tokens: 0,
+            },
+          }),
+        },
+      ),
+    30_000,
   )
 
-  it.live("trims plain-text summary history before provider request", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({
-          title: "Prompt safety",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
+  it.live(
+    "trims plain-text summary history before provider request",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({
+            title: "Prompt safety",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
 
-        const early = yield* user(chat.id, "old prompt with image")
-        yield* file(chat.id, early.id, { mime: "image/png", name: "old.png", body: "OLDPAYLOAD" })
-        yield* assistant(chat.id, early.id, { text: "old answer" })
-        const status = yield* user(chat.id, "status?")
-        yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
-        yield* user(chat.id, "new prompt")
-        yield* llm.text("final answer")
+          const early = yield* user(chat.id, "old prompt with image")
+          yield* file(chat.id, early.id, { mime: "image/png", name: "old.png", body: "OLDPAYLOAD" })
+          yield* assistant(chat.id, early.id, { text: "old answer" })
+          const status = yield* user(chat.id, "status?")
+          yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
+          yield* user(chat.id, "new prompt")
+          yield* llm.text("final answer")
 
-        yield* prompt.loop({ sessionID: chat.id })
+          yield* prompt.loop({ sessionID: chat.id })
 
-        const inputs = yield* llm.inputs
-        const body = JSON.stringify(inputs.at(-1)?.messages)
-        expect(body).toContain("status?")
-        expect(body).toContain("summary body")
-        expect(body).toContain("new prompt")
-        expect(body).not.toContain("old prompt with image")
-        expect(body).not.toContain("OLDPAYLOAD")
-      }),
-      { git: true, config: providerCfg },
-    ),
+          const inputs = yield* llm.inputs
+          const body = JSON.stringify(inputs.at(-1)?.messages)
+          expect(body).toContain("status?")
+          expect(body).toContain("summary body")
+          expect(body).toContain("new prompt")
+          expect(body).not.toContain("old prompt with image")
+          expect(body).not.toContain("OLDPAYLOAD")
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
   )
 
-  it.live("strips historical media before provider request", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({
-          title: "Prompt media safety",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
+  it.live(
+    "strips historical media before provider request",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({
+            title: "Prompt media safety",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
 
-        const status = yield* user(chat.id, "status?")
-        yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
-        const hist = yield* user(chat.id, "historical media")
-        yield* file(chat.id, hist.id, { mime: "image/png", name: "hist.png", body: "HISTIMAGE" })
-        yield* file(chat.id, hist.id, { mime: "application/pdf", name: "hist.pdf", body: "HISTPDF" })
-        yield* user(chat.id, "current prompt")
-        yield* llm.text("final answer")
+          const status = yield* user(chat.id, "status?")
+          yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
+          const hist = yield* user(chat.id, "historical media")
+          yield* file(chat.id, hist.id, { mime: "image/png", name: "hist.png", body: "HISTIMAGE" })
+          yield* file(chat.id, hist.id, { mime: "application/pdf", name: "hist.pdf", body: "HISTPDF" })
+          yield* user(chat.id, "current prompt")
+          yield* llm.text("final answer")
 
-        yield* prompt.loop({ sessionID: chat.id })
+          yield* prompt.loop({ sessionID: chat.id })
 
-        const inputs = yield* llm.inputs
-        const body = JSON.stringify(inputs.at(-1)?.messages)
-        expect(body).toContain("[Attached image/png: hist.png]")
-        expect(body).toContain("[Attached application/pdf: hist.pdf]")
-        expect(body).toContain("current prompt")
-        expect(body).not.toContain("HISTIMAGE")
-        expect(body).not.toContain("HISTPDF")
-      }),
-      { git: true, config: providerCfg },
-    ),
+          const inputs = yield* llm.inputs
+          const body = JSON.stringify(inputs.at(-1)?.messages)
+          expect(body).toContain("[Attached image/png: hist.png]")
+          expect(body).toContain("[Attached application/pdf: hist.pdf]")
+          expect(body).toContain("current prompt")
+          expect(body).not.toContain("HISTIMAGE")
+          expect(body).not.toContain("HISTPDF")
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
   )
 
-  it.live("preserves current media before synthetic handoff with editor context", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({
-          title: "Prompt handoff safety",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
+  it.live(
+    "preserves current media before synthetic handoff with editor context",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({
+            title: "Prompt handoff safety",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
 
-        const status = yield* user(chat.id, "status?")
-        yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
-        const hist = yield* user(chat.id, "older image")
-        yield* file(chat.id, hist.id, { mime: "image/png", name: "old.png", body: "OLDIMAGE" })
-        const current = yield* user(chat.id, "check this image")
-        yield* file(chat.id, current.id, { mime: "image/png", name: "current.png", body: "CURRENTIMAGE" })
-        yield* assistant(chat.id, current.id, { text: "handoff", summary: false })
-        yield* user(chat.id, "Summarize the task tool output above and continue with your task.", {
-          synthetic: true,
-          editorContext: { activeFile: "src/app.ts" },
-        })
-        yield* llm.text("final answer")
+          const status = yield* user(chat.id, "status?")
+          yield* assistant(chat.id, status.id, { text: "summary body", summary: true })
+          const hist = yield* user(chat.id, "older image")
+          yield* file(chat.id, hist.id, { mime: "image/png", name: "old.png", body: "OLDIMAGE" })
+          const current = yield* user(chat.id, "check this image")
+          yield* file(chat.id, current.id, { mime: "image/png", name: "current.png", body: "CURRENTIMAGE" })
+          yield* assistant(chat.id, current.id, { text: "handoff", summary: false })
+          yield* user(chat.id, "Summarize the task tool output above and continue with your task.", {
+            synthetic: true,
+            editorContext: { activeFile: "src/app.ts" },
+          })
+          yield* llm.text("final answer")
 
-        yield* prompt.loop({ sessionID: chat.id })
+          yield* prompt.loop({ sessionID: chat.id })
 
-        const inputs = yield* llm.inputs
-        const body = JSON.stringify(inputs.at(-1)?.messages)
-        expect(body).toContain("[Attached image/png: old.png]")
-        expect(body).toContain("CURRENTIMAGE")
-        expect(body).toContain("src/app.ts")
-        expect(body).not.toContain("OLDIMAGE")
-        expect(body).not.toContain("[Attached image/png: current.png]")
-      }),
-      { git: true, config: providerCfg },
-    ),
+          const inputs = yield* llm.inputs
+          const body = JSON.stringify(inputs.at(-1)?.messages)
+          expect(body).toContain("[Attached image/png: old.png]")
+          expect(body).toContain("CURRENTIMAGE")
+          expect(body).toContain("src/app.ts")
+          expect(body).not.toContain("OLDIMAGE")
+          expect(body).not.toContain("[Attached image/png: current.png]")
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
   )
 })
 
 describe("SessionPrompt recovery", () => {
-  it.live("recovers from a dangling assistant row before replying", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({ title: "Prompt tail recovery" })
-        const first = yield* user(chat.id, "Before the crash")
-        const stale = yield* dangling(chat.id, first.id)
+  it.live(
+    "recovers from a dangling assistant row before replying",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({ title: "Prompt tail recovery" })
+          const first = yield* user(chat.id, "Before the crash")
+          const stale = yield* dangling(chat.id, first.id)
 
-        yield* llm.text("recovered")
+          yield* llm.text("recovered")
 
-        const result = yield* prompt.prompt({
-          sessionID: chat.id,
-          agent: "build",
-          parts: [{ type: "text", text: "Continue after the dangling assistant" }],
-        })
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            parts: [{ type: "text", text: "Continue after the dangling assistant" }],
+          })
 
-        expect(result.info.role).toBe("assistant")
-        expect(result.info.id).not.toBe(stale.id)
-        expect(result.parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
-        expect(yield* llm.calls).toBe(1)
+          expect(result.info.role).toBe("assistant")
+          expect(result.info.id).not.toBe(stale.id)
+          expect(result.parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+          expect(yield* llm.calls).toBe(1)
 
-        const msgs = yield* sessions.messages({ sessionID: chat.id })
-        const empty = msgs.filter(
-          (msg) => msg.info.role === "assistant" && msg.parts.length === 0 && !msg.info.finish && !msg.info.error,
-        )
-        expect(empty).toHaveLength(0)
-        expect(msgs.some((msg) => msg.info.id === stale.id)).toBe(false)
-      }),
-      { git: true, config: providerCfg },
-    ),
+          const msgs = yield* sessions.messages({ sessionID: chat.id })
+          const empty = msgs.filter(
+            (msg) => msg.info.role === "assistant" && msg.parts.length === 0 && !msg.info.finish && !msg.info.error,
+          )
+          expect(empty).toHaveLength(0)
+          expect(msgs.some((msg) => msg.info.id === stale.id)).toBe(false)
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
   )
 
-  it.live("recovers from persisted provider finish errors before replying", () =>
-    provideTmpdirServer(
-      Effect.fnUntraced(function* ({ llm }) {
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({ title: "Provider finish error recovery" })
-        const first = yield* user(chat.id, "before provider finish error")
-        const stale = yield* sessions.updateMessage({
-          id: MessageID.ascending(),
-          role: "assistant",
-          parentID: first.id,
-          sessionID: chat.id,
-          mode: "code",
-          agent: "code",
-          path: { cwd: "/tmp", root: "/tmp" },
-          cost: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          modelID: ref.modelID,
-          providerID: ref.providerID,
-          time: { created: Date.now() },
-          finish: "error",
-        } satisfies MessageV2.Assistant)
-        yield* sessions.updatePart({
-          id: PartID.ascending(),
-          messageID: stale.id,
-          sessionID: chat.id,
-          type: "step-start",
-        } satisfies MessageV2.StepStartPart)
-        yield* sessions.updatePart({
-          id: PartID.ascending(),
-          messageID: stale.id,
-          sessionID: chat.id,
-          type: "step-finish",
-          reason: "error",
-          cost: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        } satisfies MessageV2.StepFinishPart)
-        yield* llm.text("recovered")
+  it.live(
+    "recovers from persisted provider finish errors before replying",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({ title: "Provider finish error recovery" })
+          const first = yield* user(chat.id, "before provider finish error")
+          const stale = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            role: "assistant",
+            parentID: first.id,
+            sessionID: chat.id,
+            mode: "code",
+            agent: "code",
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ref.modelID,
+            providerID: ref.providerID,
+            time: { created: Date.now() },
+            finish: "error",
+          } satisfies MessageV2.Assistant)
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: stale.id,
+            sessionID: chat.id,
+            type: "step-start",
+          } satisfies MessageV2.StepStartPart)
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: stale.id,
+            sessionID: chat.id,
+            type: "step-finish",
+            reason: "error",
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          } satisfies MessageV2.StepFinishPart)
+          yield* llm.text("recovered")
 
-        const result = yield* prompt.prompt({
-          sessionID: chat.id,
-          agent: "code",
-          parts: [{ type: "text", text: "continue after provider finish error" }],
-        })
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "code",
+            parts: [{ type: "text", text: "continue after provider finish error" }],
+          })
 
-        expect(result.info.role).toBe("assistant")
-        expect(result.info.id).not.toBe(stale.id)
-        expect(result.parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
-        const msgs = yield* sessions.messages({ sessionID: chat.id })
-        expect(msgs.some((msg) => msg.info.id === stale.id)).toBe(false)
-      }),
-      { git: true, config: providerCfg },
-    ),
+          expect(result.info.role).toBe("assistant")
+          expect(result.info.id).not.toBe(stale.id)
+          expect(result.parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+          const msgs = yield* sessions.messages({ sessionID: chat.id })
+          expect(msgs.some((msg) => msg.info.id === stale.id)).toBe(false)
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
   )
 })

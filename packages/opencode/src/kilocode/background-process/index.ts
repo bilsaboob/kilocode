@@ -5,6 +5,7 @@ import { makeRuntime } from "@/effect/run-service"
 import { Identifier } from "@/id/id"
 import { Instance, type InstanceContext } from "@/kilocode/instance"
 import { ChildEnv } from "@/kilocode/process/child-env"
+import { KiloRuntime } from "@/kilocode/runtime/control"
 import { SessionID } from "@/session/schema"
 import { Shell } from "@/shell/shell"
 import { NonNegativeInt, PositiveInt, optionalOmitUndefined, withStatics } from "@opencode-ai/core/schema"
@@ -469,13 +470,15 @@ export namespace BackgroundProcess {
       throw new Error(`Ready port is already in use: ${input.ready.port}`)
     }
     const args = Shell.args(sh, input.command, cwd)
-    const proc = spawn(sh, args, {
-      cwd,
-      env: env(),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-      windowsHide: true,
-    })
+    const proc = KiloRuntime.child(() =>
+      spawn(sh, args, {
+        cwd,
+        env: env(),
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+        windowsHide: true,
+      }),
+    )
     const now = Date.now()
     const active: Active = {
       ctx: state.ctx,
@@ -543,7 +546,7 @@ export namespace BackgroundProcess {
   }
 
   export async function start(input: StartInput) {
-    return launch(await state(), input)
+    return KiloRuntime.track(async () => launch(await state(), input))
   }
 
   export async function list(input?: { sessionID?: SessionID }) {
@@ -576,12 +579,14 @@ export namespace BackgroundProcess {
   }
 
   export async function restart(id: ID) {
-    const current = await state()
-    const active = current.processes.get(id)
-    if (!active) return
-    const input = active.start
-    await terminate(current, active, { remove: true })
-    return launch(current, input, id)
+    return KiloRuntime.track(async () => {
+      const current = await state()
+      const active = current.processes.get(id)
+      if (!active) return
+      const input = active.start
+      await terminate(current, active, { remove: true })
+      return launch(current, input, id)
+    })
   }
 
   export async function stopSession(sessionID: SessionID) {

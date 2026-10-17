@@ -13,6 +13,7 @@ import { isRecord } from "@/util/record"
 import { ConfigError } from "../../config/error"
 import type { Config } from "../../config/config"
 import type { ConfigAgent } from "../../config/agent"
+import type { Auth } from "@/auth"
 import { ModesMigrator } from "../modes-migrator"
 import { fetchOrganizationModes } from "@kilocode/kilo-gateway"
 import { RulesMigrator } from "../rules-migrator"
@@ -302,18 +303,19 @@ export namespace KilocodeConfig {
    * Returns empty agents + warnings if the user is not authenticated.
    */
   export async function loadOrganizationModes(
-    auth: Record<string, any>,
+    auth: Record<string, Auth.Info>,
+    authority?: string,
   ): Promise<{ agents: Record<string, ConfigAgent.Info>; warnings: Config.Warning[] }> {
     const warnings: Config.Warning[] = []
     try {
       const kilo = auth["kilo"]
       if (kilo?.type === "oauth" && kilo.access && kilo.accountId) {
-        const modes = await fetchOrganizationModes(kilo.access, kilo.accountId)
+        const modes = await fetchOrganizationModes(kilo.access, kilo.accountId, authority)
         if (modes.length > 0) {
           const agents = ModesMigrator.convertOrganizationModes(modes)
           log.debug("loaded organization custom modes", {
             count: modes.length,
-            modes: modes.map((m: any) => m.slug),
+            modes: modes.map((m) => m.slug),
           })
           return { agents, warnings }
         }

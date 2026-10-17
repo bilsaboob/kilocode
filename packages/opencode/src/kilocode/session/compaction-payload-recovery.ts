@@ -6,6 +6,8 @@ import { MessageV2 } from "@/session/message-v2"
 import type { SessionProcessor } from "@/session/processor"
 import type { MessageID, SessionID } from "@/session/schema"
 import { KiloResponse } from "./response"
+import { KiloCompactionBudget } from "./compaction-budget"
+import { KiloAuth } from "../auth/authority"
 
 type Update = <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
 type UpdateMessage = <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -16,7 +18,7 @@ export namespace KiloCompactionPayloadRecovery {
   export function matches(error: MessageV2.Assistant["error"]) {
     if (!error) return false
     if (error.name !== "ContextOverflowError" && error.name !== "APIError") return false
-    if (KiloResponse.blocked(error)) return false
+    if (KiloResponse.blocked(error) || KiloCompactionBudget.blocked(error)) return false
     return pattern.test([error.data.message, error.data.responseBody].filter(Boolean).join("\n"))
   }
 
@@ -65,8 +67,10 @@ export namespace KiloCompactionPayloadRecovery {
       messages: LLM.StreamInput["messages"],
       text: string,
     ) {
+      yield* KiloCompactionBudget.check
       return yield* input.processor.process({
         user: input.user,
+        authAuthority: KiloAuth.selected(input.user, input.model),
         agent: input.agent,
         sessionID: input.sessionID,
         tools: {},
@@ -105,6 +109,7 @@ export namespace KiloCompactionPayloadRecovery {
           return yield* run(stripped, prompt(input.prompt))
         })
       }),
+      (work) => KiloCompactionBudget.run({ sessionID: input.sessionID, messageID: input.user.id }, work),
     )
   }
 }

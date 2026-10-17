@@ -11,6 +11,7 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Image } from "../../src/image/image"
 import { KiloCompactionPayloadRecovery } from "../../src/kilocode/session/compaction-payload-recovery"
 import { KiloCompactionState } from "../../src/kilocode/session/compaction-state"
+import { KiloCompactionBudget } from "../../src/kilocode/session/compaction-budget"
 import { KiloSessionCompaction } from "../../src/kilocode/session/compaction"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
@@ -357,7 +358,11 @@ describe("KiloCompactionPayloadRecovery", () => {
               agent: "build",
               model: ref,
               auto: false,
-            }),
+            }).pipe(
+              Effect.tap((msg) =>
+                KiloCompactionBudget.bind({ sessionID: msg.sessionID, messageID: msg.id, source: keep.id }),
+              ),
+            ),
           )
 
           const rt = runtime(stub.layer, Config.defaultLayer)

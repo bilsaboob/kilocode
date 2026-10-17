@@ -17,6 +17,7 @@ import {
   WorkspaceRoutingMiddleware,
 } from "../../../src/server/routes/instance/httpapi/middleware/workspace-routing"
 import { testEffect } from "../../lib/effect"
+import { KiloRuntimeHttp } from "../../../src/kilocode/server/httpapi/runtime"
 
 const TestHttpApi = HttpApi.make("opencode-instance").addHttpApi(KiloGatewayApi)
 const auth = Layer.mock(Auth.Service)({
@@ -43,6 +44,7 @@ const layer = HttpRouter.serve(
   HttpApiBuilder.layer(TestHttpApi).pipe(
     Layer.provide(kiloGatewayHandlers),
     Layer.provide(schemaErrorLayer),
+    Layer.provide(KiloRuntimeHttp.layer),
     Layer.provide([
       passthroughAuthorization,
       passthroughInstanceContext,

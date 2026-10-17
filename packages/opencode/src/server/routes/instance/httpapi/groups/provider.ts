@@ -7,6 +7,8 @@ import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { KiloAuth } from "@/kilocode/auth/authority" // kilocode_change - register session.auth before schema capture
+import { PassiveInstance } from "@/kilocode/server/httpapi/passive-instance" // kilocode_change
 
 const root = "/provider"
 
@@ -88,6 +90,22 @@ export const ProviderApi = HttpApi.make("provider")
         }),
       )
       .middleware(InstanceContextMiddleware)
+      // kilocode_change start - add after eager instance middleware; passive reads must not bootstrap cold config
+      .add(
+        HttpApiEndpoint.get("readiness", `${root}/:providerID/auth/readiness`, {
+          params: { providerID: ProviderID },
+          query: Schema.Struct({ ...WorkspaceRoutingQuery.fields, modelID: Schema.optional(Schema.String) }),
+          success: KiloAuth.Readiness,
+        })
+          .middleware(PassiveInstance)
+          .annotateMerge(
+            OpenApi.annotations({
+              identifier: "provider.auth.readiness",
+              summary: "Inspect local credential readiness",
+            }),
+          ),
+      )
+      // kilocode_change end
       .middleware(WorkspaceRoutingMiddleware)
       .middleware(Authorization),
   )

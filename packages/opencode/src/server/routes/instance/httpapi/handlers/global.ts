@@ -1,11 +1,10 @@
 import { Config } from "@/config/config"
-import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
+import { KiloRuntimeHttp } from "@/kilocode/server/httpapi/runtime" // kilocode_change
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import * as Log from "@opencode-ai/core/util/log"
 import { Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
@@ -73,9 +72,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     const installation = yield* Installation.Service
     const bridge = yield* EffectBridge.make()
 
-    const health = Effect.fn("GlobalHttpApi.health")(function* () {
-      return { healthy: true as const, version: InstallationVersion, contextPolicy: KiloContextPolicy.configured() } // kilocode_change
-    })
+    const health = KiloRuntimeHttp.health // kilocode_change - passive process provenance
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
       return eventResponse()
@@ -155,6 +152,8 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
 
     return handlers
       .handle("health", health)
+      .handle("quiesce", KiloRuntimeHttp.quiesce) // kilocode_change
+      .handle("releaseQuiescence", KiloRuntimeHttp.release) // kilocode_change
       .handleRaw("event", event)
       .handle("configGet", configGet)
       .handle("configUpdate", configUpdate)

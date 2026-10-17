@@ -23,6 +23,8 @@ import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionNetwork } from "../../src/session/network" // kilocode_change
+import { KiloAuth } from "../../src/kilocode/auth/authority" // kilocode_change
+import { Env } from "../../src/env" // kilocode_change
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -128,6 +130,7 @@ const user = Effect.fn("TestSession.user")(function* (sessionID: SessionID, text
     sessionID,
     agent: "build",
     model: ref,
+    authAuthority: yield* KiloAuth.capture(ref), // kilocode_change - admit the real fixture credential before dispatch.
     time: { created: Date.now() },
   })
   yield* session.updatePart({
@@ -180,6 +183,7 @@ const deps = Layer.mergeAll(
   Permission.defaultLayer,
   Plugin.defaultLayer,
   Config.defaultLayer,
+  Env.defaultLayer, // kilocode_change
   LLM.defaultLayer,
   Provider.defaultLayer,
   status,
@@ -242,6 +246,7 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
 
         const input = {
           user: {
+            ...parent, // kilocode_change - retain admitted authority in reconstructed fixture input.
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -314,6 +319,7 @@ it.live("session.processor effect tests preserve text start time", () =>
         const run = yield* handle
           .process({
             user: {
+              ...parent, // kilocode_change
               id: parent.id,
               sessionID: chat.id,
               role: "user",
@@ -376,6 +382,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -421,6 +428,7 @@ capped.live("session.processor respects the configured output token ceiling", ()
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -463,6 +471,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -516,6 +525,7 @@ it.live("session.processor effect tests reset reasoning state across retries", (
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -564,6 +574,7 @@ it.live("session.processor effect tests do not retry unknown json errors", () =>
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -608,6 +619,7 @@ it.live("session.processor effect tests retry recognized structured json errors"
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -661,6 +673,7 @@ it.live("session.processor effect tests publish retry status updates", () =>
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -706,6 +719,7 @@ it.live("session.processor effect tests compact on structured context overflow",
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -749,6 +763,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
 
         const value = yield* handle.process({
           user: {
+            ...parent, // kilocode_change
             id: parent.id,
             sessionID: chat.id,
             role: "user",
@@ -815,6 +830,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         const run = yield* handle
           .process({
             user: {
+              ...parent, // kilocode_change
               id: parent.id,
               sessionID: chat.id,
               role: "user",
@@ -889,6 +905,7 @@ it.live("session.processor effect tests record aborted errors and idle state", (
         const run = yield* handle
           .process({
             user: {
+              ...parent, // kilocode_change
               id: parent.id,
               sessionID: chat.id,
               role: "user",
@@ -952,6 +969,7 @@ it.live("session.processor effect tests mark interruptions aborted without manua
         const run = yield* handle
           .process({
             user: {
+              ...parent, // kilocode_change
               id: parent.id,
               sessionID: chat.id,
               role: "user",

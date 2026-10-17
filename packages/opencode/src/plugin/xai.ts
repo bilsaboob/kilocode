@@ -1,10 +1,12 @@
 import type { Hooks, PluginInput } from "@kilocode/plugin"
 import * as Log from "@opencode-ai/core/util/log"
 import { OAUTH_DUMMY_KEY } from "../auth"
-import { createServer } from "http"
+import { OAuthBrowser } from "@/kilocode/plugin/oauth-browser" // kilocode_change
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { refreshOAuth } from "@/kilocode/auth/refresh" // kilocode_change
 import { AuthStaleError, type AuthStore } from "@/kilocode/auth/store" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
 
 const log = Log.create({ service: "plugin.xai" })
 
@@ -47,6 +49,7 @@ const REDIRECT_URI = `http://${OAUTH_HOST}:${OAUTH_PORT}${OAUTH_REDIRECT_PATH}`
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 120_000
 
 interface XaiAuthPluginOptions {
+  browser?: OAuthBrowser.Options // kilocode_change - isolate callback listeners and timers in tests
   store?: ReturnType<typeof AuthStore.create> // kilocode_change - real isolated stores for tests
   authorizeUrl?: string
   tokenUrl?: string
@@ -171,8 +174,10 @@ async function exchangeCodeForTokens(
   code: string,
   pkce: PkceCodes,
   options: XaiAuthPluginOptions = {},
+  signal?: AbortSignal, // kilocode_change - cancellation belongs to this browser attempt
 ): Promise<TokenResponse> {
   const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
+    signal, // kilocode_change
     method: "POST",
     headers: authHeaders(),
     body: new URLSearchParams({
@@ -183,15 +188,17 @@ async function exchangeCodeForTokens(
       code_verifier: pkce.verifier,
     }).toString(),
   })
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "")
-    throw new Error(`xAI token exchange failed (${response.status})${detail ? `: ${detail}` : ""}`)
-  }
-  return response.json() as Promise<TokenResponse>
+  return (await AuthOutcome.response(response)) as unknown as TokenResponse // kilocode_change - bounded and redacted
 }
 
-async function refreshAccessToken(refreshToken: string, options: XaiAuthPluginOptions = {}): Promise<TokenResponse> {
+async function refreshAccessToken(
+  refreshToken: string,
+  options: XaiAuthPluginOptions = {},
+  signal?: AbortSignal, // kilocode_change
+): Promise<TokenResponse> {
+  // kilocode_change
   const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000), // kilocode_change
     method: "POST",
     headers: authHeaders(),
     body: new URLSearchParams({
@@ -200,11 +207,9 @@ async function refreshAccessToken(refreshToken: string, options: XaiAuthPluginOp
       client_id: CLIENT_ID,
     }).toString(),
   })
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "")
-    throw new Error(`xAI token refresh failed (${response.status})${detail ? `: ${detail}` : ""}`)
-  }
-  return response.json() as Promise<TokenResponse>
+  // kilocode_change start - bounded typed outcomes never expose provider text.
+  return (await AuthOutcome.response(response)) as unknown as TokenResponse
+  // kilocode_change end
 }
 
 export interface DeviceCodeResponse {
@@ -231,8 +236,12 @@ export async function requestDeviceCode(options: XaiAuthPluginOptions = {}): Pro
     }).toString(),
   })
   if (!response.ok) {
-    const detail = await response.text().catch(() => "")
-    throw new Error(`xAI device code request failed (${response.status})${detail ? `: ${detail}` : ""}`)
+    // kilocode_change start - provider text is not exposed in credential failures.
+    await response.body?.cancel() // kilocode_change
+    throw new AuthOutcome.Failure(
+      response.status === 429 || response.status >= 500 ? "exchange-unavailable" : "refresh-rejected",
+    ) // kilocode_change
+    // kilocode_change end
   }
   const json = (await response.json()) as DeviceCodeResponse
   if (!json.device_code || !json.user_code || !json.verification_uri) {
@@ -305,8 +314,11 @@ export async function pollDeviceCodeToken(
     if (body.error === "expired_token") {
       throw new Error("xAI device code expired - please re-run login")
     }
-    const detail = body.error_description ?? body.error ?? ""
-    throw new Error(`xAI device token exchange failed (${response.status})${detail ? `: ${detail}` : ""}`)
+    // kilocode_change start - terminal polling errors retain their typed outcome.
+    throw new AuthOutcome.Failure(
+      response.status === 429 || response.status >= 500 ? "exchange-unavailable" : "exchange-uncertain",
+    ) // kilocode_change
+    // kilocode_change end
   }
   throw new Error("xAI device authorization timed out")
 }
@@ -409,170 +421,19 @@ const HTML_ERROR = (error: string) => `<!doctype html>
 // preflight.
 const CORS_ALLOWED_ORIGINS = new Set(["https://accounts.x.ai", "https://auth.x.ai"])
 
-interface PendingOAuth {
-  pkce: PkceCodes
-  state: string
-  resolve: (tokens: TokenResponse) => void
-  reject: (error: Error) => void
-}
-
-let oauthServer: ReturnType<typeof createServer> | undefined
-let pendingOAuth: PendingOAuth | undefined
-
-async function startOAuthServer(): Promise<{ port: number; redirectUri: string }> {
-  if (oauthServer) return { port: OAUTH_PORT, redirectUri: REDIRECT_URI }
-
-  const server = createServer((req, res) => {
-    const reqUrl = req.url || "/"
-    const url = new URL(reqUrl, `http://${OAUTH_HOST}:${OAUTH_PORT}`)
-
-    const origin = req.headers["origin"]
-    const allowOrigin = typeof origin === "string" && CORS_ALLOWED_ORIGINS.has(origin) ? origin : ""
-    if (allowOrigin) {
-      res.setHeader("Access-Control-Allow-Origin", allowOrigin)
-      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS")
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type")
-      res.setHeader("Access-Control-Allow-Private-Network", "true")
-      res.setHeader("Vary", "Origin")
-    }
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204)
-      res.end()
-      return
-    }
-
-    if (url.pathname === OAUTH_REDIRECT_PATH) {
-      const code = url.searchParams.get("code")
-      const state = url.searchParams.get("state")
-      const error = url.searchParams.get("error")
-      const errorDescription = url.searchParams.get("error_description")
-
-      if (error) {
-        const errorMsg = errorDescription || error
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(200, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!code) {
-        const errorMsg = "Missing authorization code"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!pendingOAuth || state !== pendingOAuth.state) {
-        const errorMsg = "Invalid state - potential CSRF attack"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      const current = pendingOAuth
-      pendingOAuth = undefined
-
-      exchangeCodeForTokens(code, current.pkce)
-        .then((tokens) => current.resolve(tokens))
-        .catch((err) => current.reject(err))
-
-      res.writeHead(200, { "Content-Type": "text/html" })
-      res.end(HTML_SUCCESS)
-      return
-    }
-
-    if (url.pathname === "/cancel") {
-      pendingOAuth?.reject(new Error("Login cancelled"))
-      pendingOAuth = undefined
-      res.writeHead(200)
-      res.end("Login cancelled")
-      return
-    }
-
-    res.writeHead(404)
-    res.end("Not found")
-  })
-
-  // listen() failures (e.g. EADDRINUSE because Grok-CLI is bound to the same
-  // pinned port) must clear `oauthServer` and remove our error listener,
-  // otherwise the next startOAuthServer() short-circuits on the truthy check
-  // and returns a redirect_uri pointing at nothing.
-  await new Promise<void>((resolve, reject) => {
-    const onError = (err: Error) => {
-      oauthServer = undefined
-      reject(err)
-    }
-    server.once("error", onError)
-    server.listen(OAUTH_PORT, OAUTH_HOST, () => {
-      server.removeListener("error", onError)
-      // After listen() succeeds, install a permanent log-only listener so
-      // that subsequent server errors (e.g. accept() failures, socket-level
-      // errors) don't trip Node's default "unhandled error event = throw"
-      // kilocode_change start
-      // behavior and crash the entire Kilocode process. Matches the silent-
-      // kilocode_change end
-      // swallow behavior the Codex plugin gets from its permanent
-      // `oauthServer!.on("error", reject)`.
-      server.on("error", (err) => log.warn("xai oauth server error", { error: err }))
-      log.info("xai oauth server started", { host: OAUTH_HOST, port: OAUTH_PORT })
-      resolve()
-    })
-    oauthServer = server
-  })
-
-  return { port: OAUTH_PORT, redirectUri: REDIRECT_URI }
-}
-
-function stopOAuthServer() {
-  if (oauthServer) {
-    oauthServer.close(() => log.info("xai oauth server stopped"))
-    oauthServer = undefined
-  }
-}
-
-function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResponse> {
-  // A previous in-flight authorize() that the user abandoned (or that is
-  // being superseded by a fresh attempt) still owns `pendingOAuth`. Reject
-  // it eagerly so its caller stops waiting on a state value that can never
-  // match the next callback.
-  if (pendingOAuth) {
-    pendingOAuth.reject(new Error("Superseded by a newer xAI authorize request"))
-    pendingOAuth = undefined
-  }
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        if (pendingOAuth) {
-          pendingOAuth = undefined
-          reject(new Error("OAuth callback timeout - authorization took too long"))
-        }
-      },
-      5 * 60 * 1000,
-    )
-
-    pendingOAuth = {
-      pkce,
-      state,
-      resolve: (tokens) => {
-        clearTimeout(timeout)
-        resolve(tokens)
-      },
-      reject: (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      },
-    }
-  })
-}
+// kilocode_change start - a shared listener may be reused, but only its current attempt may settle it
+const browser = OAuthBrowser.create<TokenResponse>({
+  redirect: REDIRECT_URI,
+  success: HTML_SUCCESS,
+  error: HTML_ERROR,
+  origins: CORS_ALLOWED_ORIGINS,
+})
+// kilocode_change end
 
 export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOptions = {}): Promise<Hooks> {
+  const owner = {} // kilocode_change
   return {
+    dispose: () => browser.dispose(owner), // kilocode_change
     auth: {
       provider: "xai",
       async loader(getAuth) {
@@ -585,15 +446,16 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
           // We intentionally do NOT set baseURL — @ai-sdk/xai already defaults
           // to https://api.x.ai/v1 and overriding here would silently route
           // around a user-configured gateway.
-          apiKey: OAUTH_DUMMY_KEY,
-          async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
-            let currentAuth = await getAuth()
+          apiKey: OAUTH_DUMMY_KEY, // kilocode_change - the request-bound adapter owns the actual OAuth credential
+          // kilocode_change start - guard the forwarding adapter without charging it as a physical send
+          fetch: AuthRequest.delegate(async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+            let currentAuth = await AuthRequest.credential(init, getAuth) // kilocode_change - request-bound credential owner
             if (!currentAuth) throw new AuthStaleError() // kilocode_change
             // Auth can flip from oauth to api mid-session (user re-runs
             // /connect with a pasted key). When that happens, pass the
             // request through untouched so the AI SDK's own apiKey-based
             // Authorization header reaches xAI unmodified.
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (currentAuth.type !== "oauth") return AuthRequest.fetch(fetch, requestInput, init) // kilocode_change
 
             // Refresh either when the stored expires timestamp is within the
             // skew window, or — for JWT access tokens — when the JWT exp
@@ -605,6 +467,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
               currentAuth.expires - Date.now() <= ACCESS_TOKEN_REFRESH_SKEW_MS ||
               accessTokenIsExpiring(currentAuth.access)
             if (expiresSoon) {
+              await AuthRequest.bound(init)?.report("refreshing") // kilocode_change
               // kilocode_change start - never publish tokens unless the original login still owns the write
               currentAuth = await refreshOAuth({
                 provider: "xai",
@@ -615,7 +478,9 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                   auth.expires - Date.now() <= ACCESS_TOKEN_REFRESH_SKEW_MS ||
                   accessTokenIsExpiring(auth.access),
                 refresh: async (auth) => {
-                  const tokens = await refreshAccessToken(auth.refresh, options)
+                  const tokens = await refreshAccessToken(auth.refresh, options, init?.signal ?? undefined).catch(
+                    AuthOutcome.exchange,
+                  )
                   return {
                     type: "oauth",
                     access: tokens.access_token,
@@ -648,45 +513,50 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
             headers.set("authorization", `Bearer ${currentAuth.access}`)
             headers.set("User-Agent", `kilocode/${InstallationVersion}`) // kilocode_change
 
-            return fetch(requestInput, { ...init, headers })
-          },
+            return AuthRequest.fetch(fetch, requestInput, { ...init, headers }) // kilocode_change
+          }),
+          // kilocode_change end
         }
       },
       methods: [
         {
           label: "xAI Grok OAuth (SuperGrok Subscription)",
           type: "oauth",
+          // kilocode_change start - publish ownership before PKCE preparation or listener startup can race
           authorize: async () => {
-            await startOAuthServer()
-            const pkce = await generatePKCE()
             const state = generateState()
-            const nonce = generateState()
-            const authUrl = buildAuthorizeUrl(pkce, state, nonce, options)
-
-            const callbackPromise = waitForOAuthCallback(pkce, state)
-
-            return {
-              url: authUrl,
-              instructions: "Complete authorization in your browser. This window will close automatically.",
-              method: "auto" as const,
-              callback: async () => {
-                try {
-                  const tokens = await callbackPromise
-                  return {
-                    type: "success" as const,
-                    refresh: tokens.refresh_token,
-                    access: tokens.access_token,
-                    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+            const attempt = browser.begin(state, owner, options.browser)
+            try {
+              const pkce = await generatePKCE()
+              await attempt.start((code, signal) => exchangeCodeForTokens(code, pkce, options, signal))
+              return {
+                url: buildAuthorizeUrl(pkce, state, generateState(), options),
+                instructions: "Complete authorization in your browser. This window will close automatically.",
+                method: "auto" as const,
+                callback: async () => {
+                  try {
+                    const tokens = await attempt.wait()
+                    return {
+                      type: "success" as const,
+                      refresh: tokens.refresh_token,
+                      access: tokens.access_token,
+                      expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+                    }
+                  } catch (err) {
+                    if (AuthOutcome.control(err)) throw err
+                    log.error("xai oauth callback failed", { error: err })
+                    return { type: "failed" as const }
+                  } finally {
+                    await attempt.close()
                   }
-                } catch (err) {
-                  log.error("xai oauth callback failed", { error: err })
-                  return { type: "failed" as const }
-                } finally {
-                  stopOAuthServer()
-                }
-              },
+                },
+              }
+            } catch (error) {
+              await attempt.close()
+              throw error
             }
           },
+          // kilocode_change end
         },
         {
           // RFC 8628 device-code flow. The CLI prints a verification URL
@@ -718,7 +588,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                 } catch (err) {
                   log.error("xai device code callback failed", { error: err })
                   return { type: "failed" as const }
-                }
+                } // kilocode_change - headless callbacks do not own a browser listener
               },
             }
           },

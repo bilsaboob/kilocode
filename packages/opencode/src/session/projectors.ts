@@ -11,6 +11,7 @@ import { WorkspaceTable } from "@/control-plane/workspace.sql"
 import { Log } from "@opencode-ai/core/util/log"
 import nextProjectors from "./projectors-next"
 import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
+import { KiloSessionIdentity } from "@/kilocode/session/identity" // kilocode_change
 
 const log = Log.create({ service: "session.projector" })
 
@@ -125,6 +126,7 @@ export default [
   }),
 
   SyncEvent.project(MessageV2.Event.Updated, (db, data) => {
+    KiloSessionIdentity.message(db, data.info, data.sessionID) // kilocode_change - validate in the same transaction as the upsert and event
     const time_created = data.info.time.created
     const { id, sessionID, ...rest } = data.info
 
@@ -138,6 +140,7 @@ export default [
         })
         .onConflictDoUpdate({ target: MessageTable.id, set: { data: rest } })
         .run()
+      KiloSessionIdentity.persisted(data.info) // kilocode_change - notify this insert-only owner after commit, before downstream notifications
     } catch (err) {
       if (!foreign(err)) throw err
       log.warn("ignored late message update", { messageID: id, sessionID })
@@ -145,6 +148,7 @@ export default [
   }),
 
   SyncEvent.project(MessageV2.Event.Removed, (db, data) => {
+    KiloSessionIdentity.message(db, { id: data.messageID, sessionID: data.sessionID }) // kilocode_change - failed admission cleanup cannot delete another owner
     for (const row of db
       .select()
       .from(PartTable)
@@ -159,6 +163,7 @@ export default [
   }),
 
   SyncEvent.project(MessageV2.Event.PartRemoved, (db, data) => {
+    KiloSessionIdentity.part(db, { ...data, id: data.partID }) // kilocode_change
     const row = db
       .select()
       .from(PartTable)
@@ -174,7 +179,7 @@ export default [
 
   SyncEvent.project(MessageV2.Event.PartUpdated, (db, data) => {
     const { id, messageID, sessionID, ...rest } = data.part
-    const row = db.select().from(PartTable).where(eq(PartTable.id, id)).get()
+    const row = KiloSessionIdentity.part(db, data.part, data.sessionID) // kilocode_change - ownership and usage accounting share the transaction
 
     try {
       db.insert(PartTable)

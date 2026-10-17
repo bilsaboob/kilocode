@@ -6,6 +6,7 @@ import * as TestConsole from "effect/testing/TestConsole"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import type { Config } from "@/config/config"
 import { Reference } from "@/reference/reference" // kilocode_change
+import { Env } from "@/env" // kilocode_change - use the actual isolated workspace environment service
 import { TestInstance, withTmpdirInstance } from "../fixture/fixture"
 
 type Body<A, E, R> = Effect.Effect<A, E, R> | (() => Effect.Effect<A, E, R>)
@@ -122,15 +123,15 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
 }
 
 // Test environment with TestClock and TestConsole
-const testEnv = Layer.mergeAll(TestConsole.layer, TestClock.layer())
+const testEnv = Layer.mergeAll(TestConsole.layer, TestClock.layer(), Env.defaultLayer) // kilocode_change
 
 // Live environment - uses real clock, but keeps TestConsole for output capture
-const liveEnv = TestConsole.layer
+const liveEnv = Layer.mergeAll(TestConsole.layer, Env.defaultLayer) // kilocode_change
 
 export const it = make(testEnv, liveEnv)
 
 // kilocode_change start
-export const testEffect = <R, E>(layer: Layer.Layer<R, E>) => {
+export const testEffect = <R, E>(layer: Layer.Layer<R, E, Env.Service>) => {
   const full = Layer.merge(layer, Reference.defaultLayer)
   return make(Layer.provideMerge(full, testEnv), Layer.provideMerge(full, liveEnv))
 }
@@ -140,8 +141,9 @@ export const testEffect = <R, E>(layer: Layer.Layer<R, E>) => {
 // process-wide memoMap so services like Bus/Session resolve to the same
 // instances Server.Default uses. Use when a test needs pub/sub identity with
 // an in-process HTTP server — most tests should stick with `testEffect`.
-export const testEffectShared = <R, E>(layer: Layer.Layer<R, E>) =>
-  make(Layer.provideMerge(layer, testEnv), Layer.provideMerge(layer, liveEnv), sharedRun)
+export const testEffectShared = <R, E>(
+  layer: Layer.Layer<R, E, Env.Service>, // kilocode_change
+) => make(Layer.provideMerge(layer, testEnv), Layer.provideMerge(layer, liveEnv), sharedRun)
 
 export const awaitWithTimeout = <A, E, R>(
   self: Effect.Effect<A, E, R>,

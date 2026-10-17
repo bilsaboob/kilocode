@@ -68,6 +68,7 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
 
 // kilocode_change - Kilo does not emit OpenCode Go actions
 export function retryable(error: Err, _provider?: string): Retryable | undefined {
+  if (MessageV2.AuthError.isInstance(error)) return undefined // kilocode_change - auth never enters model retry
   if (KiloResponse.blocked(error)) return undefined // kilocode_change - terminal receipts never authorize paid replay
   if (KiloContextPolicy.Blocked.isInstance(error)) return undefined // kilocode_change
   // context overflow errors should not be retried

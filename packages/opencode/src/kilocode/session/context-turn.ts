@@ -1,6 +1,7 @@
 import type { MessageV2 } from "@/session/message-v2"
 import { KiloContextPolicy } from "./context-policy"
 import { KiloCompactionState } from "./compaction-state"
+import { KiloUsage } from "./usage"
 import { isDeepStrictEqual } from "node:util"
 
 export namespace KiloContextTurn {
@@ -105,9 +106,7 @@ export namespace KiloContextTurn {
 
   export function state(messages: MessageV2.WithParts[], user: MessageV2.User): KiloContextPolicy.State | undefined {
     if (!user.contextPolicy) return undefined
-    const progress = KiloCompactionState.latest(
-      messages.filter((message) => message.info.role === "assistant" && message.info.parentID === user.id),
-    )?.id
+    const progress = KiloCompactionState.progress(messages, user.id)?.id
     const done = completed(messages)
     const attempted = messages.some(
       (message) =>
@@ -118,10 +117,10 @@ export namespace KiloContextTurn {
         ),
     )
     const plan = partition(messages, user.id)
-    const latest = KiloCompactionState.latest(messages)
+    const latest = KiloUsage.latest(messages)
     return {
       progress,
-      currentTokens: KiloContextPolicy.count(latest?.role === "assistant" ? latest.tokens : undefined),
+      currentTokens: latest?.measurement.tokens ?? null,
       attempted,
       unresolved: plan.unresolved,
       reducible:

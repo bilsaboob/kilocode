@@ -13,7 +13,7 @@ export namespace AuthIO {
   export const make = Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
     const flock = yield* EffectFlock.Service
-    const context = yield* Effect.context()
+    const context = yield* Effect.context<AppFileSystem.Service | EffectFlock.Service>()
     const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect.pipe(Effect.provide(context)))
     return {
       context,

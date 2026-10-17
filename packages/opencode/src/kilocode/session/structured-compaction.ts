@@ -27,7 +27,8 @@ function current(messages: MessageV2.WithParts[]) {
         msg.parts.every(
           (part) =>
             part.type === "text" &&
-            ((part.synthetic && part.metadata?.compaction_continue === true) ||
+            (part.ignored ||
+              (part.synthetic && part.metadata?.compaction_continue === true) ||
               (part.metadata?.auto_resume === true &&
                 part.metadata?.resume_kind === "automatic" &&
                 typeof part.metadata?.anchor_user_message_id === "string")),
@@ -135,7 +136,7 @@ export namespace KiloStructuredCompaction {
       format: task.turn.info.format,
       system: task.turn.info.system,
       tools: task.turn.info.tools,
-      parts: task.turn.parts,
+      parts: task.turn.parts.filter((part) => part.type !== "text" || !part.ignored),
     }
     if (Buffer.byteLength(JSON.stringify(payload)) > BYTES) {
       return fail("the intact request exceeds the 16 MiB replay payload bound")

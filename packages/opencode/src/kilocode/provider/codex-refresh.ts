@@ -2,12 +2,12 @@ import type { Flock } from "@opencode-ai/core/util/flock"
 import type { Auth } from "@/auth"
 import { refreshOAuth } from "@/kilocode/auth/refresh"
 import { AuthStaleError, type AuthStore } from "@/kilocode/auth/store"
+import { AuthOutcome } from "@/kilocode/auth/outcome"
+import { codexExpiring } from "./codex-expiry"
 
-export class CodexAuthExpiredError extends Error {
-  constructor(
-    message = "Your ChatGPT sign-in expired or was revoked. Sign in with ChatGPT again to continue using Codex models.",
-  ) {
-    super(message)
+export class CodexAuthExpiredError extends AuthOutcome.Failure {
+  constructor() {
+    super("refresh-rejected")
     this.name = "CodexAuthExpiredError"
   }
 }
@@ -33,19 +33,21 @@ export async function refreshCodexAuth(input: {
     provider: "openai",
     expired: (auth) => {
       if (account && auth.accountId !== account) throw new AuthStaleError()
-      return !auth.access || auth.expires <= Date.now()
+      return codexExpiring(auth)
     },
     rejected: (err) =>
-      err instanceof Error && /^Token refresh failed: 401\b/.test(err.message)
-        ? new CodexAuthExpiredError()
-        : undefined,
+      AuthOutcome.known(err)?.reason === "refresh-rejected" ? new CodexAuthExpiredError() : undefined,
     refresh: async (base) => {
       const controller = new AbortController()
       const timer = setTimeout(
         () => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
         input.timeout ?? 30_000,
       )
-      const tokens = await input.refresh(base.refresh, controller.signal).finally(() => clearTimeout(timer))
+      const tokens = await input
+        .refresh(base.refresh, controller.signal)
+        .catch((error) => AuthOutcome.exchange(controller.signal.aborted ? controller.signal.reason : error))
+        .finally(() => clearTimeout(timer))
+      if (!tokens.refresh_token || !tokens.access_token) throw new AuthOutcome.Failure("exchange-uncertain")
       const account = input.account(tokens)
       if (base.accountId && account && account !== base.accountId) throw new AuthStaleError()
       const id = account || base.accountId

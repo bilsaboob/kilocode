@@ -4,6 +4,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock" // kilocode_change
 import { Telemetry } from "@kilocode/kilo-telemetry" // kilocode_change
 import { AuthStore } from "@/kilocode/auth/store" // kilocode_change
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
 
 export const OAUTH_DUMMY_KEY = "kilo-oauth-dummy-key" // kilocode_change
 
@@ -47,22 +48,20 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Auth") {}
 
+// kilocode_change start - durable auth operations retain caller policy and invalidate only affected authorities
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    // kilocode_change start - capture sandbox policy at each operation, never at layer construction
+    // Capture sandbox policy at each operation, never at layer construction.
     const fs = yield* AppFileSystem.Service
     const flock = yield* EffectFlock.Service
     const storage = AuthStore.make().pipe(
       Effect.provideService(AppFileSystem.Service, fs),
       Effect.provideService(EffectFlock.Service, flock),
     )
-    // kilocode_change end
     const all = Effect.fn("Auth.all")(function* () {
-      // kilocode_change start - bind effective reads to serialized disk authority
       const store = yield* storage
       return yield* Effect.tryPromise({ try: () => store.all(), catch: fail("Failed to read auth data") })
-      // kilocode_change end
     })
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {
@@ -70,29 +69,30 @@ export const layer = Layer.effect(
     })
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
-      // kilocode_change start - explicit writes always revoke prior refresh authority
+      // Explicit writes always revoke prior refresh authority.
       const store = yield* storage
-      yield* Effect.tryPromise({ try: () => store.set(key, info), catch: fail("Failed to write auth data") })
-      // kilocode_change end
+      yield* Effect.tryPromise({ try: () => store.set(key, info), catch: fail("Failed to write auth data") }).pipe(
+        Effect.ensuring(Effect.promise(() => AuthRequest.invalidate(key))),
+      )
     })
 
     const remove = Effect.fn("Auth.remove")(function* (key: string) {
-      // kilocode_change start - tombstones also advance on repeated logout
+      // Tombstones also advance on repeated logout.
       const store = yield* storage
-      yield* Effect.tryPromise({ try: () => store.remove(key), catch: fail("Failed to write auth data") })
-      // kilocode_change end
-
-      // kilocode_change start - Track logout and reset telemetry identity for Kilo
+      yield* Effect.tryPromise({ try: () => store.remove(key), catch: fail("Failed to write auth data") }).pipe(
+        Effect.ensuring(Effect.promise(() => AuthRequest.invalidate(key))),
+      )
+      // Track logout and reset telemetry identity for Kilo.
       if (key === "kilo") {
         yield* Effect.promise(() => Telemetry.updateIdentity(null))
       }
       Telemetry.trackAuthLogout(key)
-      // kilocode_change end
     })
 
     return Service.of({ get, all, set, remove })
   }),
 )
+// kilocode_change end
 
 // kilocode_change start - both credential and lock IO use decorated Effect services
 export const defaultLayer = layer.pipe(

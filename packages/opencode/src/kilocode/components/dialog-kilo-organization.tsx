@@ -11,6 +11,7 @@ import { useToast } from "@tui/ui/toast"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import type { Organization } from "@kilocode/kilo-gateway"
 import { getOrganizationOptions, getDefaultOrganizationSelection } from "@kilocode/kilo-gateway/tui"
+import { useAuthRefresh } from "../tui/auth-refresh"
 
 // These types are OpenCode-internal and imported at runtime
 type UseSDK = any
@@ -29,6 +30,7 @@ interface DialogKiloOrganizationProps {
 export function DialogKiloOrganization(props: DialogKiloOrganizationProps) {
   const dialog = useDialog()
   const sync = useSync()
+  const auth = useAuthRefresh(sync)
   const sdk = props.useSDK()
   const toast = useToast()
 
@@ -44,21 +46,20 @@ export function DialogKiloOrganization(props: DialogKiloOrganizationProps) {
       options={options}
       current={defaultSelection}
       onSelect={async (option: any) => {
+        if (!auth.current()) return
         try {
           const orgId = option.value
 
           // Update auth to include organization ID using server endpoint
-          await sdk.client.kilo.organization.set({
-            organizationId: orgId,
-          })
+          await sdk.client.kilo.organization.set({ organizationId: orgId }, { throwOnError: true })
 
           // Refresh provider state to reload with new organization context
-          await sdk.client.instance.dispose()
-          await sync.bootstrap()
+          if (!(await auth.refresh())) return
 
           // Proceed to model selection
           dialog.replace(() => <props.DialogModel providerID={props.providerID} />)
         } catch (error) {
+          if (!auth.current()) return
           if (error instanceof DOMException && error.name === "AbortError") return
           console.warn("Failed to set organization:", error)
           toast.show({

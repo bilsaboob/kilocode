@@ -5,7 +5,7 @@ import { Effect } from "effect"
 import * as Sandbox from "@kilocode/sandbox"
 import { Global } from "@opencode-ai/core/global"
 import { Auth } from "../../src/auth"
-import { AuthStore } from "../../src/kilocode/auth/store"
+import { AuthStorageError, AuthStore } from "../../src/kilocode/auth/store"
 import { AuthIO } from "../../src/kilocode/auth/io"
 import { refreshCodexAuth } from "../../src/kilocode/provider/codex-refresh"
 import { CodexModels } from "../../src/kilocode/provider/codex-models"
@@ -154,79 +154,101 @@ test("a later explicit caller can replace the owner's older context at operation
   expect(requests).toEqual(["makeDirectory"])
 })
 
-test("renewal retains the newer policy through exchange and the late commit", async () => {
-  await using f = await fixture(expired())
-  const auth = (await f.store.all()).openai
-  if (auth.type !== "oauth") throw new Error("Invalid fixture")
-  const before = await files(f.dir)
-  const locks = path.join(f.dir, "auth-locks")
-  const profile = {
-    ...denied,
-    filesystem: {
-      ...denied.filesystem,
-      allowWrite: [
-        { path: f.dir, kind: "literal" as const },
-        { path: locks, kind: "subtree" as const },
-      ],
-    },
-  }
-  let exchanges = 0
-  const writes: string[] = []
-  const result = await Effect.runPromise(
-    Sandbox.withRunner(
-      (_, request) =>
-        Effect.promise(async () => {
-          // Replay only permitted fixture operations. The decorator checks the policy
-          // before invoking this runner; auth/revision/temp writes must never reach it.
-          if (!("path" in request)) throw new Error("Unexpected fixture mutation")
-          const file = request.path
-          expect(file === f.dir || file === locks || file.startsWith(`${locks}${path.sep}`)).toBe(true)
-          switch (request.op) {
-            case "makeDirectory":
-              await fs.mkdir(file, request.options)
-              break
-            case "writeFileString":
-              writes.push(file)
-              await fs.writeFile(file, request.data, request.options)
-              break
-            case "remove":
-              await fs.rm(file, request.options)
-              break
-            case "utimes":
-              await fs.utimes(
-                file,
-                request.atime.type === "date" ? new Date(request.atime.value) : request.atime.value,
-                request.mtime.type === "date" ? new Date(request.mtime.value) : request.mtime.value,
-              )
-              break
-            default:
-              throw new Error("Unexpected fixture mutation")
-          }
-          return undefined
-        }),
-      Sandbox.run(
-        profile,
-        Effect.tryPromise({
-          try: () =>
-            refreshCodexAuth({
-              auth,
-              account: () => undefined,
-              refresh: async () => {
-                exchanges++
-                await Promise.resolve()
-                return tokens()
-              },
-            }),
-          catch: (error) => error,
-        }),
-      ),
-    ).pipe(Effect.exit),
-  )
-  expect(result._tag).toBe("Failure")
-  expect(exchanges).toBe(1)
-  expect(writes.length).toBeGreaterThan(0)
-  expect(await files(f.dir)).toEqual(before)
-})
+for (const phase of ["receipt", "commit"] as const) {
+  test(`renewal retains the newer policy through ${phase} publication`, async () => {
+    await using f = await fixture(expired())
+    const auth = (await f.store.all()).openai
+    if (auth.type !== "oauth") throw new Error("Invalid fixture")
+    const before = await files(f.dir)
+    const locks = path.join(f.dir, "auth-locks")
+    const original = await fs.readFile(f.file, "utf8")
+    const profile = {
+      ...denied,
+      filesystem: {
+        ...denied.filesystem,
+        allowWrite: [
+          { path: f.dir, kind: phase === "commit" ? ("subtree" as const) : ("literal" as const) },
+          { path: locks, kind: "subtree" as const },
+        ],
+        denyWrite: phase === "commit" ? [{ path: f.file, kind: "literal" as const }] : [],
+      },
+    }
+    let exchanges = 0
+    const writes: string[] = []
+    const result = await Effect.runPromise(
+      Sandbox.withRunner(
+        (_, request) =>
+          Effect.promise(async () => {
+            // The decorator must deny the protected destination before invoking this runner.
+            if (request.op === "rename") {
+              expect(phase).toBe("commit")
+              expect(request.to).toBe(path.join(f.dir, "auth.revisions.json"))
+              await fs.rename(request.from, request.to)
+              return undefined
+            }
+            if (!("path" in request)) throw new Error("Unexpected fixture mutation")
+            const file = request.path
+            expect(file).not.toBe(f.file)
+            expect(
+              phase === "commit"
+                ? file === f.dir || file.startsWith(`${f.dir}${path.sep}`)
+                : file === f.dir || file === locks || file.startsWith(`${locks}${path.sep}`),
+            ).toBe(true)
+            switch (request.op) {
+              case "makeDirectory":
+                await fs.mkdir(file, request.options)
+                break
+              case "writeFileString":
+                writes.push(file)
+                await fs.writeFile(file, request.data, request.options)
+                break
+              case "remove":
+                await fs.rm(file, request.options)
+                break
+              case "utimes":
+                await fs.utimes(
+                  file,
+                  request.atime.type === "date" ? new Date(request.atime.value) : request.atime.value,
+                  request.mtime.type === "date" ? new Date(request.mtime.value) : request.mtime.value,
+                )
+                break
+              case "chmod":
+                await fs.chmod(file, request.mode)
+                break
+              default:
+                throw new Error("Unexpected fixture mutation")
+            }
+            return undefined
+          }),
+        Sandbox.run(
+          profile,
+          Effect.tryPromise({
+            try: () =>
+              refreshCodexAuth({
+                auth,
+                account: () => undefined,
+                refresh: async () => {
+                  exchanges++
+                  await Promise.resolve()
+                  return tokens()
+                },
+              }),
+            catch: (error) => error,
+          }),
+        ),
+      ).pipe(Effect.exit),
+    )
+    expect(result._tag).toBe("Failure")
+    expect(exchanges).toBe(phase === "receipt" ? 0 : 1)
+    expect(writes.length).toBeGreaterThan(0)
+    if (phase === "receipt") expect(await files(f.dir)).toEqual(before)
+    else {
+      expect(await fs.readFile(f.file, "utf8")).toBe(original)
+      await expect(f.store.snapshot("openai")).rejects.toBeInstanceOf(AuthStorageError)
+      expect((await fs.readdir(f.dir)).filter((file) => file.endsWith(".tmp"))).toEqual([])
+    }
+  })
+}
 
 test("a coalesced waiter cannot adopt using its older permissive owner after await", async () => {
   await using f = await fixture(expired())
@@ -303,7 +325,7 @@ test("organization changes pin a newer caller across the snapshot and commit awa
 })
 
 test("cached catalog origins do not bypass a newer caller's auth policy", async () => {
-  await using f = await fixture({ ...expired(), expires: Date.now() + 60_000 })
+  await using f = await fixture({ ...expired(), expires: Date.now() + 120_000 })
   const auth = (await f.store.all()).openai
   if (auth.type !== "oauth") throw new Error("Invalid fixture")
   const before = await files(f.dir)

@@ -298,13 +298,11 @@ describe("plugin.xai", () => {
       expect((await f.store.all()).xai).toMatchObject({ refresh: "rt-new" }) // kilocode_change
     })
 
+    // kilocode_change start - independent credential stores never share a rotation
     test("does not share refresh single-flight across credential stores", async () => {
-      // kilocode_change
       const { input } = makeInput()
-      // kilocode_change start
       await using a = await fixture({ type: "oauth", access: "old-a", refresh: "rt-a", expires: 0 }, "xai")
       await using b = await fixture({ type: "oauth", access: "old-b", refresh: "rt-b", expires: 0 }, "xai")
-      // kilocode_change end
       const tokenRequests: string[] = []
       const apiRequests: string[] = []
       using server = makeServer(async (request, url) => {
@@ -325,9 +323,12 @@ describe("plugin.xai", () => {
         async () => ({ type: "oauth", access: "old-a", refresh: "rt-a", expires: 0 }),
         {} as any,
       )
-      const second = await (
+      const second = await // kilocode_change
+      (
         await XaiAuthPlugin(input, { ...serverOptions(server), store: b.store })
       ).auth!.loader!(
+        // kilocode_change
+        // kilocode_change
         // kilocode_change
         async () => ({ type: "oauth", access: "old-b", refresh: "rt-b", expires: 0 }),
         {} as any,
@@ -341,7 +342,9 @@ describe("plugin.xai", () => {
       expect(tokenRequests.sort()).toEqual(["rt-a", "rt-b"])
       expect(apiRequests.sort()).toEqual(["Bearer access-rt-a", "Bearer access-rt-b"])
     })
+    // kilocode_change end
 
+    // kilocode_change start - explicit subsequent operations use the durable revision
     test("starts a new refresh after success and clears the refresh promise after failure", async () => {
       const { input } = makeInput()
       await using f = await fixture({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }, "xai") // kilocode_change
@@ -358,52 +361,48 @@ describe("plugin.xai", () => {
         }
         return new Response("{}", { status: 200 })
       })
-      // kilocode_change start
       const opts = await (
         await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
       ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
-      // kilocode_change end
 
       await opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })
       await f.store.commit(await f.store.snapshot("xai"), { type: "oauth", access: "old", refresh: "rt-1", expires: 0 }) // kilocode_change
+      // kilocode_change start - explicit transient failure remains distinct from ambiguous exchange.
       await expect(opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })).rejects.toThrow(
-        /xAI token refresh failed \(503\)/,
+        /temporarily unavailable/,
       )
+      // kilocode_change end
       await opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })
       expect(tokenRequests).toBe(3)
     })
+    // kilocode_change end
 
+    // kilocode_change start - a failed publication cannot expose renewed credentials
     test("does not expose refreshed tokens after persistence failure", async () => {
-      // kilocode_change
       const { input, setCalls } = makeInput() // kilocode_change
-      // kilocode_change start
       await using f = await fixture({ type: "oauth", access: "old", refresh: "rt-old", expires: 0 }, "xai")
       using broken = await fault(f.file, f.file, "rename")
-      // kilocode_change end
       const captured: Headers[] = []
       using server = makeServer((request, url) => {
         if (url.pathname === "/oauth2/token") return Response.json({ access_token: "new-access", expires_in: 3600 })
         captured.push(request.headers)
         return new Response("{}", { status: 200 })
       })
-      // kilocode_change start
       const opts = await (
         await XaiAuthPlugin(input, { ...serverOptions(server), store: broken.store })
       ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
-      // kilocode_change end
 
-      // kilocode_change start
       await expect(opts.fetch!(new URL("/chat/completions", server.url), { headers: {} })).rejects.toBeInstanceOf(
         AuthStorageError,
       )
       expect(captured).toEqual([])
       expect(setCalls).toEqual([])
-      // kilocode_change end
     })
+    // kilocode_change end
 
+    // kilocode_change start - real-store expiry checks preserve write and account authority
     test("refreshes based on stored expiry or JWT expiry and skips refresh when both are fresh", async () => {
       const { input, setCalls } = makeInput()
-      // kilocode_change start
       const auth = {
         type: "oauth" as const,
         access: makeJwt({ exp: Math.floor((Date.now() + 30_000) / 1000) }),
@@ -411,7 +410,6 @@ describe("plugin.xai", () => {
         expires: Date.now() + 24 * 3600 * 1000,
       }
       await using f = await fixture(auth, "xai")
-      // kilocode_change end
       let tokenRequests = 0
       using server = makeServer((_, url) => {
         if (url.pathname === "/oauth2/token") {
@@ -438,30 +436,38 @@ describe("plugin.xai", () => {
         await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
       ).auth!.loader!(
         // kilocode_change
+        // kilocode_change
         async () => (await f.store.all()).xai, // kilocode_change
         {} as any,
       )
-      // kilocode_change start
       const missingExpires = await (
         await XaiAuthPlugin(input, { ...serverOptions(server), store: f.store })
       ).auth!.loader!(async () => (await f.store.all()).xai, {} as any)
-      // kilocode_change end
       await jwtExpiring.fetch!(new URL("/chat/completions", server.url), { headers: {} })
       await f.store.set("xai", { type: "oauth", access: "opaque-token", refresh: "rt", expires: 0 }) // kilocode_change
       await missingExpires.fetch!(new URL("/chat/completions", server.url), { headers: {} })
       expect(tokenRequests).toBe(2)
       expect(setCalls).toHaveLength(0) // kilocode_change
     })
+    // kilocode_change end
 
-    test("network failure during refresh surfaces the underlying fetch error", async () => {
-      const { input } = makeInput()
+    // kilocode_change start - an ambiguous exchange must not be retried implicitly
+    test("network failure during refresh reports nonretryable uncertainty", async () => {
+      // kilocode_change
+      const { input } = makeInput() // kilocode_change
       await using f = await fixture({ type: "oauth", access: "old", refresh: "rt", expires: 0 }, "xai") // kilocode_change
-      const opts = await (
+      const opts = await // kilocode_change
+      (
         await XaiAuthPlugin(input, { tokenUrl: "http://127.0.0.1:9/oauth2/token", store: f.store })
-      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt", expires: 0 }), {} as any) // kilocode_change
+      ).auth!.loader!(async () => ({ type: "oauth", access: "old", refresh: "rt", expires: 0 }), {} as any) // kilocode_change // kilocode_change
 
-      await expect(opts.fetch!("https://api.x.ai/v1/chat/completions", { headers: {} })).rejects.toThrow()
+      await expect(opts.fetch!("https://api.x.ai/v1/chat/completions", { headers: {} })).rejects.toMatchObject({
+        name: "CredentialReadinessError",
+        reason: "exchange-uncertain",
+        isRetryable: false,
+      }) // kilocode_change
     })
+    // kilocode_change end
   })
 
   describe("device code flow", () => {
@@ -535,7 +541,7 @@ describe("plugin.xai", () => {
       expect(parsed.get("scope")).toContain("api:access")
       await expect(
         requestDeviceCode({ deviceAuthorizationUrl: new URL("/error", server.url).toString() }),
-      ).rejects.toThrow(/429.*rate limited/)
+      ).rejects.toThrow(/temporarily unavailable/) // kilocode_change - redacted domain outcome
       await expect(
         requestDeviceCode({ deviceAuthorizationUrl: new URL("/missing", server.url).toString() }),
       ).rejects.toThrow(/missing device_code/)
@@ -583,7 +589,7 @@ describe("plugin.xai", () => {
       for (const [body, error] of [
         [{ error: "access_denied" }, /authorization was denied/],
         [{ error: "expired_token" }, /device code expired/],
-        [{ error: "server_error", error_description: "oops" }, /500.*oops/],
+        [{ error: "server_error", error_description: "oops" }, /temporarily unavailable/], // kilocode_change
       ] as const) {
         using server = makeServer(() => Response.json(body, { status: 500 }))
         await expect(

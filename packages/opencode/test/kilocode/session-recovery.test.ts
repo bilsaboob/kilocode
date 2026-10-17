@@ -80,6 +80,114 @@ function auto(sessionID: SessionID, token: number) {
 }
 
 describe("automatic session recovery", () => {
+  test("recovery ingress distinguishes shipped manual requests from malformed automatic claims", () => {
+    const failed = failure()
+    const decision = KiloSessionRecovery.finish({
+      sessionID: sessions[0],
+      message: failed.reply,
+      messages: failed.messages,
+    })
+    if (decision?.action !== "resume") throw new Error("Missing recovery decision")
+    for (const metadata of [
+      { auto_resume: true, anchor_user_message_id: failed.prompt.info.id },
+      { auto_resume: true },
+      { auto_resume: true, recovery_token: "1", anchor_user_message_id: failed.prompt.info.id },
+      ...[null, 0, -1, 1.5, NaN, Infinity].map((recovery_token) => ({ auto_resume: true, recovery_token })),
+      { session_resume: true, resume_kind: "automatic" },
+      { session_resume: true, resume_kind: "manual", auto_resume: true, recovery_token: decision.token },
+      { auto_resume: true, recovery_token: decision.token, anchor_user_message_id: 7 },
+      { anchor_user_message_id: failed.prompt.info.id },
+      { session_resume: "true", resume_kind: "manual" },
+    ]) {
+      const parts = [{ type: "text", text: "An ordinary new task", metadata }]
+      expect(KiloSessionRecovery.marked(parts[0])).toBe(true)
+      expect(KiloSessionRecovery.input(parts)).toBe(false)
+      expect(KiloSessionRecovery.begin(sessions[0], parts)).toBe("stale")
+      expect(KiloSessionRecovery.origin(sessions[0], parts)).toBeUndefined()
+      expect(KiloSessionRecovery.valid(sessions[0], parts)).toBe(false)
+      expect(KiloSessionRecovery._state(sessions[0])?.token).toBe(decision.token)
+    }
+    const manual = [
+      {
+        type: "text",
+        text: "resume where you were interrupted",
+        metadata: {
+          session_resume: true,
+          resume_kind: "manual",
+          anchor_user_message_id: failed.prompt.info.id,
+          interrupted_assistant_message_id: failed.reply.id,
+        },
+      },
+    ]
+    expect(KiloSessionRecovery.input(manual)).toBe(true)
+    expect(
+      KiloSessionRecovery.input(
+        manual.map((part) => ({ ...part, metadata: { ...part.metadata, recovery_token: decision.token } })),
+      ),
+    ).toBe(true)
+    expect(KiloSessionRecovery.detect(manual)).toBe("manual")
+    expect(KiloSessionRecovery.input([{ type: "text", text: "resume" }])).toBe(true)
+    const adapted = [
+      {
+        type: "text",
+        text: "Continue",
+        synthetic: true,
+        metadata: { session_resume: true, resume_kind: "automatic", recovery_token: decision.token },
+      },
+    ]
+    expect(KiloSessionRecovery.input(adapted)).toBe(true)
+    expect(KiloSessionRecovery.origin(sessions[0], adapted)).toBe(failed.prompt.info.id)
+    expect(KiloSessionRecovery.accept(sessions[0], adapted)).toBe(true)
+    expect(KiloSessionRecovery.accept(sessions[1], adapted)).toBe(false)
+    expect(KiloSessionRecovery.input([...adapted, ...auto(sessions[0], decision.token + 1)])).toBe(false)
+    const canonical = KiloSessionRecovery.parts(
+      adapted,
+      "automatic",
+      KiloSessionRecovery.anchor({
+        sessionID: sessions[0],
+        resumeMessageID: MessageID.ascending(),
+        messages: failed.messages,
+      }),
+    )
+    expect(KiloSessionRecovery.input(canonical)).toBe(true)
+    expect(KiloSessionRecovery.origin(sessions[0], canonical)).toBe(failed.prompt.info.id)
+    const clarification = KiloSessionRecovery.parts(
+      manual,
+      "manual",
+      KiloSessionRecovery.anchor({ sessionID: sessions[0], resumeMessageID: MessageID.ascending(), messages: [] }),
+    )
+    expect(clarification[0].metadata).not.toHaveProperty("anchor_user_message_id")
+    expect(clarification[0].metadata).not.toHaveProperty("interrupted_assistant_message_id")
+  })
+
+  test("only the current session token supplies the trusted failed-prompt source", () => {
+    const first = failure()
+    const one = KiloSessionRecovery.finish({ sessionID: sessions[0], message: first.reply, messages: first.messages })
+    if (one?.action !== "resume") throw new Error("Missing recovery decision")
+    const parts = auto(sessions[0], one.token).map((part) =>
+      part.type === "text"
+        ? { ...part, metadata: { ...part.metadata, anchor_user_message_id: MessageID.ascending() } }
+        : part,
+    )
+    expect(KiloSessionRecovery.origin(sessions[0], parts)).toBe(first.prompt.info.id)
+    expect(KiloSessionRecovery.origin(sessions[1], parts)).toBeUndefined()
+    expect(
+      KiloSessionRecovery.origin(sessions[0], [
+        {
+          type: "text",
+          metadata: { session_resume: true, resume_kind: "automatic", anchor_user_message_id: first.prompt.info.id },
+        },
+      ]),
+    ).toBeUndefined()
+    const next = failure()
+    const two = KiloSessionRecovery.finish({ sessionID: sessions[0], message: next.reply, messages: next.messages })
+    if (two?.action !== "resume") throw new Error("Missing next recovery decision")
+    expect(KiloSessionRecovery.origin(sessions[0], parts)).toBeUndefined()
+    expect(KiloSessionRecovery.origin(sessions[0], auto(sessions[0], two.token))).toBe(next.prompt.info.id)
+    KiloSessionRecovery.reset(sessions[0])
+    expect(KiloSessionRecovery.origin(sessions[0], auto(sessions[0], two.token))).toBeUndefined()
+  })
+
   test("detects narrow manual resume phrases without matching explicit targets", () => {
     for (const text of [
       "resume",

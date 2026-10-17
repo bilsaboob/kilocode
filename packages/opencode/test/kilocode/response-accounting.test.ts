@@ -20,6 +20,8 @@ import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Image } from "../../src/image/image"
 import { KiloResponse } from "../../src/kilocode/session/response"
+import { KiloAuth } from "../../src/kilocode/auth/authority"
+import { Env } from "../../src/env"
 import { KiloResponseAccounting } from "../../src/kilocode/session/response-accounting"
 import { KiloSessionRecovery } from "../../src/kilocode/session/recovery"
 import { Permission } from "../../src/permission"
@@ -156,6 +158,7 @@ const deps = Layer.mergeAll(
   Permission.defaultLayer,
   Plugin.defaultLayer,
   Config.defaultLayer,
+  Env.defaultLayer,
   Provider.defaultLayer,
   SessionStatus.defaultLayer,
   Image.defaultLayer,
@@ -230,6 +233,7 @@ const setup = (npm = "@ai-sdk/openai", options?: { pricing?: string; url?: strin
       time: { created: Date.now() },
       agent: "code",
       model: ref,
+      authAuthority: yield* KiloAuth.capture(ref),
     })
     const message: MessageV2.Assistant = {
       id: MessageID.ascending(),
@@ -625,7 +629,12 @@ it.instance(
 
 it.effect("terminal markers override 500 and rate-limit retry heuristics", () =>
   Effect.sync(() => {
-    for (const marker of ["RESPONSE_INCOMPLETE", "RESPONSE_FAILED", "RESPONSE_TERMINAL_MISSING"]) {
+    for (const marker of [
+      "RESPONSE_INCOMPLETE",
+      "RESPONSE_FAILED",
+      "RESPONSE_TERMINAL_MISSING",
+      "COMPACTION_RESOURCE_LIMIT",
+    ]) {
       const error = MessageV2.fromError(
         new APICallError({
           message: `[${marker}] rate limit: context length exceeded`,

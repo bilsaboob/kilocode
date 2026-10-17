@@ -16,6 +16,7 @@ export interface ConnectResponsesWebSocketOptions {
 }
 
 export interface StreamResponsesWebSocketOptions {
+  check?: () => Promise<void> // kilocode_change - explicit request-bound dispatch check
   socket: WebSocket
   body: Record<string, unknown>
   idleTimeout?: number
@@ -197,7 +198,7 @@ export function streamResponsesWebSocket(options: StreamResponsesWebSocketOption
           return
         }
         if (next) {
-          attach(next)
+          await attach(next) // kilocode_change
           return
         }
       } catch (error) {
@@ -268,7 +269,15 @@ export function streamResponsesWebSocket(options: StreamResponsesWebSocketOption
     options.onAbort?.(cancelError(reason))
   }
 
-  function attach(next: WebSocket) {
+  // kilocode_change start - admission is rechecked after asynchronous transport preparation.
+  async function attach(next: WebSocket) {
+    await options.check?.() // kilocode_change
+    if (completed) return // kilocode_change
+    if (options.signal?.aborted) {
+      onAbort()
+      return
+    }
+    // kilocode_change end
     cleanupSocket()
     socket = next
     socket.on("message", onMessage)
@@ -299,7 +308,7 @@ export function streamResponsesWebSocket(options: StreamResponsesWebSocketOption
           return
         }
 
-        attach(socket)
+        void attach(socket).catch(onError) // kilocode_change
       },
       cancel(reason) {
         onCancel(reason)

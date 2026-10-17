@@ -7,8 +7,9 @@ const input = z
   .object({
     root: z.string(),
     state: z.string(),
-    role: z.enum(["refresh", "hold", "set", "service", "logout", "relogin"]),
+    role: z.enum(["refresh", "hold", "set", "service", "logout", "relogin", "attempt"]),
     stale: z.boolean().optional(),
+    uncertain: z.boolean().optional(),
     provider: z.string().default("openai"),
     url: z.string().optional(),
   })
@@ -23,6 +24,7 @@ process.env.KILO_TEST_HOME = path.join(input.root, input.state, "home")
 process.env.KILO_DB = ":memory:"
 
 const { AuthStore, AuthStaleError } = await import("../../../src/kilocode/auth/store")
+const { AuthOutcome } = await import("../../../src/kilocode/auth/outcome")
 const { Global } = await import("@opencode-ai/core/global")
 const { Flock } = await import("@opencode-ai/core/util/flock")
 const file = path.join(Global.Path.data, "auth.json")
@@ -37,6 +39,23 @@ process.send?.("ready")
 await start
 
 try {
+  if (input.role === "attempt") {
+    const ticket = await store.begin("openai", 0)
+    const finish = input.stale ? new Promise<void>((resolve) => process.once("message", () => resolve())) : undefined
+    process.send?.("begun")
+    if (finish) {
+      await finish
+      await store.attempt(ticket, true).then(
+        () => {
+          throw new Error("Stale attempt was accepted")
+        },
+        (error) => {
+          if (!(error instanceof AuthStaleError)) throw error
+          process.send?.("stale")
+        },
+      )
+    }
+  }
   if (input.role === "hold") {
     await fs.mkdir(path.dirname(file), { recursive: true })
     await using _lock = await Flock.acquire("auth-store", {
@@ -106,9 +125,14 @@ try {
         process.send?.("stale")
         return undefined
       }
+      if (input.uncertain && AuthOutcome.known(error)?.reason === "exchange-uncertain") {
+        process.send?.("uncertain")
+        return undefined
+      }
       throw error
     })
-    if (input.stale ? next !== undefined : next?.access !== "next-access") throw new Error("Unexpected fixture result")
+    if (input.stale || input.uncertain ? next !== undefined : next?.access !== "next-access")
+      throw new Error("Unexpected fixture result")
   }
   process.send?.("done")
 } finally {

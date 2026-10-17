@@ -20,6 +20,10 @@ import { Bus } from "@/bus"
 import { Wildcard } from "@/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
+import { Env } from "@/env" // kilocode_change
+import { KiloAuth } from "@/kilocode/auth/authority" // kilocode_change
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
+import { AuthTransport } from "@/kilocode/auth/transport" // kilocode_change
 // kilocode_change start
 import { InstanceState } from "@/effect/instance-state"
 import { KiloSession } from "@/kilocode/session"
@@ -27,6 +31,7 @@ import { KiloLLM } from "@/kilocode/session/llm"
 import { KiloResponse } from "@/kilocode/session/response"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
+import { KiloCompactionBudget } from "@/kilocode/session/compaction-budget"
 import { SessionExport } from "@/kilocode/session-export"
 import { getActiveOrg } from "@/kilocode/session-export/eligibility"
 import { normalizeUsageForExport, observeFullStreamForExport } from "@/kilocode/session-export/llm"
@@ -41,6 +46,7 @@ const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
+  readonly authAuthority?: KiloAuth.Snapshot // kilocode_change
   user: MessageV2.User
   sessionID: string
   parentSessionID?: string
@@ -75,6 +81,7 @@ const live: Layer.Layer<
   Service,
   never,
   | Auth.Service
+  | Env.Service // kilocode_change
   | Config.Service
   | Provider.Service
   | Plugin.Service
@@ -87,14 +94,38 @@ const live: Layer.Layer<
   Effect.gen(function* () {
     const auth = yield* Auth.Service
     const config = yield* Config.Service
+    const env = yield* Env.Service // kilocode_change
     const provider = yield* Provider.Service
     const plugin = yield* Plugin.Service
     const perm = yield* Permission.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
     const bus = yield* Bus.Service // kilocode_change
+    const authentication = KiloAuth.bind({ config, env, provider, bus }) // kilocode_change
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      // kilocode_change start - pin and check before SDK resolution, not just before token renewal
+      const budget = yield* KiloCompactionBudget.dispatcher
+      const guard = yield* Effect.acquireRelease(
+        authentication.request({
+          snapshot: input.authAuthority ?? KiloAuth.selected(input.user, input.model),
+          model: input.model,
+          sessionID: input.sessionID,
+          messageID: input.user.id,
+          signal: input.abort,
+          dispatch: budget?.transport,
+          unsupported: budget
+            ? () => {
+                throw KiloCompactionBudget.error(
+                  "The custom model transport cannot verify physical dispatch accounting",
+                )
+              }
+            : undefined,
+        }),
+        (guard) => Effect.sync(() => guard.close()),
+      )
+      input = { ...input, abort: guard.signal }
+      // kilocode_change end
       const l = log
         .clone()
         .tag("providerID", input.model.providerID)
@@ -220,7 +251,13 @@ const live: Layer.Layer<
           bus,
         })
       input.abort.throwIfAborted()
-      const prepared = { ...base, messages, params: { ...base.params, maxOutputTokens } }
+      const prepared = {
+        ...base,
+        messages,
+        params: { ...base.params, maxOutputTokens },
+        tools: AuthTransport.tools(base.tools, guard),
+        headers: { ...base.headers, [AuthRequest.header]: guard.id },
+      }
       // kilocode_change end
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
@@ -366,6 +403,7 @@ const live: Layer.Layer<
           providerOptions: prepared.params.options,
           headers: prepared.headers,
           abort: input.abort,
+          guard, // kilocode_change
         })
         if (native.type === "supported") {
           yield* Effect.logInfo("llm runtime selected").pipe(
@@ -377,7 +415,7 @@ const live: Layer.Layer<
           )
           return {
             type: "native" as const,
-            stream: native.stream,
+            stream: AuthTransport.stream(native.stream, guard), // kilocode_change
           }
         }
         yield* Effect.logInfo("llm runtime selected").pipe(
@@ -444,6 +482,20 @@ const live: Layer.Layer<
         model: wrapLanguageModel({
           model: language,
           middleware: [
+            // kilocode_change start - model retries must recheck the admitted source too
+            {
+              specificationVersion: "v3" as const,
+              wrapStream: async ({ doStream }) => {
+                await guard.check()
+                return doStream()
+              },
+              wrapGenerate: async ({ doGenerate }) => {
+                await guard.check()
+                return doGenerate()
+              },
+            },
+            // kilocode_change end
+            KiloCompactionBudget.middleware(budget), // kilocode_change - every SDK retry gets a durable reservation
             KiloResponse.middleware(input.responses!), // kilocode_change - observe before SDK tool/abort filtering
             {
               specificationVersion: "v3" as const,
@@ -468,9 +520,10 @@ const live: Layer.Layer<
       })
       // kilocode_change end
       // kilocode_change start - capture eligible session export request completion off the stream path
-      if (!exportable) return { type: "ai-sdk" as const, result }
+      if (!exportable) return { type: "ai-sdk" as const, result, guard }
       return {
         type: "ai-sdk" as const,
+        guard,
         result: {
           fullStream: observeFullStreamForExport(result.fullStream, {
             sessionId: input.sessionID,
@@ -508,22 +561,26 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
-              // kilocode_change start - missing terminal is never a successful generation
-              Stream.concat(
-                Stream.unwrap(
-                  Effect.sync(() => {
-                    const error = responses.end()
-                    return error ? Stream.fail(error) : Stream.empty
-                  }),
+            // kilocode_change start - retain authority and terminal failures through SDK adaptation.
+            return AuthTransport.stream(
+              Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+                e instanceof Error ? e : new Error(String(e)),
+              ).pipe(
+                Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+                Stream.flatMap((events) => Stream.fromIterable(events)),
+                // A missing terminal is never a successful generation.
+                Stream.concat(
+                  Stream.unwrap(
+                    Effect.sync(() => {
+                      const error = responses.end()
+                      return error ? Stream.fail(error) : Stream.empty
+                    }),
+                  ),
                 ),
               ),
-              // kilocode_change end
+              result.guard,
             )
+            // kilocode_change end
           }),
         ),
       )
@@ -532,12 +589,17 @@ const live: Layer.Layer<
   }),
 )
 
-export const layer = live.pipe(Layer.provide(Permission.defaultLayer), Layer.provide(Bus.layer)) // kilocode_change
+export const layer = live.pipe(
+  Layer.provide(Permission.defaultLayer),
+  Layer.provide(Bus.layer),
+  Layer.provide(Env.defaultLayer), // kilocode_change
+) // kilocode_change
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(Auth.defaultLayer),
     Layer.provide(Config.defaultLayer),
+    Layer.provide(Env.defaultLayer), // kilocode_change
     Layer.provide(Provider.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
     Layer.provide(

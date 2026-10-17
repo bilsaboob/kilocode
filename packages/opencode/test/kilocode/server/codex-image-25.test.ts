@@ -20,6 +20,7 @@ import {
 } from "../../../src/server/routes/instance/httpapi/middleware/workspace-routing"
 import { ProviderTest } from "../../fake/provider"
 import { testEffect } from "../../lib/effect"
+import { KiloRuntimeHttp } from "../../../src/kilocode/server/httpapi/runtime"
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNc8AAAAASUVORK5CYII="
 const api = HttpApi.make("opencode-instance").addHttpApi(CodexImageApi).addHttpApi(CodexImage25Api)
@@ -31,6 +32,7 @@ function suite(credentials: Auth.Info | undefined, fetcher?: CodexImageFetch) {
     HttpApiBuilder.layer(api).pipe(
       Layer.provide([codexImageHandlers, codexImage25Handlers]),
       Layer.provide(schemaErrorLayer),
+      Layer.provide(KiloRuntimeHttp.layer),
       Layer.provide([
         Layer.mock(Auth.Service)({ get: () => Effect.succeed(credentials) }),
         Layer.mock(Session.Service)({}),

@@ -24,6 +24,8 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { SessionNetwork } from "./network" // kilocode_change
 import { CodexAuthExpiredError } from "@/kilocode/provider/codex-refresh" // kilocode_change
 import { AuthSourceError, AuthStaleError, AuthStorageError } from "@/kilocode/auth/store" // kilocode_change
+import { AuthSource } from "@/kilocode/auth/source" // kilocode_change - registers session.auth before event schemas
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 import { KiloSessionMessageOrder } from "@/kilocode/session/message-order" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
@@ -380,6 +382,8 @@ export const User = Schema.Struct({
   // kilocode_change start
   editorContext: Schema.optional(EditorContext),
   contextPolicy: Schema.optional(KiloContextPolicy.Snapshot),
+  authAuthority: Schema.optional(AuthSource.Snapshot),
+  authAuthorities: Schema.optional(Schema.Record(Schema.String, AuthSource.Snapshot)),
   // kilocode_change end
 }).annotate({ identifier: "UserMessage" })
 export type User = Types.DeepMutable<Schema.Schema.Type<typeof User>>
@@ -704,6 +708,7 @@ export function stripMessageMetadata(info: Info): Info {
 const info = (row: typeof MessageTable.$inferSelect) =>
   stripMessageMetadata({
     ...row.data,
+    ...(row.data.role === "user" ? AuthSource.restore(row.data) : {}), // kilocode_change - restore readonly authority after persistence/decoding
     // kilocode_change start - restore the format codec after the JSON storage round trip
     ...(row.data.role === "user" && row.data.format
       ? { format: Schema.decodeUnknownSync(Format)(row.data.format) }
@@ -1273,13 +1278,25 @@ export function fromError(
         { cause: e },
       ).toObject()
     case e instanceof CodexAuthExpiredError: // kilocode_change start
+    case e instanceof AuthOutcome.Failure:
     case e instanceof AuthSourceError:
     case e instanceof AuthStaleError:
     case e instanceof AuthStorageError:
       return new AuthError(
         {
-          providerID: e instanceof CodexAuthExpiredError ? "openai" : ctx.providerID,
+          providerID:
+            e instanceof AuthOutcome.Failure && e.providerID
+              ? ProviderID.make(e.providerID)
+              : e instanceof CodexAuthExpiredError
+                ? "openai"
+                : ctx.providerID,
           message: e.message,
+          ...(AuthOutcome.known(e) && {
+            reason: AuthOutcome.known(e)!.reason,
+            state: AuthOutcome.known(e)!.state,
+            action: AuthOutcome.known(e)!.action,
+          }),
+          ...(e instanceof AuthOutcome.Failure && e.source && { source: e.source }),
         },
         { cause: e },
       ).toObject() // kilocode_change end

@@ -15,6 +15,8 @@ import { Session } from "../../src/session/session"
 import { SessionRetry } from "../../src/session/retry"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { KiloSessionRecovery } from "../../src/kilocode/session/recovery"
+import { KiloAuth } from "../../src/kilocode/auth/authority"
+import { Env } from "../../src/env"
 import { TestInstance, requireInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, TestLLMServer } from "../lib/llm-server"
@@ -26,6 +28,7 @@ const it = testEffect(
     LLM.defaultLayer,
     Agent.defaultLayer,
     Config.defaultLayer,
+    Env.defaultLayer,
     Provider.defaultLayer,
     AppFileSystem.defaultLayer,
     TestLLMServer.layer,
@@ -301,6 +304,7 @@ for (const scenario of ["absent", "user-tools-disabled", "side-request"]) {
           time: { created: Date.now() },
           agent: "code",
           model: ref,
+          authAuthority: yield* KiloAuth.capture(ref),
           format: { type: "json_schema", schema, retryCount: 0 },
           tools: scenario === "user-tools-disabled" ? { StructuredOutput: false } : undefined,
         }

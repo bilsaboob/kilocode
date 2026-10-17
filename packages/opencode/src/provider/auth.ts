@@ -2,6 +2,8 @@ import type { AuthOAuthResult, Hooks } from "@kilocode/plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Auth } from "@/auth"
 import { InstanceState } from "@/effect/instance-state"
+import { AuthStore } from "@/kilocode/auth/store" // kilocode_change
+import { AuthAttempt } from "@/kilocode/auth/attempt" // kilocode_change
 import { optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { Plugin } from "../plugin"
 import { ProviderID } from "./schema"
@@ -52,6 +54,7 @@ export const Methods = Schema.Record(Schema.String, Schema.Array(Method))
 export type Methods = typeof Methods.Type
 
 export class Authorization extends Schema.Class<Authorization>("ProviderAuthAuthorization")({
+  attemptID: Schema.optional(Schema.String), // kilocode_change
   url: Schema.String,
   method: Schema.Literals(["auto", "code"]),
   instructions: Schema.String,
@@ -64,6 +67,7 @@ export const AuthorizeInput = Schema.Struct({
 export type AuthorizeInput = Schema.Schema.Type<typeof AuthorizeInput>
 
 export const CallbackInput = Schema.Struct({
+  attemptID: Schema.optional(Schema.String), // kilocode_change
   method: Schema.Finite.annotate({ description: "Auth method index" }),
   code: Schema.optional(Schema.String).annotate({ description: "OAuth authorization code" }),
 })
@@ -103,7 +107,7 @@ export interface Interface {
 
 interface State {
   hooks: Record<ProviderID, Hook>
-  pending: Map<ProviderID, AuthOAuthResult>
+  pending: Map<string, { ticket: AuthStore.Attempt; result?: AuthOAuthResult }> // kilocode_change
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ProviderAuth") {}
@@ -129,7 +133,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | 
                 : Result.failVoid,
             ),
           ),
-          pending: new Map<ProviderID, AuthOAuthResult>(),
+          pending: new Map<string, { ticket: AuthStore.Attempt; result?: AuthOAuthResult }>(), // kilocode_change
         }
       }),
     )
@@ -171,7 +175,8 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | 
       input: { providerID: ProviderID } & AuthorizeInput,
     ) {
       const { hooks, pending } = yield* InstanceState.get(state)
-      const method = hooks[input.providerID].methods[input.method]
+      const method = hooks[input.providerID]?.methods[input.method] // kilocode_change
+      if (!method) return yield* new OauthMissing({ providerID: input.providerID }) // kilocode_change
       if (method.type !== "oauth") return
 
       if (method.prompts && input.inputs) {
@@ -183,9 +188,18 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | 
         }
       }
 
+      // kilocode_change start - newest-start authority precedes the first provider await
+      const ticket = yield* Effect.tryPromise({
+        try: () => AuthStore.disk.begin(input.providerID, input.method),
+        catch: () => new OauthCallbackFailed({}),
+      })
+      pending.set(ticket.id, { ticket })
       const result = yield* Effect.promise(() => method.authorize(input.inputs))
-      pending.set(input.providerID, result)
+      yield* Effect.tryPromise({ try: () => AuthStore.disk.attempt(ticket), catch: () => new OauthCallbackFailed({}) })
+      pending.set(ticket.id, { ticket, result })
+      // kilocode_change end
       return {
+        attemptID: ticket.id, // kilocode_change
         url: result.url,
         method: result.method,
         instructions: result.instructions,
@@ -194,35 +208,37 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | 
 
     const callback = Effect.fn("ProviderAuth.callback")(function* (input: { providerID: ProviderID } & CallbackInput) {
       const pending = (yield* InstanceState.get(state)).pending
-      const match = pending.get(input.providerID)
-      if (!match) return yield* new OauthMissing({ providerID: input.providerID })
+      // kilocode_change start - legacy callbacks cannot select a superseded latest attempt
+      const entry = input.attemptID
+        ? pending.get(input.attemptID)
+        : [...pending.values()].find(
+            (entry) => entry.ticket.snapshot.provider === input.providerID && entry.ticket.revision === 1,
+          )
+      if (
+        !entry ||
+        entry.ticket.snapshot.provider !== input.providerID ||
+        entry.ticket.method !== input.method ||
+        !entry.result
+      )
+        return yield* new OauthMissing({ providerID: input.providerID })
+      const match = entry.result
+      // kilocode_change end
       if (match.method === "code" && !input.code) {
         return yield* new OauthCodeMissing({ providerID: input.providerID })
       }
 
-      const result = yield* Effect.promise(() =>
-        match.method === "code" ? match.callback(input.code!) : match.callback(),
-      )
-      if (!result || result.type !== "success") return yield* new OauthCallbackFailed({})
-
-      if ("key" in result) {
-        yield* auth.set(input.providerID, {
-          type: "api",
-          key: result.key,
-          ...(result.metadata ? { metadata: result.metadata } : {}),
-        })
-      }
-
-      if ("refresh" in result) {
-        const { type: _, provider: __, refresh, access, expires, ...extra } = result
-        yield* auth.set(input.providerID, {
-          type: "oauth",
-          access,
-          refresh,
-          expires,
-          ...extra,
-        })
-      }
+      // kilocode_change start - consume before exchange and persist only under the original authority
+      pending.delete(entry.ticket.id)
+      const saved = yield* Effect.tryPromise({
+        try: (signal) =>
+          AuthAttempt.invoke({
+            ticket: entry.ticket,
+            signal,
+            callback: () => (match.method === "code" ? match.callback(input.code!) : match.callback()),
+          }),
+        catch: () => new OauthCallbackFailed({}),
+      })
+      // kilocode_change end
 
       // kilocode_change start - Update telemetry identity on Kilo auth
       if (input.providerID === "kilo") {
@@ -234,7 +250,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | 
         }
       }
       Telemetry.trackAuthSuccess(input.providerID)
-      yield* cache.clear(input.providerID)
+      yield* cache.clear(saved)
       // kilocode_change end
     })
 

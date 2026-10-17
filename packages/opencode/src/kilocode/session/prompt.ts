@@ -473,7 +473,7 @@ export namespace KiloSessionPrompt {
   export function stripHistoricalMedia(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
     const pending = KiloStructuredCompaction.pending(msgs)?.info.id
     const cutoff = msgs.findLastIndex(
-      (m) => m.info.role === "user" && m.parts.some((p) => p.type !== "text" || !p.synthetic),
+      (m) => m.info.role === "user" && m.parts.some((p) => p.type !== "text" || (!p.synthetic && !p.ignored)),
     )
     if (cutoff <= 0) return msgs
     return msgs.map((msg, idx) => {

@@ -14,6 +14,7 @@ import * as Clipboard from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
 import { isConsoleManagedProvider } from "@tui/util/provider-origin"
 import * as KiloProvider from "@/kilocode/cli/cmd/tui/component/dialog-provider" // kilocode_change
+import { useAuthRefresh } from "@/kilocode/tui/auth-refresh" // kilocode_change
 import { useConnected } from "./use-connected"
 import { useBindings } from "../keymap"
 
@@ -252,6 +253,7 @@ function AutoMethod(props: AutoMethodProps) {
   const sdk = useSDK()
   const dialog = useDialog()
   const sync = useSync()
+  const auth = useAuthRefresh(sync) // kilocode_change
   const toast = useToast()
 
   useBindings(() => ({
@@ -275,7 +277,9 @@ function AutoMethod(props: AutoMethodProps) {
     const result = await sdk.client.provider.oauth.callback({
       providerID: props.providerID,
       method: props.index,
+      attemptID: props.authorization.attemptID, // kilocode_change
     })
+    if (!auth.current()) return // kilocode_change
     if (result.error) {
       toast.show({
         variant: "error",
@@ -287,8 +291,7 @@ function AutoMethod(props: AutoMethodProps) {
       dialog.clear()
       return
     }
-    await sdk.client.instance.dispose()
-    await sync.bootstrap()
+    if (!(await auth.refresh())) return // kilocode_change
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
 
@@ -324,6 +327,7 @@ function CodeMethod(props: CodeMethodProps) {
   const { theme } = useTheme()
   const sdk = useSDK()
   const sync = useSync()
+  const auth = useAuthRefresh(sync) // kilocode_change
   const dialog = useDialog()
   const [error, setError] = createSignal(false)
 
@@ -332,14 +336,16 @@ function CodeMethod(props: CodeMethodProps) {
       title={props.title}
       placeholder="Authorization code"
       onConfirm={async (value) => {
+        if (!auth.current()) return // kilocode_change
         const { error } = await sdk.client.provider.oauth.callback({
           providerID: props.providerID,
           method: props.index,
+          attemptID: props.authorization.attemptID, // kilocode_change
           code: value,
         })
+        if (!auth.current()) return // kilocode_change
         if (!error) {
-          await sdk.client.instance.dispose()
-          await sync.bootstrap()
+          if (!(await auth.refresh())) return // kilocode_change
           dialog.replace(() => <DialogModel providerID={props.providerID} />)
           return
         }
@@ -368,6 +374,7 @@ function ApiMethod(props: ApiMethodProps) {
   const dialog = useDialog()
   const sdk = useSDK()
   const sync = useSync()
+  const auth = useAuthRefresh(sync) // kilocode_change
   const toast = useToast()
   const { theme } = useTheme()
 
@@ -379,6 +386,7 @@ function ApiMethod(props: ApiMethodProps) {
       placeholder={KiloProvider.apiKeyPlaceholder(props.providerID)} // kilocode_change
       description={KiloProvider.renderApiDescription(props.providerID, theme)} // kilocode_change
       onConfirm={async (value) => {
+        if (!auth.current()) return // kilocode_change
         const key = value.trim() || (optionalApiKey ? KiloProvider.LOCAL_API_KEY_PLACEHOLDER : "") // kilocode_change
         if (!key) return // kilocode_change
         await sdk.client.auth.set({
@@ -389,8 +397,7 @@ function ApiMethod(props: ApiMethodProps) {
             ...(props.metadata ? { metadata: props.metadata } : {}),
           },
         })
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
+        if (!(await auth.refresh())) return // kilocode_change
         if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
           toast.show({
             variant: "info",

@@ -11,6 +11,8 @@ import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { type LanguageModelV3 } from "@ai-sdk/provider"
 import * as ModelsDev from "./models" // kilocode_change - assemble dynamic Kilo models around upstream core catalog
 import { Auth } from "../auth"
+import { AuthCache } from "@/kilocode/auth/cache" // kilocode_change
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
 import { Env } from "../env"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { iife } from "@/util/iife"
@@ -1077,6 +1079,9 @@ export interface Interface {
 }
 
 interface State {
+  auth: Map<string, string> // kilocode_change
+  reload: CustomLoader // kilocode_change
+  normalize: (provider: Info, cfg: Config.Info) => Info // kilocode_change
   models: Map<string, LanguageModelV3>
   providers: Record<ProviderID, Info>
   catalog: Record<ProviderID, Info>
@@ -1337,9 +1342,13 @@ export const layer = Layer.effect(
         }
 
         // extend database from config
-        for (const [providerID, provider] of configProviders) {
-          if (!provider) continue // kilocode_change - null entries are transient delete sentinels
-          const existing = database[providerID]
+        // kilocode_change start - share normalization with provider-scoped auth reloads
+        const configure = (
+          providerID: string,
+          provider: NonNullable<NonNullable<Config.Info["provider"]>[string]>,
+          existing?: Info,
+        ) => {
+          // kilocode_change end
           const parsed: Info = {
             id: ProviderID.make(providerID),
             name: provider.name ?? existing?.name ?? providerID,
@@ -1430,8 +1439,13 @@ export const layer = Layer.effect(
             )
             parsed.models[modelID] = parsedModel
           }
-          database[providerID] = parsed
+          return { ...existing, ...parsed } // kilocode_change - retain provider metadata
         }
+        // kilocode_change start
+        for (const [providerID, provider] of configProviders) {
+          if (provider) database[providerID] = configure(providerID, provider, database[providerID])
+        }
+        // kilocode_change end
 
         // kilocode_change start - load auths before env so OAuth plugins can override inherited credentials
         const auths = yield* auth.all().pipe(Effect.orDie)
@@ -1492,8 +1506,10 @@ export const layer = Layer.effect(
         // kilocode_change start - resolve env once for patchCustomLoaderResult (azure env fallback)
         const kiloEnv = yield* env.all()
         // kilocode_change end
-        for (const [id, fn] of Object.entries({ ...custom(dep), ...kiloCustomLoaders(dep) })) {
-          // kilocode_change
+        const loaders = { ...custom(dep), ...kiloCustomLoaders(dep) } // kilocode_change
+        // kilocode_change start - reuse the normalized loader registry for scoped reloads.
+        for (const [id, fn] of Object.entries(loaders)) {
+          // kilocode_change end
           const providerID = ProviderID.make(id)
           if (disabled.has(providerID)) continue
           const data = database[providerID]
@@ -1598,6 +1614,18 @@ export const layer = Layer.effect(
         }
 
         return {
+          auth: new Map<string, string>(), // kilocode_change
+          // kilocode_change start
+          normalize: (provider: Info, cfg: Config.Info) =>
+            cfg.provider?.[provider.id] ? configure(provider.id, cfg.provider[provider.id]!, provider) : provider,
+          reload: Effect.fnUntraced(function* (provider: Info) {
+            const fn = loaders[provider.id]
+            if (!fn) return { autoload: false }
+            const result = yield* fn(provider)
+            if (result) patchCustomLoaderResult(provider.id, result, yield* env.all())
+            return result
+          }),
+          // kilocode_change end
           models: languages,
           providers,
           catalog,
@@ -1609,9 +1637,40 @@ export const layer = Layer.effect(
     )
     yield* ModelsRefresh.watch(state) // kilocode_change
 
-    const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
+    // kilocode_change start - replace only this provider's credential and SDK caches
+    const reconcile = Effect.fn("Provider.auth")(function* (id: ProviderID) {
+      const current = yield* InstanceState.get(state)
+      const bridge = yield* EffectBridge.make()
+      yield* AuthCache.reconcile({
+        id,
+        state: current,
+        config,
+        env,
+        auth,
+        plugin,
+        bridge,
+        normalize: current.normalize,
+        custom: current.reload,
+        experimental: runtimeFlags.enableExperimentalModels,
+        publish: (result) => {
+          delete current.modelLoaders[id]
+          delete current.varsLoaders[id]
+          if (result?.getModel) current.modelLoaders[id] = result.getModel
+          if (result?.vars) current.varsLoaders[id] = result.vars
+        },
+      }).pipe(Effect.orDie)
+    })
+    // kilocode_change end
+
+    // kilocode_change start - activate newly authenticated providers without replacing the instance
+    const list = Effect.fn("Provider.list")(function* () {
+      const current = yield* InstanceState.get(state)
+      return yield* AuthCache.list({ state: current, config, env, auth }, reconcile)
+    })
+    // kilocode_change end
 
     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
+      const save = AuthCache.writer(s, model.providerID) // kilocode_change - fence delayed SDK initialization
       try {
         using _ = log.time("getSDK", {
           providerID: model.providerID,
@@ -1668,13 +1727,18 @@ export const layer = Layer.effect(
             ...model.headers,
           }
 
-        const key = Hash.fast(
-          JSON.stringify({
-            providerID: model.providerID,
-            npm: model.api.npm,
-            options,
-          }),
-        )
+        // kilocode_change start - provider-scoped cache invalidation
+        const key =
+          model.providerID +
+          ":" +
+          Hash.fast(
+            JSON.stringify({
+              providerID: model.providerID,
+              npm: model.api.npm,
+              options,
+            }),
+          )
+        // kilocode_change end
         const existing = s.sdk.get(key)
         if (existing) return existing
 
@@ -1721,11 +1785,17 @@ export const layer = Layer.effect(
 
           // kilocode_change start - clear connection-phase timeout once headers arrive
           try {
-            const res = await fetchFn(input, {
-              ...opts,
-              // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-              timeout: false,
-            }).finally(() => headerTimeoutCtl?.clear())
+            const res = await AuthRequest.dispatch(
+              fetchFn,
+              input,
+              {
+                // kilocode_change - explicit request-bound guard, including transport retries
+                ...opts,
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              },
+              model.providerID,
+            ).finally(() => headerTimeoutCtl?.clear()) // kilocode_change
             timeout.clear()
             if (!chunkAbortCtl) return res
             return wrapSSE(res, chunkTimeout, chunkAbortCtl)
@@ -1747,7 +1817,7 @@ export const layer = Layer.effect(
             name: model.providerID,
             ...options,
           })
-          s.sdk.set(key, loaded)
+          save(s.sdk, key, loaded) // kilocode_change
           return loaded as SDK
         }
 
@@ -1771,18 +1841,22 @@ export const layer = Layer.effect(
           name: model.providerID,
           ...options,
         })
-        s.sdk.set(key, loaded)
+        save(s.sdk, key, loaded) // kilocode_change
         return loaded as SDK
       } catch (e) {
         throw new InitError({ providerID: model.providerID, cause: e })
       }
     }
 
-    const getProvider = Effect.fn("Provider.getProvider")((providerID: ProviderID) =>
-      InstanceState.use(state, (s) => s.providers[providerID]),
-    )
+    // kilocode_change start
+    const getProvider = Effect.fn("Provider.getProvider")(function* (providerID: ProviderID) {
+      yield* reconcile(providerID)
+      return yield* InstanceState.use(state, (s) => s.providers[providerID])
+    })
+    // kilocode_change end
 
     const getModel = Effect.fn("Provider.getModel")(function* (providerID: ProviderID, modelID: ModelID) {
+      yield* reconcile(providerID) // kilocode_change
       const s = yield* InstanceState.get(state)
       const provider = s.providers[providerID]
       if (!provider) {
@@ -1809,8 +1883,10 @@ export const layer = Layer.effect(
     })
 
     const getLanguage = Effect.fn("Provider.getLanguage")(function* (model: Model) {
+      yield* reconcile(model.providerID) // kilocode_change
       const s = yield* InstanceState.get(state)
       const envs = yield* env.all()
+      const save = AuthCache.writer(s, model.providerID) // kilocode_change - fence delayed model loaders
       const key = `${model.providerID}/${model.id}`
       if (s.models.has(key)) return s.models.get(key)!
 
@@ -1824,7 +1900,7 @@ export const layer = Layer.effect(
                 ...model.options,
               })
             : sdk.languageModel(model.api.id)
-          s.models.set(key, language)
+          save(s.models, key, language) // kilocode_change
           return language
         },
         (cause) =>

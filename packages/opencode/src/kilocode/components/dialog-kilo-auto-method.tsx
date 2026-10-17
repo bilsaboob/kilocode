@@ -14,11 +14,12 @@ import { useToast } from "@tui/ui/toast"
 import { Link } from "@tui/ui/link"
 import * as Clipboard from "@tui/util/clipboard"
 import { DialogKiloOrganization } from "./dialog-kilo-organization.js"
+import type { ProviderAuthAuthorization } from "@kilocode/sdk/v2"
+import { useAuthRefresh } from "../tui/auth-refresh"
 
 // These types are OpenCode-internal and imported at runtime
 type UseSDK = any
 type UseTheme = any
-type ProviderAuthAuthorization = any
 type DialogModel = any
 
 interface KiloAutoMethodProps {
@@ -36,6 +37,7 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
   const sdk = props.useSDK()
   const dialog = useDialog()
   const sync = useSync()
+  const auth = useAuthRefresh(sync)
   const toast = useToast()
   const [status, setStatus] = createSignal<"waiting" | "fetching" | "error">("waiting")
   const [tokenForOrgSelection, setTokenForOrgSelection] = createSignal<string | null>(null)
@@ -55,7 +57,9 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
       const result = await sdk.client.provider.oauth.callback({
         providerID: props.providerID,
         method: props.index,
+        attemptID: props.authorization.attemptID,
       })
+      if (!auth.current()) return
 
       if (result.error) {
         dialog.clear()
@@ -67,6 +71,7 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
       // Step 2: Fetch profile using the new server endpoint
       // This endpoint uses the stored auth credentials to fetch profile
       const profileResponse = await sdk.client.kilo.profile()
+      if (!auth.current()) return
 
       if (profileResponse.error || !profileResponse.data) {
         // Couldn't fetch profile - fallback to personal account
@@ -79,8 +84,7 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
       if (profile.organizations && profile.organizations.length > 0) {
         // Has organizations - show selection dialog
         // Bootstrap first to ensure sync is up to date
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
+        if (!(await auth.refresh())) return
 
         dialog.replace(() => (
           <DialogKiloOrganization
@@ -94,11 +98,11 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
         ))
       } else {
         // No organizations - proceed with personal account
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
+        if (!(await auth.refresh())) return
         dialog.replace(() => <props.DialogModel providerID={props.providerID} />)
       }
     } catch (error) {
+      if (!auth.current()) return
       if (error instanceof DOMException && error.name === "AbortError") return
 
       // Error fetching profile - fallback to personal account
@@ -112,13 +116,14 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
 
       // Small delay to show the warning, then proceed
       await new Promise((resolve) => setTimeout(resolve, 1500))
+      if (!auth.current()) return
 
       try {
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
+        if (!(await auth.refresh())) return
       } catch (e) {
+        if (!auth.current()) return
         if (e instanceof DOMException && e.name === "AbortError") return
-        console.warn("Failed to reset state during fallback:", e)
+        console.warn("Failed to refresh state during fallback:", e)
       }
       dialog.replace(() => <props.DialogModel providerID={props.providerID} />)
     }

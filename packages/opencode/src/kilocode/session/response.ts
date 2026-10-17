@@ -12,6 +12,9 @@ export namespace KiloResponse {
     finish?: FinishReason
     error?: { code?: string; message?: string; param?: string; type?: string }
     usage?: Usage
+    measurement?: Usage
+    measurementInvalid?: boolean
+    observedAt?: number
     metadata?: ProviderMetadata
     observed: boolean
     finished: boolean
@@ -30,7 +33,7 @@ export namespace KiloResponse {
     return [record(item?.data)?.message, item?.message].some(
       (message) =>
         typeof message === "string" &&
-        /\[(?:RESPONSE_(?:INCOMPLETE|FAILED|TERMINAL_MISSING)|STRUCTURED_OUTPUT_(?:UNAVAILABLE|INCOMPLETE)|COMPACTION_INCOMPLETE)\]/.test(
+        /\[(?:RESPONSE_(?:INCOMPLETE|FAILED|TERMINAL_MISSING)|STRUCTURED_OUTPUT_(?:UNAVAILABLE|INCOMPLETE)|COMPACTION_(?:INCOMPLETE|RESOURCE_LIMIT))\]/.test(
           message,
         ),
     )
@@ -41,18 +44,23 @@ export namespace KiloResponse {
     if (!item) return undefined
     const input = record(item.inputTokens)
     const output = record(item.outputTokens)
-    const fields = {
-      inputTokens: number(raw ? item.input_tokens : (input?.total ?? item.inputTokens)),
-      outputTokens: number(raw ? item.output_tokens : (output?.total ?? item.outputTokens)),
-      totalTokens: number(raw ? item.total_tokens : item.totalTokens),
-      reasoningTokens: number(
-        raw ? record(item.output_tokens_details)?.reasoning_tokens : (output?.reasoning ?? item.reasoningTokens),
-      ),
-      cacheReadInputTokens: number(
-        raw ? record(item.input_tokens_details)?.cached_tokens : (input?.cacheRead ?? item.cacheReadInputTokens),
-      ),
-      cacheWriteInputTokens: number(input?.cacheWrite ?? item.cacheWriteInputTokens),
+    const values = {
+      inputTokens: raw ? item.input_tokens : input ? input.total : item.inputTokens,
+      outputTokens: raw ? item.output_tokens : output ? output.total : item.outputTokens,
+      totalTokens: raw ? item.total_tokens : item.totalTokens,
+      reasoningTokens: raw
+        ? record(item.output_tokens_details)?.reasoning_tokens
+        : (output?.reasoning ?? item.reasoningTokens),
+      cacheReadInputTokens: raw
+        ? record(item.input_tokens_details)?.cached_tokens
+        : (input?.cacheRead ?? item.cacheReadInputTokens),
+      cacheWriteInputTokens: input?.cacheWrite ?? item.cacheWriteInputTokens,
     }
+    const invalid = Object.values(values).some((value) => value != null && number(value) === undefined)
+    const fields = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, number(value)])) as Record<
+      keyof typeof values,
+      number | undefined
+    >
     const metadata = record(item.providerMetadata)
     const details =
       record(item.cost_details) ??
@@ -61,16 +69,55 @@ export namespace KiloResponse {
       record(record(metadata?.openai)?.cost_details) ??
       record(record(metadata?.anthropic)?.cost_details)
     const cost = amount(details?.upstream_inference_cost)
-    if (cost === undefined && Object.values(fields).every((value) => value === undefined)) return undefined
-    return new Usage({
-      ...fields,
-      providerMetadata: cost === undefined ? undefined : { aiSdk: { cost_details: { upstream_inference_cost: cost } } },
-      totalTokens:
-        fields.totalTokens ??
-        (fields.inputTokens !== undefined && fields.outputTokens !== undefined
-          ? fields.inputTokens + fields.outputTokens
-          : undefined),
-    })
+    const known = cost !== undefined || Object.values(fields).some((value) => value !== undefined)
+    if (!known && !invalid) return undefined
+    return {
+      invalid,
+      measurement: new Usage(fields),
+      value: known
+        ? new Usage({
+            ...fields,
+            providerMetadata:
+              cost === undefined ? undefined : { aiSdk: { cost_details: { upstream_inference_cost: cost } } },
+            totalTokens:
+              fields.totalTokens ??
+              (fields.inputTokens !== undefined && fields.outputTokens !== undefined
+                ? fields.inputTokens + fields.outputTokens
+                : undefined),
+          })
+        : undefined,
+    }
+  }
+
+  function provenance(value?: Usage) {
+    const openai = record(value?.providerMetadata?.openai)
+    if (openai)
+      return {
+        inputTokens: openai.prompt_tokens,
+        outputTokens: openai.completion_tokens,
+        totalTokens: openai.total_tokens,
+        cacheReadInputTokens: record(openai.prompt_tokens_details)?.cached_tokens,
+        reasoningTokens: record(openai.completion_tokens_details)?.reasoning_tokens,
+      }
+    const anthropic = record(value?.providerMetadata?.anthropic)
+    if (anthropic)
+      return {
+        inputTokens: number(anthropic.input_tokens) === undefined ? anthropic.input_tokens : value?.inputTokens,
+        outputTokens: anthropic.output_tokens,
+        cacheReadInputTokens: anthropic.cache_read_input_tokens,
+        cacheWriteInputTokens: anthropic.cache_creation_input_tokens,
+      }
+    const google = record(value?.providerMetadata?.google)
+    if (google)
+      return {
+        inputTokens: google.promptTokenCount,
+        outputTokens:
+          number(google.candidatesTokenCount) === undefined ? google.candidatesTokenCount : value?.outputTokens,
+        totalTokens: google.totalTokenCount,
+        cacheReadInputTokens: google.cachedContentTokenCount,
+        reasoningTokens: google.thoughtsTokenCount,
+      }
+    return record(value?.providerMetadata?.bedrock)
   }
 
   export function error(receipt: Receipt) {
@@ -106,7 +153,7 @@ export namespace KiloResponse {
     }
   }
 
-  export function collector() {
+  export function collector(opts: { now?: () => number } = {}) {
     const receipts: Receipt[] = []
     let stopped = false
     const begin = (responses = false) => {
@@ -122,11 +169,8 @@ export namespace KiloResponse {
       return receipt
     }
     const current = () => receipts.at(-1) ?? begin()
-    const retain = (receipt: Receipt, value: unknown, raw = false) => {
-      const next = usage(value, raw)
-      if (!next) return
-      const prior = receipt.usage
-      receipt.usage = prior
+    const merge = (prior: Usage | undefined, next: Usage) =>
+      prior
         ? new Usage({
             inputTokens: prior.inputTokens ?? next.inputTokens,
             outputTokens: prior.outputTokens ?? next.outputTokens,
@@ -137,6 +181,14 @@ export namespace KiloResponse {
             providerMetadata: prior.providerMetadata ?? next.providerMetadata,
           })
         : next
+    const retain = (receipt: Receipt, value: unknown, raw = false, reported = true) => {
+      const next = usage(value, raw)
+      if (!next) return
+      if (reported && next.invalid) receipt.measurementInvalid = true
+      if (next.value) receipt.usage = merge(receipt.usage, next.value)
+      if (!reported || Object.values(next.measurement).every((value) => number(value) === undefined)) return
+      receipt.measurement = merge(receipt.measurement, next.measurement)
+      receipt.observedAt ??= (opts.now ?? Date.now)()
     }
     const raw = (receipt: Receipt, value: unknown) => {
       if (receipt.aborted) return
@@ -167,8 +219,15 @@ export namespace KiloResponse {
       retain(receipt, response?.usage, true)
       if (receipt.status === "completed" && !response) receipt.status = "missing"
     }
-    const normalized = (receipt: Receipt, reason: string, value?: unknown, metadata?: ProviderMetadata) => {
+    const normalized = (
+      receipt: Receipt,
+      reason: string,
+      value?: unknown,
+      metadata?: ProviderMetadata,
+      observe = true,
+    ) => {
       if (receipt.aborted) return
+      const reported = observe && !receipt.finished
       receipt.observed = true
       receipt.finished = true
       receipt.finish =
@@ -180,8 +239,8 @@ export namespace KiloResponse {
           ? reason
           : "unknown"
       receipt.responseID = text(metadata?.openai?.responseId) ?? receipt.responseID
-      // The raw terminal is authoritative; SDKs sometimes synthesize zero usage on EOF.
-      if (receipt.source !== "openai-responses") retain(receipt, value)
+      // Preserve the provider fields before SDK adapters derive totals or synthesize zero usage.
+      if (receipt.source !== "openai-responses") retain(receipt, value, false, reported)
       // Only billing fields survive beyond event processing; never retain arbitrary provider metadata.
       const router = record(metadata?.openrouter?.usage)
       const prior = record(receipt.metadata?.openrouter?.usage)
@@ -224,7 +283,7 @@ export namespace KiloResponse {
           receipt.source === "openai-responses" || !["stop", "tool-calls"].includes(reason) ? "missing" : "completed"
       }
     }
-    const event = (event: LLMEvent) => {
+    const event = (event: LLMEvent, native = false) => {
       if (stopped) return undefined
       const output =
         ((event.type === "text-delta" || event.type === "reasoning-delta") && event.text) || event.type === "tool-call"
@@ -266,8 +325,11 @@ export namespace KiloResponse {
           }
       }
       if (event.type === "step-finish" || event.type === "finish") {
-        if (data?.source === "openai-responses") retain(receipt, event.usage)
-        normalized(receipt, event.reason, event.usage, event.providerMetadata)
+        if (data?.source === "openai-responses") retain(receipt, event.usage, false, false)
+        // Native parsers keep original token fields separately from synthesized billing totals.
+        if (native && receipt.source !== "openai-responses" && !receipt.finished)
+          retain(receipt, provenance(event.usage))
+        normalized(receipt, event.reason, event.usage, event.providerMetadata, !native)
       }
       return receipt
     }
@@ -291,7 +353,7 @@ export namespace KiloResponse {
       event,
       native(value: LLMEvent) {
         if (!stopped && value.type === "step-start" && receipts.at(-1)?.finished && !failure()) begin()
-        return event(value)
+        return event(value, true)
       },
       failure,
       interrupt() {

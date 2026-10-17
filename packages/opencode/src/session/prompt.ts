@@ -4,12 +4,19 @@ import { KiloSessionPrompt } from "@/kilocode/session/prompt" // kilocode_change
 import { KiloSessionMessageOrder } from "@/kilocode/session/message-order" // kilocode_change
 import { KiloSessionPromptQueue } from "@/kilocode/session/prompt-queue" // kilocode_change
 import { KiloSession } from "@/kilocode/session" // kilocode_change
+import { KiloSessionIdentity } from "@/kilocode/session/identity" // kilocode_change
 import { KiloCostPropagation } from "@/kilocode/session/cost-propagation" // kilocode_change
 import { KiloSessionProcessor } from "@/kilocode/session/processor" // kilocode_change
 import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
+import { KiloRuntime } from "@/kilocode/runtime/control" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { KiloContextTurn } from "@/kilocode/session/context-turn" // kilocode_change
+import { KiloAuth } from "@/kilocode/auth/authority" // kilocode_change
+import { AuthAdmission } from "@/kilocode/auth/admission" // kilocode_change
+import { Env } from "@/env" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 import { KiloCompactionState } from "@/kilocode/session/compaction-state" // kilocode_change
+import { KiloCompactionBudget } from "@/kilocode/session/compaction-budget" // kilocode_change
 import { FileActivity } from "@/kilocode/file-activity" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
@@ -113,6 +120,13 @@ function isOrphanedInterruptedTool(part: MessageV2.ToolPart) {
 }
 
 export interface Interface {
+  // kilocode_change start - manual compaction claims the runner before any session mutation
+  readonly compact: (input: {
+    sessionID: SessionID
+    model: { providerID: ProviderID; modelID: ModelID }
+    auto?: boolean
+  }) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+  // kilocode_change end
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
@@ -136,6 +150,8 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const commands = yield* Command.Service
     const config = yield* Config.Service
+    const env = yield* Env.Service // kilocode_change
+    const authentication = KiloAuth.bind({ config, env, provider, bus }) // kilocode_change
     const permission = yield* Permission.Service
     const question = yield* Question.Service // kilocode_change - dismiss superseded pending questions through the shared service
     const fsys = yield* AppFileSystem.Service
@@ -575,7 +591,7 @@ export const layer = Layer.effect(
               agent: input.agent,
               model: { providerID: model.providerID, modelID: model.modelID },
             }
-            yield* sessions.updateMessage(userMsg)
+            yield* KiloSessionIdentity.create(userMsg, sessions.updateMessage) // kilocode_change - a new shell request cannot replace an existing user
             const userPart: MessageV2.Part = {
               type: "text",
               id: PartID.ascending(),
@@ -754,7 +770,14 @@ export const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
-    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+    // kilocode_change start - root authority is private and receipts cannot be supplied by callers.
+    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (
+      input: PromptInput,
+      root?: MessageID,
+    ) {
+      if (!KiloCompactionBudget.external(input.parts))
+        throw KiloCompactionBudget.error("Compaction receipts cannot be supplied by a prompt") // kilocode_change
+      // kilocode_change end
       const agentName = input.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
@@ -773,6 +796,12 @@ export const layer = Layer.effect(
           .get(),
       )
       const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      // kilocode_change start - capture before persistence and enqueue, never on a later continuation
+      const admitted = input.authAuthority ? undefined : yield* authentication.admit(model).pipe(Effect.orDie)
+      const authority = KiloAuth.seal(input.authAuthority ?? admitted!.authority)
+      const authorities = KiloAuth.seals(input.authAuthorities ?? admitted?.authorities)
+      yield* authentication.check(authority, model).pipe(Effect.orDie)
+      // kilocode_change end
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
@@ -815,6 +844,8 @@ export const layer = Layer.effect(
         format: input.format,
         editorContext: input.editorContext, // kilocode_change
         contextPolicy: policy, // kilocode_change
+        authAuthority: authority, // kilocode_change
+        authAuthorities: authorities, // kilocode_change
       }
 
       if (current?.agent !== info.agent) {
@@ -1227,8 +1258,21 @@ export const layer = Layer.effect(
       })
 
       KiloContextPolicy.same(policy, info.contextPolicy) // kilocode_change - plugins cannot replace the admitted profile
-      yield* sessions.updateMessage(info)
+      KiloAuth.same(authority, info.authAuthority) // kilocode_change
+      // kilocode_change start - plugin transforms cannot replace admitted helper authorities.
+      if (JSON.stringify(authorities) !== JSON.stringify(info.authAuthorities))
+        throw new Error("Admitted auth authorities cannot be changed by a plugin") // kilocode_change
+      // kilocode_change end
+      yield* authentication.check(authority, model).pipe(Effect.orDie) // kilocode_change
+      // kilocode_change start - transformed parts cannot introduce protected receipts.
+      if (!KiloCompactionBudget.external(parts))
+        throw KiloCompactionBudget.error("Compaction receipts cannot be supplied by a prompt") // kilocode_change - validate transformed parts as well
+      // kilocode_change end
+      KiloSessionIdentity.prompt({ sessionID: input.sessionID, messageID: info.id, parts }) // kilocode_change - check plugin-resolved IDs before persisting the user
+      yield* KiloSessionIdentity.create(info, sessions.updateMessage) // kilocode_change - initial admission is insert-only, unlike streaming updates
       for (const part of parts) yield* sessions.updatePart(part)
+      if (root) yield* KiloCompactionBudget.bind({ sessionID: info.sessionID, messageID: info.id, source: root }) // kilocode_change - trusted recovery binds before admission
+      yield* KiloCompactionBudget.admit({ sessionID: info.sessionID, messageID: info.id }) // kilocode_change - freeze quota after source persistence
       const nextPrompt = parts.reduce(
         (result, part) => {
           if (part.type === "text") {
@@ -1319,12 +1363,25 @@ export const layer = Layer.effect(
         }
       }
 
-      return { info, parts }
+      return yield* MessageV2.get({ sessionID: info.sessionID, messageID: info.id }).pipe(Effect.orDie) // kilocode_change - include durable admission metadata
     }, Effect.scoped)
 
+    // kilocode_change start - wrap the actual bindings, including internal task and command calls
+    const admit = <A, E, R>(work: Effect.Effect<A, E, R>, input: { sessionID: SessionID; onAdmitted?: () => void }) =>
+      state
+        .admit(
+          input.sessionID,
+          lastAssistant(input.sessionID).pipe(Effect.orDie),
+          Effect.sync(() => input.onAdmitted?.()).pipe(Effect.andThen(work)),
+        )
+        .pipe(Effect.catchTag("SessionBusyError", Effect.die))
+    // kilocode_change end
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       // kilocode_change start
       function* (input: PromptInput) {
+        KiloSessionIdentity.prompt(input) // kilocode_change - identity precedes recovery and preparation side effects
+        if (!KiloSessionRecovery.input(input.parts))
+          throw KiloCompactionBudget.error("Malformed recovery metadata cannot select prompt ancestry") // kilocode_change
         // kilocode_change end
         // kilocode_change start - reject stale recovery prompts and reset retry history for explicit user prompts
         const kind = KiloSessionRecovery.detect(input.parts)
@@ -1337,17 +1394,28 @@ export const layer = Layer.effect(
           const retained = yield* MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
             Effect.option,
           )
-          if (
-            Option.isSome(retained) &&
-            (input.contextPolicy ||
-              KiloContextPolicy.configured() ||
-              (retained.value.info.role === "user" && retained.value.info.contextPolicy))
-          ) {
+          if (Option.isSome(retained)) {
+            // kilocode_change - reconnect cannot re-admit an existing message
             if (retained.value.info.role !== "user") throw KiloContextPolicy.blocked("Message ID is already in use")
             if (input.contextPolicy) KiloContextPolicy.same(retained.value.info.contextPolicy, input.contextPolicy)
+            if (input.authAuthority) KiloAuth.same(retained.value.info.authAuthority, input.authAuthority) // kilocode_change
             KiloContextTurn.identical(retained.value.info, input)
             return retained.value
           }
+        }
+        // kilocode_change end
+        // kilocode_change start - establish manual ancestry before cleanup or recovery can mutate rows.
+        const manual =
+          kind === "manual"
+            ? KiloCompactionBudget.resume({
+                sessionID: input.sessionID,
+                messages: yield* sessions.messages({ sessionID: input.sessionID }),
+              })
+            : undefined
+        if (manual) {
+          KiloContextTurn.identical(manual, { model: input.model, variant: input.variant })
+          if (!manual.authAuthority || !manual.authAuthorities) throw new AuthOutcome.Failure("unverifiable")
+          yield* authentication.check(manual.authAuthority, manual.model).pipe(Effect.orDie)
         }
         // kilocode_change end
         yield* revert.cleanup(session)
@@ -1356,10 +1424,19 @@ export const layer = Layer.effect(
         yield* KiloSessionPrompt.recoverProviderFinishError({ sessionID: input.sessionID, status, sessions })
         // kilocode_change end
         // kilocode_change start - anchor resume turns to this session and its own file activity
+        let root: MessageID | undefined
         const request = kind
           ? yield* Effect.gen(function* () {
               const messageID = input.messageID ?? MessageID.ascending()
               const history = yield* sessions.messages({ sessionID: input.sessionID })
+              const parent = kind === "automatic" ? KiloSessionRecovery.origin(input.sessionID, input.parts) : undefined
+              if (kind === "automatic" && !parent)
+                throw KiloCompactionBudget.error("Automatic recovery has no trusted original prompt")
+              const source = parent
+                ? MessageID.make(
+                    KiloCompactionBudget.inspect({ sessionID: input.sessionID, messageID: parent })?.root ?? parent,
+                  )
+                : manual?.id
               const activity = yield* FileActivity.list(input.sessionID)
               const paths = activity.filter((item) => item.action !== "read").map((item) => item.path)
               const shared = yield* FileActivity.shared(input.sessionID, paths)
@@ -1367,21 +1444,38 @@ export const layer = Layer.effect(
                 sessionID: input.sessionID,
                 resumeMessageID: messageID,
                 messages: history,
+                source,
                 activity,
                 shared,
               })
               const origin = history.find((message) => message.info.id === anchor.userMessageID)?.info
+              root = origin?.role === "user" ? origin.id : undefined
+              if (!root) throw KiloCompactionBudget.error("Recovery has no validated admitted original prompt")
+              if (origin?.role === "user")
+                KiloContextTurn.identical(origin, { model: input.model, variant: input.variant })
+              if (origin?.role === "user" && !origin.authAuthority) throw new AuthOutcome.Failure("unverifiable") // kilocode_change
+              if (kind === "manual" && origin?.role === "user" && !origin.authAuthorities)
+                throw new AuthOutcome.Failure("unverifiable") // kilocode_change - no late catalog admission for an uncertain manual source
               return {
                 ...input,
+                onAdmitted: undefined, // kilocode_change - recovery must not retain the initiating HTTP acknowledgement
                 messageID,
+                model: origin?.role === "user" ? origin.model : input.model,
+                variant: origin?.role === "user" ? origin.model.variant : input.variant,
                 parts: KiloSessionRecovery.parts(input.parts, kind, anchor) as PromptInput["parts"],
                 system: KiloSessionRecovery.system(input.system, anchor),
                 contextPolicy: input.contextPolicy ?? (origin?.role === "user" ? origin.contextPolicy : undefined), // kilocode_change
+                authAuthority:
+                  (kind === "manual" && origin?.role === "user" ? origin.authAuthority : input.authAuthority) ??
+                  (kind === "automatic" && origin?.role === "user" ? origin.authAuthority : undefined), // kilocode_change
+                authAuthorities:
+                  (kind === "manual" && origin?.role === "user" ? origin.authAuthorities : input.authAuthorities) ??
+                  (kind === "automatic" && origin?.role === "user" ? origin.authAuthorities : undefined), // kilocode_change
               }
             })
-          : input
+          : { ...input, onAdmitted: undefined } // kilocode_change
         // kilocode_change end
-        const message = yield* createUserMessage(request)
+        const message = yield* createUserMessage(request, root) // kilocode_change - never select quota from public anchor metadata
         yield* sessions.touch(request.sessionID)
 
         const permissions: Permission.Rule[] = []
@@ -1475,6 +1569,7 @@ export const layer = Layer.effect(
               system: user.system,
               editorContext: user.editorContext,
               contextPolicy: user.contextPolicy,
+              authAuthority: user.authAuthority,
               snapshotInitialization: request.snapshotInitialization,
               parts: [
                 {
@@ -1503,11 +1598,12 @@ export const layer = Layer.effect(
               .pipe(Effect.andThen(status.set(request.sessionID, { type: "idle" }))),
           ),
         )
-        yield* Effect.sync(() => bridge.fork(work))
+        yield* Effect.sync(() => KiloSessionRecovery.fork(request.sessionID, decision.token, work, bridge.fork))
         return result
         // kilocode_change end
       },
       Effect.catchTag("NotFoundError", Effect.die),
+      admit, // kilocode_change
     )
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1548,7 +1644,7 @@ export const layer = Layer.effect(
       // kilocode_change — cache environment details per turn (prompt caching)
       const envCache: KiloSessionPrompt.EnvCache = {}
       closeReasons.delete(sessionID) // kilocode_change
-      let compactionAttempts = 0 // kilocode_change - cap compaction attempts per turn to avoid infinite loops
+      let compactions: { attempts: number; progress?: string } = { attempts: 0 } // kilocode_change - failed-loop guard is independent of resource quota
       const ctx = yield* InstanceState.context
       const slog = elog.with({ sessionID })
       let structured: unknown
@@ -1569,6 +1665,8 @@ export const layer = Layer.effect(
         // kilocode_change end
 
         if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+        const authority = KiloAuth.selected(lastUser, lastUser.model) // kilocode_change - detach before message-transform hooks
+        compactions = KiloCompactionBudget.progress(compactions, msgs, lastUser) // kilocode_change - only completed productive ordinary work rearms this guard
 
         const lastAssistantMsg = msgs.findLast(
           (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1632,6 +1730,14 @@ export const layer = Layer.effect(
           break
         }
 
+        // kilocode_change start - every resumed dispatch and tool/compaction boundary rechecks authority
+        if (
+          !(yield* AuthAdmission.check({ user: lastUser, auth: authentication, sessions, status, bus }).pipe(
+            Effect.orDie,
+          ))
+        )
+          break
+        // kilocode_change end
         step++
         if (step === 1)
           yield* title({
@@ -1639,7 +1745,11 @@ export const layer = Layer.effect(
             modelID: lastUser.model.modelID,
             providerID: lastUser.model.providerID,
             history: msgs,
-          }).pipe(Effect.ignore, Effect.forkIn(scope))
+          }).pipe(
+            Effect.ignore,
+            (work) => admit(work, { sessionID }), // kilocode_change - retain detached work in the same runner
+            Effect.forkIn(scope, { startImmediately: true }), // kilocode_change
+          )
 
         const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
         const task = tasks.pop()
@@ -1676,7 +1786,7 @@ export const layer = Layer.effect(
           // kilocode_change start
           const guard = KiloSessionPrompt.guardCompactionAttempt({
             sessionID,
-            attempts: compactionAttempts,
+            attempts: compactions.attempts,
             closeReasons,
             message: baseline,
           })
@@ -1687,7 +1797,7 @@ export const layer = Layer.effect(
             yield* bus.publish(Session.Event.Error, { sessionID, error: guard.error })
             break
           }
-          compactionAttempts++
+          compactions.attempts++
           // kilocode_change end
           yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
           continue
@@ -1777,7 +1887,11 @@ export const layer = Layer.effect(
           }
 
           if (step === 1)
-            yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
+            yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(
+              Effect.ignore,
+              (work) => admit(work, { sessionID }), // kilocode_change
+              Effect.forkIn(scope, { startImmediately: true }), // kilocode_change
+            )
 
           if (step > 1 && lastFinished) {
             for (const m of msgs) {
@@ -1839,6 +1953,7 @@ export const layer = Layer.effect(
           const result = yield* handle.process({
             // kilocode_change start - keep Ask/Plan tool filtering hardened against session allows
             user: lastUser,
+            authAuthority: authority, // kilocode_change
             context: KiloContextTurn.state(msgs, lastUser),
             sessionTitle: session.title,
             agent,
@@ -1896,10 +2011,16 @@ export const layer = Layer.effect(
           }
           // kilocode_change end
           if (result === "compact") {
+            // kilocode_change - ordinary progress, not summary completion, rearms this guard
             // kilocode_change start
+            compactions = KiloCompactionBudget.progress(
+              compactions,
+              [yield* MessageV2.get({ sessionID, messageID: handle.message.id }).pipe(Effect.orDie)],
+              lastUser,
+            )
             const guard = KiloSessionPrompt.guardCompactionAttempt({
               sessionID,
-              attempts: lastUser.contextPolicy && handle.contextReceipt?.() ? 0 : compactionAttempts,
+              attempts: compactions.attempts,
               closeReasons,
               message: handle.message,
             })
@@ -1908,7 +2029,7 @@ export const layer = Layer.effect(
               yield* bus.publish(Session.Event.Error, { sessionID, error: guard.error })
               return "break" as const
             }
-            compactionAttempts++
+            compactions.attempts++
             // kilocode_change end
             yield* compaction.create({
               sessionID,
@@ -1921,7 +2042,6 @@ export const layer = Layer.effect(
               context: handle.contextReceipt?.(), // kilocode_change
             })
           }
-          if (lastUser.contextPolicy && result !== "compact") compactionAttempts = 0 // kilocode_change - useful progress rearms compaction
           // kilocode_change start — break out so a newer queued prompt can take over
           // instead of starting another LLM step for the now-superseded turn. The
           // current handle.process has fully drained (tokens + inline tool calls) by
@@ -1961,7 +2081,11 @@ export const layer = Layer.effect(
         // kilocode_change end
       } // kilocode_change
 
-      yield* compaction.prune({ sessionID, reason: "normal" }).pipe(Effect.ignore, Effect.forkIn(scope))
+      yield* compaction.prune({ sessionID, reason: "normal" }).pipe(
+        Effect.ignore,
+        (work) => admit(work, { sessionID }), // kilocode_change
+        Effect.forkIn(scope, { startImmediately: true }), // kilocode_change
+      )
       return yield* lastAssistant(sessionID)
     })
 
@@ -1992,7 +2116,36 @@ export const layer = Layer.effect(
         }),
       )
       // kilocode_change end
-    })
+    }, admit) // kilocode_change
+
+    // kilocode_change start - execute manual compaction inside one exclusive runner branch
+    const compact: Interface["compact"] = (input) =>
+      state.startExclusive(
+        input.sessionID,
+        lastAssistant(input.sessionID).pipe(Effect.orDie),
+        Effect.gen(function* () {
+          const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          yield* revert.cleanup(session)
+          yield* KiloSessionPrompt.recoverDanglingAssistant({ sessionID: input.sessionID, status, sessions })
+          yield* KiloSessionPrompt.recoverProviderFinishError({ sessionID: input.sessionID, status, sessions })
+          const messages = yield* sessions.messages({ sessionID: input.sessionID })
+          const agent =
+            messages.findLast((message) => message.info.role === "user")?.info.agent ?? (yield* agents.defaultAgent())
+          yield* compaction.create({ sessionID: input.sessionID, agent, model: input.model, auto: input.auto ?? false })
+          yield* bus.publish(KiloSession.Event.TurnOpen, { sessionID: input.sessionID })
+          return yield* runLoop({ sessionID: input.sessionID }).pipe(
+            Effect.orDie,
+            Effect.onExit((exit) =>
+              bus.publish(KiloSession.Event.TurnClose, {
+                sessionID: input.sessionID,
+                parentID: session.parentID,
+                reason: KiloSessionPrompt.resolveCloseReason({ sessionID: input.sessionID, closeReasons, exit }),
+              }),
+            ),
+          )
+        }).pipe(Effect.orDie),
+      )
+    // kilocode_change end
 
     const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
@@ -2005,9 +2158,10 @@ export const layer = Layer.effect(
         shellImpl(input, ready),
         ready,
       )
-    })
+    }, KiloRuntime.work) // kilocode_change
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      KiloSessionIdentity.prompt(input) // kilocode_change - reject reused IDs before command template effects
       yield* elog.info("command", { sessionID: input.sessionID, command: input.command, agent: input.agent })
       const cmd = yield* commands.get(input.command)
       if (!cmd) {
@@ -2127,9 +2281,10 @@ export const layer = Layer.effect(
         messageID: result.info.id,
       })
       return result
-    })
+    }, admit) // kilocode_change
 
     return Service.of({
+      compact, // kilocode_change
       cancel,
       prompt,
       loop: (input) => loop(input).pipe(Effect.orDie),
@@ -2158,6 +2313,7 @@ export const defaultLayer = Layer.suspend(() =>
     .pipe(
       Layer.provide(Provider.defaultLayer),
       Layer.provide(Config.defaultLayer),
+      Layer.provide(Env.defaultLayer), // kilocode_change
       Layer.provide(Instruction.defaultLayer),
       Layer.provide(AppFileSystem.defaultLayer),
       Layer.provide(Plugin.defaultLayer),
@@ -2228,6 +2384,9 @@ export type PromptInput = Omit<Schema.Schema.Type<typeof PromptInput>, "parts" |
   parts: PartInputUnion[]
   editorContext?: MessageV2.EditorContext
   contextPolicy?: KiloContextPolicy.Snapshot // internal only, not accepted from public prompt JSON
+  onAdmitted?: () => void // kilocode_change - internal HTTP acknowledgement barrier, never part of the JSON schema
+  authAuthority?: KiloAuth.Snapshot // kilocode_change - internal only, not accepted from prompt JSON
+  authAuthorities?: KiloAuth.Bindings // kilocode_change - admitted secondary sources, internal only
 }
 // kilocode_change end
 

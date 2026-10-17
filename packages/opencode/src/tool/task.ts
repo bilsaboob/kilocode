@@ -10,6 +10,9 @@ import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider" // kilocode_change
+import { Env } from "@/env" // kilocode_change
+import { KiloAuth } from "@/kilocode/auth/authority" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 import { KiloTask } from "../kilocode/tool/task" // kilocode_change
 import { KiloCostPropagation } from "../kilocode/session/cost-propagation" // kilocode_change
 import { KiloSessionProcessor } from "../kilocode/session/processor" // kilocode_change
@@ -107,6 +110,8 @@ export const TaskTool = Tool.define(
     const config = yield* Config.Service
     const sessions = yield* Session.Service
     const provider = yield* Provider.Service // kilocode_change
+    const env = yield* Env.Service // kilocode_change
+    const authentication = KiloAuth.bind({ config, env, provider }) // kilocode_change
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
 
@@ -152,6 +157,13 @@ export const TaskTool = Tool.define(
         ) // kilocode_change - prevent cross-session task resume
       }
       const parent = yield* sessions.get(ctx.sessionID)
+      // kilocode_change start - reject stale parent authority before creating or resuming a child
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
+      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const origin = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: msg.info.parentID }).pipe(Effect.orDie)
+      if (origin.info.role !== "user") return yield* Effect.fail(new AuthOutcome.Failure("unverifiable"))
+      yield* authentication.check(origin.info.authAuthority, origin.info.model)
+      // kilocode_change end
       const parentAgent = parent.agent
         ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
@@ -201,10 +213,6 @@ export const TaskTool = Tool.define(
       KiloSession.register({ id: nextSession.id, parentID: ctx.sessionID, platform })
       // kilocode_change end
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
-      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-      const origin = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: msg.info.parentID }).pipe(Effect.orDie) // kilocode_change
-
       // kilocode_change start — prefer valid subagent overrides, safely inheriting when overrides go stale
       const selected = yield* KiloTask.resolveModel({
         name: next.name,
@@ -238,6 +246,9 @@ export const TaskTool = Tool.define(
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
+        if (origin.info.role === "user") yield* authentication.check(origin.info.authAuthority, origin.info.model) // kilocode_change
+        const authority = origin.info.role === "user" ? KiloAuth.selected(origin.info, model) : undefined // kilocode_change
+        if (!authority) return yield* Effect.fail(new AuthOutcome.Failure("unverifiable")) // kilocode_change
         KiloSessionProcessor.markReviewTelemetry(parts, params.command) // kilocode_change - carry review command into child session telemetry
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
@@ -249,6 +260,8 @@ export const TaskTool = Tool.define(
           variant, // kilocode_change
           agent: next.name,
           contextPolicy: origin.info.role === "user" ? origin.info.contextPolicy : undefined, // kilocode_change
+          authAuthority: authority, // kilocode_change
+          authAuthorities: origin.info.role === "user" ? origin.info.authAuthorities : undefined, // kilocode_change
           tools: {
             question: false, // kilocode_change - subagents cannot prompt the user directly
             ...(canTodo ? {} : { todowrite: false }),
@@ -275,6 +288,7 @@ export const TaskTool = Tool.define(
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
             contextPolicy: origin.info.role === "user" ? origin.info.contextPolicy : undefined, // kilocode_change
+            authAuthority: origin.info.role === "user" ? origin.info.authAuthority : undefined, // kilocode_change
             model: origin.info.role === "user" && origin.info.contextPolicy ? origin.info.model : undefined, // kilocode_change
             variant: origin.info.role === "user" && origin.info.contextPolicy ? origin.info.model.variant : undefined, // kilocode_change
             parts: [
@@ -340,6 +354,14 @@ export const TaskTool = Tool.define(
       const cancel = ops.cancel(nextSession.id)
 
       function onAbort() {
+        // kilocode_change start - credential cancellation is provider-scoped; user Stop still propagates.
+        if (
+          AuthOutcome.known(ctx.abort.reason) &&
+          msg.info.role === "assistant" &&
+          model.providerID !== msg.info.providerID
+        )
+          return // kilocode_change - auth cancellation is provider scoped; user Stop still propagates
+        // kilocode_change end
         runCancel.fork(cancel)
       }
 

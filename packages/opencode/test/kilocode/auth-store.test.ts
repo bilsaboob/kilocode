@@ -6,6 +6,27 @@ import { Auth } from "../../src/auth"
 import { AuthSourceError, AuthStaleError, AuthStorageError, AuthStore } from "../../src/kilocode/auth/store"
 import { expired, fixture } from "./fixture/auth-store"
 import { legacy, organization } from "../../src/kilocode/auth/mutations"
+import { AuthOutcome } from "../../src/kilocode/auth/outcome"
+
+test("ambiguous exchange receipts preserve prototype-like provider names as data", async () => {
+  await using f = await fixture(expired())
+  let calls = 0
+  for (const provider of ["openai", "__proto__", "constructor"]) {
+    if (provider !== "openai") await f.store.set(provider, expired())
+    const snapshot = await f.store.snapshot(provider)
+    const exchange = async () => {
+      calls++
+      throw new AuthOutcome.Failure("exchange-uncertain", provider)
+    }
+    await expect(f.store.exchange(snapshot, exchange)).rejects.toMatchObject({ reason: "exchange-uncertain" })
+    await expect(AuthStore.create(f.file).exchange(snapshot, exchange)).rejects.toMatchObject({
+      reason: "exchange-uncertain",
+    })
+  }
+  expect(calls).toBe(3)
+  const saved = JSON.parse(await fs.readFile(path.join(f.dir, "auth.revisions.json"), "utf8"))
+  expect(Object.keys(saved.exchanges).sort()).toEqual(["__proto__", "constructor", "openai"])
+})
 
 test("only one conditional writer wins and unrelated providers survive", async () => {
   await using f = await fixture(expired())

@@ -11,7 +11,6 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
-import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect, Layer, Context, Schema } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
@@ -25,6 +24,7 @@ import { KiloStructuredCompaction } from "@/kilocode/session/structured-compacti
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
 import { KiloContextTurn } from "@/kilocode/session/context-turn"
 import { KiloCompactionState } from "@/kilocode/session/compaction-state"
+import { KiloCompactionBudget } from "@/kilocode/session/compaction-budget"
 import { SessionStatus } from "./status"
 import { Exit, Cause } from "effect"
 import { SessionExport } from "@/kilocode/session-export"
@@ -212,7 +212,7 @@ export interface Interface {
   readonly create: (input: {
     sessionID: SessionID
     agent: string
-    model: { providerID: ProviderID; modelID: ModelID }
+    model: MessageV2.User["model"] // kilocode_change - retain admitted variant
     auto: boolean
     overflow?: boolean
     contextPolicy?: KiloContextPolicy.Snapshot // kilocode_change
@@ -688,11 +688,14 @@ export const layer = Layer.effect(
               tools: original.tools,
               system: original.system,
               contextPolicy: original.contextPolicy, // kilocode_change
+              authAuthority: original.authAuthority, // kilocode_change - replay retains the admitted credential source
+              authAuthorities: original.authAuthorities, // kilocode_change - retain admitted helper-provider bindings
             },
           }) // kilocode_change
           followup = replayMsg.id // kilocode_change - stage the packet until its aggregate summary commits
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
+            if (KiloCompactionBudget.internal(part)) continue // kilocode_change - quota follows the root, never clone its ledger
             // kilocode_change start - preserve media for preflight replay but strip it after provider overflow
             const replayPart =
               input.overflow && part.type === "file" && MessageV2.isMedia(part.mime)
@@ -743,6 +746,8 @@ export const layer = Layer.effect(
                 agent: userMessage.agent,
                 model: userMessage.model,
                 contextPolicy: userMessage.contextPolicy, // kilocode_change
+                authAuthority: userMessage.authAuthority, // kilocode_change - continuation is not a fresh auth admission
+                authAuthorities: userMessage.authAuthorities, // kilocode_change
               },
             }) // kilocode_change
             followup = continueMsg.id // kilocode_change - stage auto-continue until commit
@@ -788,6 +793,7 @@ export const layer = Layer.effect(
         yield* session.updateMessage(processor.message)
         // A persisted commit must never be relabeled aborted by late cancellation.
         yield* Effect.gen(function* () {
+          yield* KiloCompactionBudget.check // kilocode_change - deadline also fences the atomic summary commit
           yield* session.updatePart(
             KiloCompactionState.mark({
               message: processor.message,
@@ -857,19 +863,23 @@ export const layer = Layer.effect(
     const create = Effect.fn("SessionCompaction.create")(function* (input: {
       sessionID: SessionID
       agent: string
-      model: { providerID: ProviderID; modelID: ModelID }
+      model: MessageV2.User["model"] // kilocode_change
       auto: boolean
       overflow?: boolean
       contextPolicy?: KiloContextPolicy.Snapshot // kilocode_change
       context?: KiloContextPolicy.Receipt // kilocode_change
     }) {
       // kilocode_change start - manual compaction also uses a verified scoped worker policy
+      const history = yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+      const origin = KiloCompactionBudget.source({
+        sessionID: input.sessionID,
+        messages: history,
+        source: input.context?.source,
+      })
       const policy =
         input.contextPolicy ??
         (KiloContextPolicy.configured()
           ? yield* Effect.gen(function* () {
-              const history = yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-              const origin = KiloContextTurn.active(history).findLast((message) => message.info.role === "user")?.info
               const model = yield* provider.getModel(input.model.providerID, input.model.modelID).pipe(Effect.orDie)
               const cfg = yield* config.get()
               return yield* Effect.promise(() =>
@@ -886,11 +896,22 @@ export const layer = Layer.effect(
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
-        model: input.model,
+        // kilocode_change start - keep the admitted variant when a marker only supplies the model identity
+        model: {
+          ...input.model,
+          variant:
+            input.model.variant ??
+            (origin?.model.providerID === input.model.providerID && origin.model.modelID === input.model.modelID
+              ? origin.model.variant
+              : undefined),
+        },
+        // kilocode_change end
         sessionID: input.sessionID,
         agent: input.agent,
         time: { created: Date.now() },
         contextPolicy: policy, // kilocode_change
+        authAuthority: origin?.authAuthority, // kilocode_change - preserve the admitted credential source
+        authAuthorities: origin?.authAuthorities, // kilocode_change - workers must not admit helper credentials late
       })
       yield* session.updatePart({
         id: PartID.ascending(),
@@ -901,6 +922,14 @@ export const layer = Layer.effect(
         overflow: input.overflow,
         context: input.context, // kilocode_change
       })
+      // kilocode_change start - markers and replay identities share the original prompt's durable quota
+      yield* KiloCompactionBudget.inherit({
+        sessionID: msg.sessionID,
+        messageID: msg.id,
+        messages: history,
+        source: input.context?.source,
+      })
+      // kilocode_change end
       // kilocode_change start - keep auto-compaction markers visible during queued turns
       KiloSessionPromptQueue.retarget(input.sessionID, msg.id)
       // kilocode_change end
@@ -920,6 +949,14 @@ export const layer = Layer.effect(
       process: (input) =>
         processCompaction({ ...input, messages: KiloCompactionState.visible(input.messages) }).pipe(
           Effect.scoped,
+          (work) =>
+            KiloCompactionBudget.process(
+              {
+                session,
+                parent: input.messages.find((item) => item.info.id === input.parentID)?.info,
+              },
+              work,
+            ),
           Effect.onExit((exit) =>
             input.auto && Exit.isSuccess(exit) && exit.value === "continue"
               ? Effect.void

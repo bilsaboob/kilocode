@@ -4,10 +4,13 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../../auth"
 import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
-import { createServer } from "http"
+import { OAuthBrowser } from "@/kilocode/plugin/oauth-browser" // kilocode_change
 import { refreshCodexAuth } from "@/kilocode/provider/codex-refresh" // kilocode_change
 import { CodexModels } from "@/kilocode/provider/codex-models" // kilocode_change
 import { AuthStaleError, type AuthStore } from "@/kilocode/auth/store" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
+import { codexExpiring } from "@/kilocode/provider/codex-expiry" // kilocode_change
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change
 import { OpenAIWebSocketPool } from "./ws-pool"
 
@@ -117,14 +120,23 @@ interface TokenResponse {
 }
 
 interface CodexAuthPluginOptions {
+  browser?: OAuthBrowser.Options // kilocode_change - isolated listener/timer fixtures
   store?: ReturnType<typeof AuthStore.create> // kilocode_change - use real isolated stores in fixtures
   issuer?: string
   codexApiEndpoint?: string
   experimentalWebSockets?: boolean
 }
 
-async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
+// kilocode_change start - token exchange cancellation belongs to its browser attempt
+async function exchangeCodeForTokens(
+  code: string,
+  redirectUri: string,
+  pkce: PkceCodes,
+  signal?: AbortSignal,
+): Promise<TokenResponse> {
   const response = await fetch(`${ISSUER}/oauth/token`, {
+    signal,
+    // kilocode_change end
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -154,10 +166,12 @@ async function refreshAccessToken(refreshToken: string, issuer = ISSUER, signal?
       client_id: CLIENT_ID,
     }).toString(),
   })
-  if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`)
-  }
-  return response.json()
+  // kilocode_change start - bounded typed outcomes never expose provider text
+  const value = await AuthOutcome.response(response)
+  if (typeof value.refresh_token !== "string" || !value.refresh_token)
+    throw new AuthOutcome.Failure("exchange-uncertain")
+  return value as unknown as TokenResponse
+  // kilocode_change end
 }
 
 const HTML_SUCCESS = `<!doctype html>
@@ -251,134 +265,18 @@ const HTML_ERROR = (error: string) => `<!doctype html>
     <div class="container">
       <h1>Authorization Failed</h1>
       <p>An error occurred during authorization.</p>
-      <div class="error">${error}</div>
+      <div class="error">${OAuthBrowser.escape(error)}</div> <!-- kilocode_change -->
     </div>
   </body>
 </html>`
 
-interface PendingOAuth {
-  pkce: PkceCodes
-  state: string
-  resolve: (tokens: TokenResponse) => void
-  reject: (error: Error) => void
-}
-
-let oauthServer: ReturnType<typeof createServer> | undefined
-let pendingOAuth: PendingOAuth | undefined
-
-async function startOAuthServer(): Promise<{ port: number; redirectUri: string }> {
-  if (oauthServer) {
-    return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
-  }
-
-  oauthServer = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${OAUTH_PORT}`)
-
-    if (url.pathname === "/auth/callback") {
-      const code = url.searchParams.get("code")
-      const state = url.searchParams.get("state")
-      const error = url.searchParams.get("error")
-      const errorDescription = url.searchParams.get("error_description")
-
-      if (error) {
-        const errorMsg = errorDescription || error
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(200, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!code) {
-        const errorMsg = "Missing authorization code"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!pendingOAuth || state !== pendingOAuth.state) {
-        const errorMsg = "Invalid state - potential CSRF attack"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      const current = pendingOAuth
-      pendingOAuth = undefined
-
-      exchangeCodeForTokens(code, `http://localhost:${OAUTH_PORT}/auth/callback`, current.pkce)
-        .then((tokens) => current.resolve(tokens))
-        .catch((err) => current.reject(err))
-
-      res.writeHead(200, { "Content-Type": "text/html" })
-      res.end(HTML_SUCCESS)
-      return
-    }
-
-    if (url.pathname === "/cancel") {
-      pendingOAuth?.reject(new Error("Login cancelled"))
-      pendingOAuth = undefined
-      res.writeHead(200)
-      res.end("Login cancelled")
-      return
-    }
-
-    res.writeHead(404)
-    res.end("Not found")
-  })
-
-  await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(OAUTH_PORT, () => {
-      log.info("codex oauth server started", { port: OAUTH_PORT })
-      resolve()
-    })
-    oauthServer!.on("error", reject)
-  })
-
-  return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
-}
-
-function stopOAuthServer() {
-  if (oauthServer) {
-    oauthServer.close(() => {
-      log.info("codex oauth server stopped")
-    })
-    oauthServer = undefined
-  }
-}
-
-function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResponse> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        if (pendingOAuth) {
-          pendingOAuth = undefined
-          reject(new Error("OAuth callback timeout - authorization took too long"))
-        }
-      },
-      5 * 60 * 1000,
-    ) // 5 minute timeout
-
-    pendingOAuth = {
-      pkce,
-      state,
-      resolve: (tokens) => {
-        clearTimeout(timeout)
-        resolve(tokens)
-      },
-      reject: (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      },
-    }
-  })
-}
+// kilocode_change start - callback state and listener ownership are inseparable
+const redirectUri = `http://localhost:${OAUTH_PORT}/auth/callback`
+const browser = OAuthBrowser.create<TokenResponse>({ redirect: redirectUri, success: HTML_SUCCESS, error: HTML_ERROR })
+// kilocode_change end
 
 export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPluginOptions = {}): Promise<Hooks> {
+  const owner = {} // kilocode_change - disposal cannot cancel another plugin instance's browser attempt
   const discovery = options.store ? CodexModels.create(Date.now, options.store) : CodexModels.catalog // kilocode_change
   const issuer = options.issuer ?? ISSUER
   const codexApiEndpoint = options.codexApiEndpoint ?? CODEX_API_ENDPOINT
@@ -389,6 +287,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
     async dispose() {
       for (const websocketFetch of websocketFetches) websocketFetch.close()
       websocketFetches.length = 0
+      await browser.dispose(owner) // kilocode_change
     },
     provider: {
       id: "openai",
@@ -461,7 +360,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
         return {
           apiKey: OAUTH_DUMMY_KEY,
-          async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
+          // kilocode_change start - defer accounting to the physical transport.
+          fetch: AuthRequest.delegate(async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+            // kilocode_change end
             if (init?.headers) {
               if (init.headers instanceof Headers) {
                 init.headers.delete("authorization")
@@ -474,18 +375,20 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               }
             }
 
-            let currentAuth = await getAuth() // kilocode_change - use only conditionally committed renewal results
+            let currentAuth = await AuthRequest.credential(init, getAuth) // kilocode_change - detached request view, never cached loader authority
             if (!currentAuth) throw new AuthStaleError() // kilocode_change
             if (currentAuth.type !== "oauth")
-              return websocketFetch ? websocketFetch(requestInput, init) : fetch(requestInput, init)
+              return websocketFetch ? websocketFetch(requestInput, init) : AuthRequest.fetch(fetch, requestInput, init) // kilocode_change
 
-            if (!currentAuth.access || currentAuth.expires < Date.now()) {
-              // kilocode_change start - coalescing belongs to the revision-aware store, not the loader
+            // kilocode_change start - expiry margin and coalescing belong to the revision-aware store.
+            if (codexExpiring(currentAuth)) {
               log.info("refreshing codex access token")
+              await AuthRequest.bound(init)?.report("refreshing") // kilocode_change
               currentAuth = await refreshCodexAuth({
                 auth: currentAuth,
                 store: options.store,
-                refresh: (token, signal) => refreshAccessToken(token, issuer, signal),
+                refresh: (token, signal) =>
+                  refreshAccessToken(token, issuer, init?.signal ? AbortSignal.any([signal, init.signal]) : signal),
                 account: extractAccountId,
               })
               // kilocode_change end
@@ -525,40 +428,46 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               headers,
             }
             if (websocketFetch && parsed.pathname.endsWith("/responses")) return websocketFetch(url, requestInit)
-            return fetch(url, OpenAIWebSocketPool.withoutInternalHeaders(requestInit))
-          },
+            return AuthRequest.fetch(fetch, url, OpenAIWebSocketPool.withoutInternalHeaders(requestInit)) // kilocode_change
+          }), // kilocode_change
         }
       },
       methods: [
         {
           label: "ChatGPT Pro/Plus (browser)",
           type: "oauth",
+          // kilocode_change start - install attempt ownership before any async browser preparation
           authorize: async () => {
-            const { redirectUri } = await startOAuthServer()
-            const pkce = await generatePKCE()
             const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
-            const authUrl = buildAuthorizeUrl(redirectUri, pkce, state)
-
-            const callbackPromise = waitForOAuthCallback(pkce, state)
-
-            return {
-              url: authUrl,
-              instructions: "Complete authorization in your browser. This window will close automatically.",
-              method: "auto" as const,
-              callback: async () => {
-                const tokens = await callbackPromise
-                stopOAuthServer()
-                const accountId = extractAccountId(tokens)
-                return {
-                  type: "success" as const,
-                  refresh: tokens.refresh_token,
-                  access: tokens.access_token,
-                  expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
-                  accountId,
-                }
-              },
+            const attempt = browser.begin(state, owner, options.browser)
+            try {
+              const pkce = await generatePKCE()
+              await attempt.start((code, signal) => exchangeCodeForTokens(code, redirectUri, pkce, signal))
+              return {
+                url: buildAuthorizeUrl(redirectUri, pkce, state),
+                instructions: "Complete authorization in your browser. This window will close automatically.",
+                method: "auto" as const,
+                callback: async () => {
+                  try {
+                    const tokens = await attempt.wait()
+                    return {
+                      type: "success" as const,
+                      refresh: tokens.refresh_token,
+                      access: tokens.access_token,
+                      expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+                      accountId: extractAccountId(tokens),
+                    }
+                  } finally {
+                    await attempt.close()
+                  }
+                },
+              }
+            } catch (error) {
+              await attempt.close()
+              throw error
             }
           },
+          // kilocode_change end
         },
         {
           label: "ChatGPT Pro/Plus (headless)",

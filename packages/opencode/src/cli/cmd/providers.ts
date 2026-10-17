@@ -16,6 +16,8 @@ import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
+import { AuthStore } from "@/kilocode/auth/store" // kilocode_change
+import { AuthAttempt } from "@/kilocode/auth/attempt" // kilocode_change
 
 type PluginAuth = NonNullable<Hooks["auth"]>
 
@@ -29,7 +31,10 @@ const put = Effect.fn("Cli.providers.put")(function* (key: string, info: Auth.In
   yield* Effect.orDie(auth.set(key, info))
 })
 
-const cliTry = <Value>(message: string, fn: () => PromiseLike<Value>) =>
+const cliTry = <Value>(
+  message: string,
+  fn: (signal: AbortSignal) => PromiseLike<Value>, // kilocode_change
+) =>
   Effect.tryPromise({
     try: fn,
     catch: (error) => new CliError({ message: message + errorMessage(error) }),
@@ -92,7 +97,9 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
   }
 
   if (method.type === "oauth") {
+    const ticket = yield* cliTry("Failed to begin authorization: ", () => AuthStore.disk.begin(provider, index)) // kilocode_change
     const authorize = yield* cliTry("Failed to authorize: ", () => method.authorize(inputs))
+    yield* cliTry("Authorization superseded: ", () => AuthStore.disk.attempt(ticket)) // kilocode_change
 
     if (authorize.url) {
       yield* Prompt.log.info("Go to: " + authorize.url)
@@ -104,31 +111,12 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
       }
       const spinner = Prompt.spinner()
       yield* spinner.start("Waiting for authorization...")
-      const result = yield* cliTry("Failed to authorize: ", () => authorize.callback())
-      if (result.type === "failed") {
-        yield* spinner.stop("Failed to authorize", 1)
-      }
-      if (result.type === "success") {
-        const saveProvider = result.provider ?? provider
-        if ("refresh" in result) {
-          const { type: _, provider: __, refresh, access, expires, ...extraFields } = result
-          yield* put(saveProvider, {
-            type: "oauth",
-            refresh,
-            access,
-            expires,
-            ...extraFields,
-          })
-        }
-        if ("key" in result) {
-          yield* put(saveProvider, {
-            type: "api",
-            key: result.key,
-            ...(result.metadata ? { metadata: result.metadata } : {}),
-          })
-        }
-        yield* spinner.stop("Login successful")
-      }
+      // kilocode_change start - CLI callbacks use the same durable one-shot fence
+      yield* cliTry("Failed to authorize: ", (signal) =>
+        AuthAttempt.invoke({ ticket, signal, callback: () => authorize.callback() }),
+      )
+      yield* spinner.stop("Login successful")
+      // kilocode_change end
     }
 
     if (authorize.method === "code") {
@@ -137,31 +125,12 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
         validate: (x) => (x && x.length > 0 ? undefined : "Required"),
       })
       const authorizationCode = yield* promptValue(code)
-      const result = yield* cliTry("Failed to authorize: ", () => authorize.callback(authorizationCode))
-      if (result.type === "failed") {
-        yield* Prompt.log.error("Failed to authorize")
-      }
-      if (result.type === "success") {
-        const saveProvider = result.provider ?? provider
-        if ("refresh" in result) {
-          const { type: _, provider: __, refresh, access, expires, ...extraFields } = result
-          yield* put(saveProvider, {
-            type: "oauth",
-            refresh,
-            access,
-            expires,
-            ...extraFields,
-          })
-        }
-        if ("key" in result) {
-          yield* put(saveProvider, {
-            type: "api",
-            key: result.key,
-            ...(result.metadata ? { metadata: result.metadata } : {}),
-          })
-        }
-        yield* Prompt.log.success("Login successful")
-      }
+      // kilocode_change start
+      yield* cliTry("Failed to authorize: ", (signal) =>
+        AuthAttempt.invoke({ ticket, signal, callback: () => authorize.callback(authorizationCode) }),
+      )
+      yield* Prompt.log.success("Login successful")
+      // kilocode_change end
     }
 
     yield* Prompt.outro("Done")
@@ -187,20 +156,18 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
       return true
     }
 
-    const result = yield* cliTry("Failed to authorize: ", () => authorizeApi(inputs))
-    if (result.type === "failed") {
-      yield* Prompt.log.error("Failed to authorize")
-    }
-    if (result.type === "success") {
-      const saveProvider = result.provider ?? provider
-      const merged = { ...(metadata.metadata ?? {}), ...(result.metadata ?? {}) }
-      yield* put(saveProvider, {
-        type: "api",
-        key: result.key ?? apiKey,
-        ...(Object.keys(merged).length ? { metadata: merged } : {}),
-      })
-      yield* Prompt.log.success("Login successful")
-    }
+    // kilocode_change start - asynchronous API-key authorization cannot restore stale credentials
+    const ticket = yield* cliTry("Failed to begin authorization: ", () => AuthStore.disk.begin(provider, index))
+    yield* cliTry("Failed to authorize: ", (signal) =>
+      AuthAttempt.invoke({
+        ticket,
+        signal,
+        callback: () => authorizeApi(inputs),
+        fallback: { key: apiKey, metadata: metadata.metadata },
+      }),
+    )
+    yield* Prompt.log.success("Login successful")
+    // kilocode_change end
     yield* Prompt.outro("Done")
     return true
   }

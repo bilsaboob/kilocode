@@ -9,6 +9,7 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { KiloSessionPrompt } from "../../src/kilocode/session/prompt"
 import { KiloSessionRecovery } from "../../src/kilocode/session/recovery"
 import { KiloStructuredCompaction } from "../../src/kilocode/session/structured-compaction"
+import { KiloCompactionBudget } from "../../src/kilocode/session/compaction-budget"
 import { Plugin } from "../../src/plugin"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionCompaction } from "../../src/session/compaction"
@@ -118,6 +119,31 @@ function plan(messages: MessageV2.WithParts[], overflow?: boolean) {
 }
 
 describe("structured image compaction admission", () => {
+  test("ignored budget metadata cannot turn a synthetic continuation into a new structured task", () => {
+    const source = turn()
+    const followup = marker(source)
+    followup.parts = [
+      {
+        id: PartID.ascending(),
+        sessionID: source.info.sessionID,
+        messageID: followup.info.id,
+        type: "text",
+        text: "Continue",
+        synthetic: true,
+        metadata: { compaction_continue: true },
+      },
+      {
+        id: PartID.ascending(),
+        sessionID: source.info.sessionID,
+        messageID: followup.info.id,
+        type: "text",
+        text: "",
+        ignored: true,
+        metadata: { kilo_compaction_root: source.info.id },
+      },
+    ]
+    expect(KiloStructuredCompaction.pending([source, followup])?.info).toEqual(source.info)
+  })
   test("classifies incomplete structured turns without replaying or overwriting provider failures", () => {
     const source = turn()
     for (const finish of [undefined, "unknown"]) {
@@ -388,6 +414,12 @@ function store(message: MessageV2.WithParts) {
     const session = yield* Session.Service
     yield* session.updateMessage(message.info)
     for (const part of message.parts) yield* session.updatePart(part)
+    if (message.parts.some((part) => part.type === "compaction"))
+      yield* KiloCompactionBudget.inherit({
+        sessionID: message.info.sessionID,
+        messageID: message.info.id,
+        messages: yield* session.messages({ sessionID: message.info.sessionID }),
+      })
   })
 }
 
@@ -474,7 +506,11 @@ describe("structured image compaction production path", () => {
               .flatMap((message) => (typeof message.content === "string" ? [] : message.content))
               .filter((part) => part.type === "image" || part.type === "file"),
           ).toHaveLength(2)
-          expect(all.find((message) => message.info.id === source.info.id)?.parts).toEqual(source.parts)
+          expect(
+            all
+              .find((message) => message.info.id === source.info.id)
+              ?.parts.filter((part) => !KiloCompactionBudget.internal(part)),
+          ).toEqual(source.parts)
         }),
     )
   }
@@ -511,7 +547,11 @@ describe("structured image compaction production path", () => {
         expect(last.info.finish).toBe("error")
         expect(last.info.time.completed).toBeDefined()
         expect(all.filter((message) => message.info.role === "user")).toHaveLength(2)
-        expect(all.find((message) => message.info.id === source.info.id)?.parts).toEqual(source.parts)
+        expect(
+          all
+            .find((message) => message.info.id === source.info.id)
+            ?.parts.filter((part) => !KiloCompactionBudget.internal(part)),
+        ).toEqual(source.parts)
       }),
     )
   }

@@ -22,6 +22,7 @@ import { Question } from "@/question"
 import { KiloSessionProcessor, type ReviewTelemetry } from "@/kilocode/session/processor"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
+import { AuthOutcome } from "@/kilocode/auth/outcome"
 import { KiloRoutedModel } from "@/kilocode/session/routed-model"
 import { KiloResponse } from "@/kilocode/session/response"
 import { KiloResponseAccounting } from "@/kilocode/session/response-accounting"
@@ -1004,7 +1005,7 @@ export const layer = Layer.effect(
           // kilocode_change end
         }
         ctx.assistantMessage.error = error
-        if (KiloResponse.blocked(error)) ctx.assistantMessage.finish = "error" // kilocode_change
+        if (KiloResponse.blocked(error) || MessageV2.AuthError.isInstance(error)) ctx.assistantMessage.finish = "error" // kilocode_change
         if (ctx.contextPolicy && ctx.assistantMessage.summary && KiloContextPolicy.Blocked.isInstance(error)) return // kilocode_change - worker admission is nonterminal during safe splitting
         yield* bus.publish(Session.Event.Error, {
           sessionID: ctx.assistantMessage.sessionID,
@@ -1059,10 +1060,17 @@ export const layer = Layer.effect(
             )
           }).pipe(
             Effect.onInterrupt(() => interrupt()), // kilocode_change
+            // kilocode_change start - auth and receipt failures never authorize replay.
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
-              (cause) => Effect.fail(responses.failure(Cause.squash(cause)) ?? Cause.squash(cause)), // kilocode_change - observed responses cannot be silently resubmitted
+              (cause) =>
+                Effect.fail(
+                  AuthOutcome.known(Cause.squash(cause)) ??
+                    responses.failure(Cause.squash(cause)) ??
+                    Cause.squash(cause),
+                ), // kilocode_change - auth and receipts never authorize replay
             ),
+            // kilocode_change end
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,

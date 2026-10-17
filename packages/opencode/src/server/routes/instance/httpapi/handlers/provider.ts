@@ -5,7 +5,7 @@ import { Provider } from "@/provider/provider"
 import { ProviderID } from "@/provider/schema"
 import { mapValues, pickBy } from "remeda" // kilocode_change
 import { ModelCache } from "@/provider/model-cache" // kilocode_change
-import { disposeAllInstancesAfterProviderAuthCallback } from "@/kilocode/server/provider-auth-lifecycle" // kilocode_change
+import { afterProviderAuthCallback } from "@/kilocode/server/provider-auth-lifecycle" // kilocode_change
 import { providerMetadata } from "@/kilocode/provider/metadata" // kilocode_change
 import { filterPromptTrainingModels } from "@/kilocode/provider/model-filter" // kilocode_change
 import { Effect, Schema } from "effect"
@@ -13,6 +13,11 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { ProviderAuthApiError } from "../groups/provider"
+import { KiloAuth } from "@/kilocode/auth/authority" // kilocode_change
+import { Env } from "@/env" // kilocode_change
+import { AppFileSystem } from "@opencode-ai/core/filesystem" // kilocode_change
+import { WorkspaceRouteContext } from "../middleware/workspace-routing" // kilocode_change
+import * as PassiveInstance from "@/kilocode/server/httpapi/passive-instance" // kilocode_change
 
 function mapProviderAuthError<A, R>(self: Effect.Effect<A, ProviderAuth.Error, R>) {
   return self.pipe(
@@ -38,6 +43,8 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
   Effect.gen(function* () {
     const cfg = yield* Config.Service
     const provider = yield* Provider.Service
+    const env = yield* Env.Service // kilocode_change
+    const authentication = KiloAuth.bind({ config: cfg, provider, env }) // kilocode_change
     const svc = yield* ProviderAuth.Service
     const cache = yield* ModelCache.Service // kilocode_change
 
@@ -122,16 +129,38 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
           providerID: ctx.params.providerID,
           method: ctx.payload.method,
           code: ctx.payload.code,
+          attemptID: ctx.payload.attemptID, // kilocode_change
         }),
       )
-      yield* disposeAllInstancesAfterProviderAuthCallback() // kilocode_change
+      yield* afterProviderAuthCallback(ctx.params.providerID) // kilocode_change
       return true
     })
 
-    return handlers
-      .handle("list", list)
-      .handle("auth", auth)
-      .handleRaw("authorize", authorizeRaw)
-      .handle("callback", callback)
+    return (
+      handlers
+        // kilocode_change start - inspect only the routed directory's completed config; never materialize an instance
+        .handle("readiness", (ctx) =>
+          PassiveInstance.readiness(
+            { providerID: ctx.params.providerID, modelID: ctx.query.modelID },
+            Effect.gen(function* () {
+              const route = yield* WorkspaceRouteContext
+              const directory = yield* Effect.try({
+                try: () => decodeURIComponent(route.directory),
+                catch: () => route.directory,
+              }).pipe(Effect.catch((value) => Effect.succeed(value)))
+              return yield* authentication.readiness(
+                ctx.params.providerID,
+                ctx.query.modelID,
+                AppFileSystem.resolve(directory),
+              )
+            }),
+          ),
+        )
+        // kilocode_change end
+        .handle("list", list)
+        .handle("auth", auth)
+        .handleRaw("authorize", authorizeRaw)
+        .handle("callback", callback)
+    )
   }),
 )

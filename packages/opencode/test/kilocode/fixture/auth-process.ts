@@ -4,8 +4,9 @@ import path from "node:path"
 export function worker(input: {
   root: string
   state: string
-  role: "refresh" | "hold" | "set" | "service" | "logout" | "relogin"
+  role: "refresh" | "hold" | "set" | "service" | "logout" | "relogin" | "attempt"
   stale?: boolean
+  uncertain?: boolean
   provider?: string
   url?: string
 }) {

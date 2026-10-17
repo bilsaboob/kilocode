@@ -5,6 +5,7 @@ import * as Observability from "@opencode-ai/core/effect/observability"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Bus } from "@/bus"
 import { Auth } from "@/auth"
+import { Env } from "@/env" // kilocode_change - auth source selection uses the same workspace environment service
 import { Account } from "@/account/account"
 import { Config } from "@/config/config"
 import { Git } from "@/git"
@@ -65,6 +66,7 @@ const CoreLayer = Layer.mergeAll(
   AppFileSystem.defaultLayer,
   Bus.defaultLayer,
   Auth.defaultLayer,
+  Env.defaultLayer, // kilocode_change
   Account.defaultLayer,
   Config.defaultLayer,
   Git.defaultLayer,

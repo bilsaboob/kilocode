@@ -8,6 +8,21 @@ import { remove as cleanup } from "./kilocode/cleanup" // kilocode_change
 // kilocode_change start - isolate inherited auth overrides before any source imports
 const authContent = process.env.KILO_AUTH_CONTENT
 delete process.env.KILO_AUTH_CONTENT
+delete process.env.ZEN_KILO_CONTEXT_POLICY
+delete process.env.KILO_COMPACTION_BUDGET
+// Do not copy inherited provider secrets into fixture Env.Service instances.
+for (const key of Object.keys(process.env)) {
+  if (/TOKEN|SECRET|CREDENTIAL|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY/i.test(key)) delete process.env[key]
+}
+for (const key of [
+  "KILO_CONFIG",
+  "KILO_CONFIG_DIR",
+  "KILO_CONFIG_CONTENT",
+  "OPENCODE_CONFIG",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+])
+  delete process.env[key]
 // kilocode_change end
 
 // Set XDG env vars FIRST, before any src/ imports

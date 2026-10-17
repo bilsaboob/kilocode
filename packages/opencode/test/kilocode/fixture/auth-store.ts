@@ -75,3 +75,38 @@ export async function fault(file: string, target: string, method: "write" | "ren
     },
   }
 }
+
+// Pause after revision publication, immediately before the credential rename.
+// All IO and fencing still use the production decorated filesystem and store.
+export async function pause(file: string) {
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const layer = Layer.effect(
+    AppFileSystem.Service,
+    Effect.gen(function* () {
+      const fs = yield* AppFileSystem.Service
+      return {
+        ...fs,
+        rename: (from: string, to: string) =>
+          to !== file
+            ? fs.rename(from, to)
+            : Effect.gen(function* () {
+                entered.resolve()
+                yield* Effect.promise(() => release.promise)
+                yield* fs.rename(from, to)
+              }),
+      }
+    }),
+  ).pipe(Layer.provide(AppFileSystem.defaultLayer))
+  const store = await Effect.runPromise(
+    AuthStore.make(file).pipe(Effect.provide(Layer.mergeAll(layer, EffectFlock.defaultLayer))),
+  )
+  return {
+    store,
+    entered: entered.promise,
+    release: () => release.resolve(),
+    [Symbol.dispose]() {
+      release.resolve()
+    },
+  }
+}

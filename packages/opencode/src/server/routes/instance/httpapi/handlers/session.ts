@@ -1,14 +1,15 @@
 import { Image } from "@/image/image" // kilocode_change - classify user image validation defects
 import { KiloSessionHttpApi } from "@/kilocode/server/httpapi/session-fork" // kilocode_change
 import { SessionKnowledge } from "@/kilocode/session/knowledge" // kilocode_change
-import { Agent } from "@/agent/agent"
+import { KiloCompactionBudget } from "@/kilocode/session/compaction-budget" // kilocode_change
+import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
+import { KiloSessionIdentity } from "@/kilocode/session/identity" // kilocode_change
 import { Bus } from "@/bus"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
-import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
@@ -18,7 +19,7 @@ import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NamedError } from "@opencode-ai/core/util/error"
-import { Cause, Effect, Option, Schema, Scope } from "effect"
+import { Cause, Effect, Latch, Option, Schema, Scope } from "effect" // kilocode_change
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/httpapi"
@@ -48,15 +49,22 @@ const tryParseJson = (text: string) =>
     catch: () => new HttpApiError.BadRequest({}),
   })
 
+// kilocode_change start - persistence conflicts are explicit request failures, not accepted no-op writes
+const identity = <A, E, R>(work: Effect.Effect<A, E, R>) =>
+  work.pipe(
+    Effect.catchDefect((error) =>
+      error instanceof KiloSessionIdentity.Conflict ? Effect.fail(new HttpApiError.BadRequest({})) : Effect.die(error),
+    ),
+  )
+// kilocode_change end
+
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
     const revertSvc = yield* SessionRevert.Service
-    const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
-    const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
@@ -266,6 +274,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof InitPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      yield* identity(Effect.sync(() => KiloSessionIdentity.prompt({ ...ctx.payload, ...ctx.params }))) // kilocode_change
       yield* promptSvc
         .command({
           sessionID: ctx.params.sessionID,
@@ -274,7 +283,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           command: Command.Default.INIT,
           arguments: "",
         })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+        .pipe(
+          identity, // kilocode_change
+          Effect.mapError(() => new HttpApiError.BadRequest({})),
+        ) // kilocode_change
       return true
     })
 
@@ -301,21 +313,19 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
-      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-      const defaultAgent = yield* agentSvc.defaultAgent()
-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
-
-      yield* compactSvc.create({
-        sessionID: ctx.params.sessionID,
-        agent: currentAgent,
-        model: {
-          providerID: ctx.payload.providerID,
-          modelID: ctx.payload.modelID,
-        },
-        auto: ctx.payload.auto ?? false,
-      })
-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+      // kilocode_change start - claim the runner before cleanup, marker creation, or provider work
+      yield* requireSession(ctx.params.sessionID)
+      yield* SessionError.mapBusy(
+        promptSvc.compact({
+          sessionID: ctx.params.sessionID,
+          model: {
+            providerID: ctx.payload.providerID,
+            modelID: ctx.payload.modelID,
+          },
+          auto: ctx.payload.auto ?? false,
+        }),
+      )
+      // kilocode_change end
       return true
     })
 
@@ -324,6 +334,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      yield* identity(Effect.sync(() => KiloSessionIdentity.prompt({ ...ctx.payload, ...ctx.params }))) // kilocode_change
+      // kilocode_change start - validate protected receipts and recovery before admission.
+      if (
+        !KiloCompactionBudget.external(ctx.payload.parts) ||
+        !KiloSessionRecovery.accept(ctx.params.sessionID, ctx.payload.parts)
+      )
+        return yield* new HttpApiError.BadRequest({}) // kilocode_change - validate recovery before any admission or persistence
+      // kilocode_change end
       const message = yield* promptSvc
         .prompt({ ...ctx.payload, sessionID: ctx.params.sessionID } as unknown as SessionPrompt.PromptInput) // kilocode_change
         .pipe(
@@ -333,7 +351,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
             if (
               error instanceof Image.InvalidDataUrlError ||
               error instanceof Image.DecodeError ||
-              error instanceof Image.SizeError
+              error instanceof Image.SizeError ||
+              error instanceof KiloSessionIdentity.Conflict // kilocode_change
             )
               return Effect.fail(new HttpApiError.BadRequest({}))
             return Effect.die(error)
@@ -350,12 +369,36 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      yield* identity(Effect.sync(() => KiloSessionIdentity.prompt({ ...ctx.payload, ...ctx.params }))) // kilocode_change - reject known collisions before asynchronous acknowledgement
+      // kilocode_change start - asynchronous acknowledgement cannot admit caller-supplied authority.
+      if (
+        !KiloCompactionBudget.external(ctx.payload.parts) ||
+        !KiloSessionRecovery.accept(ctx.params.sessionID, ctx.payload.parts)
+      )
+        return yield* new HttpApiError.BadRequest({}) // kilocode_change
+      // kilocode_change end
+      const admitted = yield* Latch.make() // kilocode_change - acknowledge only after per-session admission, not merely fork scheduling
+      let entered = false // kilocode_change
+      let rejection: Cause.Cause<unknown> | undefined // kilocode_change
       // kilocode_change start - cast to bridge schema-readonly to PromptInput mutable; matches legacy Hono session.ts
       yield* promptSvc
-        .prompt({ ...ctx.payload, sessionID: ctx.params.sessionID } as unknown as SessionPrompt.PromptInput)
+        .prompt({
+          ...ctx.payload,
+          sessionID: ctx.params.sessionID,
+          onAdmitted: () => {
+            entered = true
+            admitted.openUnsafe()
+          },
+        } as unknown as SessionPrompt.PromptInput)
         .pipe(
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
+              // Denied admission is synchronous; explicit Abort is not a session error.
+              if (!entered) {
+                rejection = cause
+                return
+              }
+              if (Cause.hasInterruptsOnly(cause)) return
               yield* Effect.logError("prompt_async failed").pipe(
                 Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
               )
@@ -365,8 +408,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               })
             }),
           ),
+          Effect.onExit(() => admitted.open), // a rejected admission must also release the HTTP waiter
           Effect.forkIn(scope, { startImmediately: true }),
         )
+      yield* admitted.await
+      if (rejection) return yield* Effect.die(Cause.squash(rejection)) // kilocode_change
       // kilocode_change end
       return HttpApiSchema.NoContent.make()
     })
@@ -376,9 +422,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* promptSvc
-        .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      yield* identity(Effect.sync(() => KiloSessionIdentity.prompt({ ...ctx.payload, ...ctx.params }))) // kilocode_change
+      return yield* promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+        identity, // kilocode_change
+        Effect.mapError(() => new HttpApiError.BadRequest({})),
+      ) // kilocode_change
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
@@ -386,7 +434,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+      yield* identity(Effect.sync(() => KiloSessionIdentity.prompt({ ...ctx.payload, ...ctx.params }))) // kilocode_change
+      // kilocode_change start - shell identity failures use the same public boundary.
+      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })).pipe(
+        identity, // kilocode_change
+      )
+      // kilocode_change end
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {
@@ -439,7 +492,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-      yield* session.removeMessage(ctx.params)
+      if (!KiloCompactionBudget.mutable(ctx.params)) return yield* new HttpApiError.BadRequest({}) // kilocode_change - cascading deletion must not reset a frozen quota
+      yield* session.removeMessage(ctx.params).pipe(identity) // kilocode_change
       return true
     })
 
@@ -447,7 +501,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID; partID: PartID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* session.removePart(ctx.params)
+      // kilocode_change start - protect admission against concurrent public edits and receipt deletion
+      yield* runState.assertNotBusy(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      if (!KiloCompactionBudget.mutable(ctx.params)) return yield* new HttpApiError.BadRequest({})
+      // kilocode_change end
+      yield* session.removePart(ctx.params).pipe(identity) // kilocode_change
       return true
     })
 
@@ -456,6 +514,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof MessageV2.Part.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      // kilocode_change start - receipt authority belongs to internal transactional writes only
+      yield* runState.assertNotBusy(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      if (!KiloCompactionBudget.external([ctx.payload]) || !KiloCompactionBudget.mutable(ctx.params))
+        return yield* new HttpApiError.BadRequest({})
+      // kilocode_change end
       const payload = ctx.payload as MessageV2.Part
       if (
         payload.id !== ctx.params.partID ||
@@ -464,7 +527,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       ) {
         return yield* new HttpApiError.BadRequest({})
       }
-      return yield* session.updatePart(payload)
+      return yield* session.updatePart(payload).pipe(identity) // kilocode_change
     })
 
     // kilocode_change start

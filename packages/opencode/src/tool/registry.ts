@@ -18,6 +18,7 @@ import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
+import { Env } from "@/env" // kilocode_change
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@kilocode/plugin"
 import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Schema } from "effect"
@@ -94,6 +95,7 @@ export const layer: Layer.Layer<
   Service,
   never,
   | Config.Service
+  | Env.Service // kilocode_change - task continuations recheck their admitted source
   | Plugin.Service
   | Question.Service
   | Todo.Service
@@ -418,7 +420,7 @@ export const defaultLayer = Layer.suspend(
   () =>
     layer
       .pipe(
-        Layer.provide(Config.defaultLayer),
+        Layer.provide(Layer.mergeAll(Config.defaultLayer, Env.defaultLayer)), // kilocode_change
         Layer.provide(Plugin.defaultLayer),
         Layer.provide(Question.defaultLayer),
         Layer.provide(Todo.defaultLayer),

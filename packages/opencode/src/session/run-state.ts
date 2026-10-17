@@ -6,8 +6,22 @@ import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID } from "./schema"
 import { SessionStatus } from "./status"
+import { KiloRuntime } from "@/kilocode/runtime/control" // kilocode_change
+import { KiloSessionRecovery } from "@/kilocode/session/recovery" // kilocode_change
 
 export interface Interface {
+  // kilocode_change start
+  readonly admit: <A, E, R>(
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | Session.BusyError, R>
+  readonly startExclusive: (
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+  ) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+  // kilocode_change end
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly ensureRunning: (
@@ -37,10 +51,16 @@ export const layer = Layer.effect(
         const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
-            yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
-              concurrency: "unbounded",
-              discard: true,
-            })
+            // kilocode_change start - invalidate delayed recovery before disposing its owning instance
+            yield* Effect.forEach(
+              runners,
+              ([id, runner]) => Effect.sync(() => KiloSessionRecovery.reset(id)).pipe(Effect.andThen(runner.dispose)),
+              {
+                concurrency: "unbounded",
+                discard: true,
+              },
+            )
+            // kilocode_change end
             runners.clear()
           }),
         )
@@ -56,8 +76,10 @@ export const layer = Layer.effect(
       const existing = data.runners.get(sessionID)
       if (existing) return existing
       const next = Runner.make<MessageV2.WithParts>(data.scope, {
+        key: sessionID, // kilocode_change - directory changes must not bypass session ownership
+        pending: () => KiloSessionRecovery.pending(sessionID), // kilocode_change
         onIdle: Effect.gen(function* () {
-          data.runners.delete(sessionID)
+          // kilocode_change - keep a stable ownership lock through waiter interruption and settling finalizers
           yield* status.set(sessionID, { type: "idle" })
         }),
         onBusy: status.set(sessionID, { type: "busy" }),
@@ -74,14 +96,20 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
+      yield* Effect.sync(() => KiloSessionRecovery.reset(sessionID)) // kilocode_change
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
       if (!existing || !existing.busy) {
         yield* status.set(sessionID, { type: "idle" })
+        yield* cancelBackgroundJobs(background, sessionID) // kilocode_change
         return
       }
-      yield* existing.cancel
+      // kilocode_change start - Stop includes detached background owners.
+      yield* Effect.all([existing.cancel, cancelBackgroundJobs(background, sessionID)], {
+        concurrency: "unbounded",
+        discard: true,
+      }) // kilocode_change
+      // kilocode_change end
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
@@ -89,7 +117,7 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
       work: Effect.Effect<MessageV2.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
+      return yield* KiloRuntime.work((yield* runner(sessionID, onInterrupt)).ensureRunning(work)) // kilocode_change
     })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
@@ -103,7 +131,26 @@ export const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
+    // kilocode_change start
+    const admit: Interface["admit"] = (sessionID, onInterrupt, work) =>
+      KiloRuntime.work(
+        Effect.gen(function* () {
+          return yield* (yield* runner(sessionID, onInterrupt))
+            .admit(work)
+            .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+        }),
+      )
+    const startExclusive: Interface["startExclusive"] = (sessionID, onInterrupt, work) =>
+      KiloRuntime.work(
+        Effect.gen(function* () {
+          if ((yield* status.get(sessionID)).type !== "idle") return yield* busyError(sessionID)
+          return yield* (yield* runner(sessionID, onInterrupt))
+            .startExclusive(work)
+            .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+        }),
+      )
+    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell, admit, startExclusive })
+    // kilocode_change end
   }),
 )
 

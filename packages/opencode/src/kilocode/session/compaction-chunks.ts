@@ -15,6 +15,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { KiloContextPolicy } from "./context-policy"
 import { KiloCompactionState } from "./compaction-state"
 import { KiloResponse } from "./response"
+import { KiloCompactionBudget } from "./compaction-budget"
+import { KiloAuth } from "../auth/authority"
 
 type Update = <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
 type UpdateMessage = <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -64,7 +66,7 @@ export namespace KiloCompactionChunks {
   }
 
   export function eligible(input: { result: SessionProcessor.Result; error?: MessageV2.Assistant["error"] }) {
-    if (KiloResponse.blocked(input.error)) return false
+    if (KiloResponse.blocked(input.error) || KiloCompactionBudget.blocked(input.error)) return false
     if (
       input.error &&
       input.error.name !== "ContextOverflowError" &&
@@ -145,7 +147,7 @@ export namespace KiloCompactionChunks {
           },
         ],
       } satisfies Replay
-    })
+    }).pipe((work) => KiloCompactionBudget.run({ sessionID: input.sessionID, messageID: input.user.id }, work))
   }
 
   export function budget(input: {
@@ -321,6 +323,7 @@ export namespace KiloCompactionChunks {
 
   function run(input: Input & { data: LLM.StreamInput["messages"]; text: string }) {
     return Effect.gen(function* () {
+      yield* KiloCompactionBudget.check
       const msg = yield* input.session.updateMessage(assistant({ base: input.target, sessionID: input.sessionID }))
       yield* input.session.updatePart(
         KiloCompactionState.mark({ message: msg, status: "worker", target: input.target.id }),
@@ -340,6 +343,7 @@ export namespace KiloCompactionChunks {
       }
       const result = yield* worker.process({
         user: input.user,
+        authAuthority: KiloAuth.selected(input.user, mdl),
         agent,
         sessionID: input.sessionID,
         tools: {},
@@ -347,6 +351,7 @@ export namespace KiloCompactionChunks {
         messages: [...input.data, { role: "user", content: [{ type: "text", text: input.text }] }],
         model: mdl,
       })
+      yield* KiloCompactionBudget.check
       const output = text(worker.message, MessageV2.parts(worker.message.id))
       const error =
         worker.message.error ??
@@ -493,6 +498,6 @@ export namespace KiloCompactionChunks {
       input.target.time.completed = Date.now()
       yield* input.updateMessage(input.target)
       return "continue" as const
-    })
+    }).pipe((work) => KiloCompactionBudget.run({ sessionID: input.sessionID, messageID: input.user.id }, work))
   }
 }

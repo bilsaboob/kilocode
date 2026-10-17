@@ -22,7 +22,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "./console-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { InstanceState } from "@/effect/instance-state"
-import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema, ScopedCache } from "effect" // kilocode_change
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -50,6 +50,7 @@ import z from "zod" // kilocode_change - Kilo config compatibility schemas
 // kilocode_change start
 import { ZodOverride } from "@opencode-ai/core/effect-zod"
 import { KilocodeConfig } from "../kilocode/config/config"
+import { KilocodeOrganization } from "../kilocode/config/organization"
 import { primaryPaths } from "../kilocode/primary-worktree"
 import { Git } from "@/git"
 import { KilocodeDefaultPlugins } from "@/kilocode/config/default-plugins"
@@ -434,6 +435,7 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
 
 type State = {
   config: Info
+  organization: Effect.Effect<Info> // kilocode_change - auth-aware projection over stable config
   directories: string[]
   deps: Fiber.Fiber<void>[]
   warnings: Warning[] // kilocode_change
@@ -441,6 +443,7 @@ type State = {
 }
 
 export interface Interface {
+  readonly peek?: (directory?: string) => Effect.Effect<Info | undefined> // kilocode_change - passive inspection never initializes configuration
   readonly get: () => Effect.Effect<Info>
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
@@ -704,14 +707,8 @@ export const layer = Layer.effect(
             merge: mergeConfigConcatArrays,
           }),
         )
-        result = mergeConfigConcatArrays(result, legacy.config)
+        result = mergeConfigConcatArrays(result, { ...legacy.config, agent: {} })
         warnings.push(...legacy.warnings)
-
-        const orgModes = yield* Effect.promise(() => KilocodeConfig.loadOrganizationModes(auth))
-        if (Object.keys(orgModes.agents).length > 0) {
-          result = mergeConfigConcatArrays(result, { agent: orgModes.agents })
-        }
-        warnings.push(...orgModes.warnings)
         // kilocode_change end
 
         const authEnv: Record<string, string> = {}
@@ -1078,7 +1075,7 @@ export const layer = Layer.effect(
         // kilocode_change end
 
         return {
-          config: result,
+          ...KilocodeOrganization.create(result, legacy.config.agent, authSvc), // kilocode_change
           directories,
           deps,
           warnings, // kilocode_change
@@ -1104,7 +1101,7 @@ export const layer = Layer.effect(
         yield* InstanceState.invalidate(state).pipe(Effect.catchCause(() => Effect.void))
       }
       // kilocode_change end
-      return yield* InstanceState.use(state, (s) => s.config)
+      return yield* InstanceState.useEffect(state, (s) => s.organization) // kilocode_change
     })
 
     const directories = Effect.fn("Config.directories")(function* () {
@@ -1215,6 +1212,13 @@ export const layer = Layer.effect(
     })
 
     return Service.of({
+      // kilocode_change start - completed entries only, no lookup/network/installation/migration
+      peek: Effect.fn("Config.peek")(function* (directory?: string) {
+        const dir = directory ?? (yield* InstanceState.directory)
+        const entries = yield* ScopedCache.entries(state.cache)
+        return entries.find(([key]) => key === dir)?.[1].config
+      }),
+      // kilocode_change end
       get,
       getGlobal,
       getConsoleState,

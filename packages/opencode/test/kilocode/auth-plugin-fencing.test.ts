@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
 import type { PluginInput } from "@kilocode/plugin"
 import type { Auth } from "../../src/auth"
-import { AuthStaleError, AuthSourceError, AuthStorageError } from "../../src/kilocode/auth/store"
+import { AuthStaleError, AuthSourceError } from "../../src/kilocode/auth/store"
 import { CodexAuthPlugin } from "../../src/plugin/openai/codex"
 import { XaiAuthPlugin } from "../../src/plugin/xai"
 import { DigitalOceanAuthPlugin } from "../../src/plugin/digitalocean"
@@ -122,20 +122,83 @@ for (const provider of ["openai", "xai"] as const) {
     }
   })
 
-  test(`${provider} malformed HTTP 200 renewal cannot change credentials or revision`, async () => {
+  test(`${provider} malformed HTTP 200 renewal cannot change credentials or be exchanged again`, async () => {
     await using f = await fixture(expired(), provider)
     const before = await f.store.snapshot(provider)
+    let requests = 0
+    let exchanges = 0
+    let reads = 0
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const waiting = Promise.withResolvers<void>()
+    using server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (new URL(request.url).pathname === "/oauth/token") {
+          exchanges++
+          entered.resolve()
+          await release.promise
+          return Response.json(
+            provider === "openai"
+              ? { access_token: "malformed", id_token: "", expires_in: 3600 }
+              : { refresh_token: "malformed", expires_in: 3600 },
+          )
+        }
+        requests++
+        return Response.json({ ok: true })
+      },
+    })
+    const plugin =
+      provider === "openai"
+        ? await CodexAuthPlugin({} as PluginInput, {
+            store: f.store,
+            issuer: server.url.origin,
+            codexApiEndpoint: new URL("/responses", server.url).href,
+          })
+        : await XaiAuthPlugin({} as PluginInput, { store: f.store, tokenUrl: new URL("/oauth/token", server.url).href })
+    const loaded = await plugin.auth!.loader!(async () => {
+      const auth = (await f.store.all())[provider]
+      if (++reads === 3) waiting.resolve()
+      return auth
+    }, {} as never)
+    const url = new URL("/v1/responses", server.url)
+    const first = loaded.fetch(url).catch((error: unknown) => error)
+    try {
+      await entered.promise
+      const second = loaded.fetch(url).catch((error: unknown) => error)
+      await waiting.promise
+      release.resolve()
+      for (const error of await Promise.all([first, second]))
+        expect(error).toMatchObject({
+          name: "CredentialReadinessError",
+          reason: "exchange-uncertain",
+          isRetryable: false,
+        })
+      await expect(loaded.fetch(url)).rejects.toMatchObject({ reason: "exchange-uncertain" })
+      const fresh = await plugin.auth!.loader!(async () => (await f.store.all())[provider], {} as never)
+      await expect(fresh.fetch(url)).rejects.toMatchObject({ reason: "exchange-uncertain" })
+      expect(await f.store.snapshot(provider)).toEqual(before)
+      expect(await f.store.observe(provider, true)).toMatchObject({ issue: "exchange-uncertain" })
+      expect(exchanges).toBe(1)
+      expect(requests).toBe(0)
+    } finally {
+      release.resolve()
+      await first
+      await plugin.dispose?.()
+    }
+  })
+
+  test(`${provider} recognized transient rejection permits an explicit later attempt without implicit retry`, async () => {
+    await using f = await fixture(expired(), provider)
+    let exchanges = 0
     let requests = 0
     using server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch(request) {
         if (new URL(request.url).pathname === "/oauth/token")
-          return Response.json(
-            provider === "openai"
-              ? { access_token: "malformed", id_token: "", expires_in: 3600 }
-              : { refresh_token: "malformed", expires_in: 3600 },
-          )
+          return ++exchanges === 1 ? Response.json({ error: "unavailable" }, { status: 503 }) : Response.json(tokens())
         requests++
         return Response.json({ ok: true })
       },
@@ -149,9 +212,14 @@ for (const provider of ["openai", "xai"] as const) {
           })
         : await XaiAuthPlugin({} as PluginInput, { store: f.store, tokenUrl: new URL("/oauth/token", server.url).href })
     const loaded = await plugin.auth!.loader!(async () => (await f.store.all())[provider], {} as never)
-    await expect(loaded.fetch(new URL("/v1/responses", server.url))).rejects.toBeInstanceOf(AuthStorageError)
-    expect(await f.store.snapshot(provider)).toEqual(before)
+    const url = new URL("/v1/responses", server.url)
+    await expect(loaded.fetch(url)).rejects.toMatchObject({ reason: "exchange-unavailable", isRetryable: false })
+    expect(exchanges).toBe(1)
     expect(requests).toBe(0)
+    expect((await loaded.fetch(url)).status).toBe(200)
+    expect(exchanges).toBe(2)
+    expect(requests).toBe(1)
+    await plugin.dispose?.()
   })
 }
 

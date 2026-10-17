@@ -6,6 +6,7 @@ import { Global } from "@opencode-ai/core/global"
 import type { Flock } from "@opencode-ai/core/util/flock"
 import { Auth } from "@/auth"
 import { AuthIO } from "./io"
+import { AuthOutcome } from "./outcome"
 
 export class AuthSourceError extends Error {
   constructor() {
@@ -36,10 +37,29 @@ export namespace AuthStore {
     tokenRevision: z.number().int().nonnegative().safe(),
     fingerprint: z.string(),
     tombstone: z.boolean(),
+    attemptRevision: z.number().int().nonnegative().safe().optional(),
+    attempt: z
+      .object({ id: z.string().uuid(), method: z.number().int().nonnegative(), consumed: z.boolean() })
+      .optional(),
   })
   const metadata = z.object({
     version: z.literal(1),
     epoch: z.string().uuid(),
+    exchanges: z
+      .preprocess(
+        (value) => (value && typeof value === "object" && !Array.isArray(value) ? Object.entries(value) : null),
+        z.array(
+          z.tuple([
+            z.string(),
+            z.object({
+              key: z.string(),
+              reason: z.enum(["refreshing", "exchange-uncertain", "refresh-rejected"]),
+            }),
+          ]),
+        ),
+      )
+      .transform((entries) => Object.fromEntries(entries))
+      .optional(),
     providers: z
       .preprocess(
         (value) => (value && typeof value === "object" && !Array.isArray(value) ? Object.entries(value) : null),
@@ -58,7 +78,22 @@ export namespace AuthStore {
     fingerprint: string
     value: Auth.Info | undefined
   }>
+  export type Attempt = Readonly<{
+    snapshot: Snapshot
+    id: string
+    method: number
+    revision: number
+    targets: Readonly<Record<string, { generation: string; attemptRevision: number }>>
+  }>
   const bindings = new WeakMap<object, Snapshot>()
+
+  export function detach(value: Auth.Info | undefined) {
+    if (!value) return undefined
+    const copy = structuredClone(value)
+    const snapshot = bindings.get(value)
+    if (snapshot) bindings.set(copy, snapshot)
+    return copy
+  }
   const owners = new WeakMap<Snapshot, AuthIO.Interface>()
 
   export const normalize = (provider: string) => provider.replace(/\/+$/, "")
@@ -146,6 +181,18 @@ export namespace AuthStore {
     ])
   }
 
+  export function identity(value: Auth.Info) {
+    const snapshot = bindings.get(value)
+    return snapshot?.source === "disk"
+      ? fingerprint([
+          generation(snapshot),
+          value.type,
+          value.type === "oauth" ? value.accountId : undefined,
+          value.type === "oauth" ? value.enterpriseUrl : undefined,
+        ])
+      : fingerprint(["external", value])
+  }
+
   export function create(file = path.join(Global.Path.data, "auth.json"), options?: Flock.Options) {
     return build(file, options, AuthIO.current)
   }
@@ -178,7 +225,13 @@ export namespace AuthStore {
       return io
         .lock("auth-store", path.join(path.dirname(store), "auth-locks"), () => fn(store, io), options)
         .catch((err) => {
-          if (err instanceof AuthStaleError || err instanceof AuthSourceError || err instanceof AuthStorageError)
+          if (
+            err instanceof AuthStaleError ||
+            err instanceof AuthSourceError ||
+            err instanceof AuthStorageError ||
+            err instanceof AuthOutcome.Failure ||
+            AuthOutcome.control(err)
+          )
             throw err
           throw new AuthStorageError()
         })
@@ -195,6 +248,7 @@ export namespace AuthStore {
         if (!parsed.success) throw new AuthStorageError()
         const dirty = Object.keys(parsed.data.providers).some((provider) => provider !== normalize(provider))
         parsed.data.providers = canonical(parsed.data.providers)
+        if (parsed.data.exchanges) parsed.data.exchanges = canonical(parsed.data.exchanges)
         return { data, meta: parsed.data, sidecar, dirty }
       }
       const meta: Metadata = { version: 1, epoch: randomUUID(), providers: Object.create(null) }
@@ -283,17 +337,44 @@ export namespace AuthStore {
       return current
     }
 
-    async function write(provider: string, value: Auth.Info | undefined, expected?: Snapshot, explicit = true) {
+    async function write(
+      provider: string,
+      value: Auth.Info | undefined,
+      expected?: Snapshot,
+      explicit = true,
+      attempt?: Attempt,
+      signal?: AbortSignal,
+    ) {
       provider = normalize(provider)
       // Validate and detach every caller-owned field before any asynchronous IO.
       // A malformed renewal must not advance metadata or replace good credentials.
       value = value === undefined ? undefined : copy(value)
+      // API-key replacement has no renewable account proof. It is an authority
+      // change even when a conditional metadata writer performs the mutation.
+      if (!explicit && expected?.value?.type === "api" && value?.type === "api" && value.key !== expected.value.key)
+        explicit = true
       if (expected && override() !== undefined) throw new AuthSourceError()
       return locked(async (store, io) => {
         if (expected && override() !== undefined) throw new AuthSourceError()
         const current = await state(store, io)
-        if (expected) compare(expected, await capture(store, provider, current, io), true)
+        if (expected)
+          compare(expected, await capture(store, attempt ? attempt.snapshot.provider : provider, current, io), !attempt)
         const prior = current.meta.providers[provider]
+        if (attempt) {
+          const source = current.meta.providers[normalize(attempt.snapshot.provider)].attempt
+          if (source?.id !== attempt.id || source.method !== attempt.method || !source.consumed)
+            throw new AuthStaleError()
+          if (provider !== normalize(attempt.snapshot.provider)) {
+            const original = attempt.targets[provider]
+            if (
+              original
+                ? prior?.loginGeneration !== original.generation ||
+                  (prior?.attemptRevision ?? 0) !== original.attemptRevision
+                : prior !== undefined
+            )
+              throw new AuthStaleError()
+          }
+        }
         const revision = (prior?.tokenRevision ?? 0) + 1
         if (!Number.isSafeInteger(revision)) throw new AuthStorageError()
         current.meta.providers[provider] = {
@@ -301,13 +382,17 @@ export namespace AuthStore {
           tokenRevision: revision,
           fingerprint: fingerprint(value),
           tombstone: value === undefined,
+          ...(prior?.attemptRevision !== undefined && { attemptRevision: prior.attemptRevision }),
+          ...(!explicit && prior?.attempt && { attempt: prior.attempt }),
         }
+        if (current.meta.exchanges) delete current.meta.exchanges[provider]
         for (const key of Object.keys(current.data)) {
           if (key.replace(/\/+$/, "") === provider) delete current.data[key]
         }
         if (value !== undefined) current.data[provider] = value
         // Invalidate old authority FIRST. If credentials fail, keep this revision advanced.
         // The fingerprint mismatch then fails closed until an explicit mutation repairs it.
+        signal?.throwIfAborted()
         await atomic(io, current.sidecar, current.meta)
         current.dirty = false
         await atomic(io, store, current.data)
@@ -317,6 +402,92 @@ export namespace AuthStore {
 
     return {
       run,
+      observe: (provider: string, passive = false) =>
+        run(async () => {
+          provider = normalize(provider)
+          const env = override()
+          if (env !== undefined) return { source: "env" as const, value: env?.[provider], snapshot: undefined }
+          const load = async (file: string, io: AuthIO.Interface) => {
+            const raw = await read(io, file)
+            if (raw !== undefined && (!raw || typeof raw !== "object" || Array.isArray(raw)))
+              throw new AuthStorageError()
+            const data = canonical((raw ?? {}) as Record<string, unknown>)
+            const value = data[provider] === undefined ? undefined : copy(data[provider] as Auth.Info)
+            const saved = await read(io, path.join(path.dirname(file), "auth.revisions.json"))
+            if (saved === undefined) return { source: "file" as const, value, snapshot: undefined }
+            const parsed = metadata.safeParse(saved)
+            if (!parsed.success) throw new AuthStorageError()
+            const item = canonical(parsed.data.providers)[provider]
+            if (!item) return { source: "file" as const, value, snapshot: undefined }
+            if (item.fingerprint !== fingerprint(data[provider]) || item.tombstone !== (value === undefined))
+              throw new AuthStorageError()
+            const store = path.join(await io.realpath(path.dirname(file)), path.basename(file))
+            const snapshot: Snapshot = Object.freeze({
+              store,
+              source: "disk",
+              provider,
+              epoch: parsed.data.epoch,
+              ...item,
+              value,
+            })
+            owners.set(snapshot, io)
+            if (value) bindings.set(value, snapshot)
+            const exchange = parsed.data.exchanges?.[provider]
+            const issue = exchange?.key === key(snapshot) ? exchange.reason : undefined
+            return { source: "file" as const, value, snapshot, issue }
+          }
+          // Dispatch readers join storage serialization; passive inspection never
+          // creates metadata or locks and may honestly report an in-progress write.
+          return passive ? load(file, await AuthIO.pinned()) : locked(load)
+        }),
+      begin: (provider: string, method: number) =>
+        run(() =>
+          locked(async (store, io) => {
+            if (override() !== undefined) throw new AuthSourceError()
+            provider = normalize(provider)
+            if (!Number.isSafeInteger(method) || method < 0) throw new AuthStaleError()
+            const current = await state(store, io)
+            const snapshot = await capture(store, provider, current, io)
+            const item = current.meta.providers[provider]
+            const revision = (item.attemptRevision ?? 0) + 1
+            if (!Number.isSafeInteger(revision)) throw new AuthStorageError()
+            const id = randomUUID()
+            const targets = Object.fromEntries(
+              Object.entries(current.meta.providers).map(([provider, value]) => [
+                provider,
+                {
+                  generation: value.loginGeneration,
+                  attemptRevision: value.attemptRevision ?? 0,
+                },
+              ]),
+            )
+            current.meta.providers[provider] = {
+              ...item,
+              attemptRevision: revision,
+              attempt: { id, method, consumed: false },
+            }
+            await atomic(io, current.sidecar, current.meta)
+            return Object.freeze({ snapshot, id, method, revision, targets })
+          }),
+        ),
+      attempt: (attempt: Attempt, consume = false) =>
+        run(() =>
+          locked(async (store, io) => {
+            if (override() !== undefined) throw new AuthSourceError()
+            const current = await state(store, io)
+            const provider = normalize(attempt.snapshot.provider)
+            compare(attempt.snapshot, await capture(store, provider, current, io), false)
+            const value = current.meta.providers[provider].attempt
+            if (!value || value.id !== attempt.id || value.method !== attempt.method || value.consumed)
+              throw new AuthStaleError()
+            if (consume) {
+              value.consumed = true
+              await atomic(io, current.sidecar, current.meta)
+            }
+          }),
+        ),
+      complete: (attempt: Attempt, value: Auth.Info, provider = attempt.snapshot.provider, signal?: AbortSignal) =>
+        run(() => write(provider, value, attempt.snapshot, true, attempt, signal)),
       snapshot: (provider: string, expected?: Auth.Info) => run(() => snapshot(provider, expected)),
       check: (expected: Snapshot, exact = false) => run(() => check(expected, exact)),
       all: () =>
@@ -373,7 +544,55 @@ export namespace AuthStore {
           return io.lock(
             `auth-refresh:${normalize(expected.provider)}`,
             path.join(path.dirname(expected.store), "auth-locks"),
-            fn,
+            async () => {
+              const provider = normalize(expected.provider)
+              const receipt = await locked(async (store, io) => {
+                if (override() !== undefined) throw new AuthSourceError()
+                const current = await state(store, io)
+                const snapshot = await capture(store, provider, current, io)
+                compare(expected, snapshot, false)
+                const revision = key(snapshot)
+                const prior = current.meta.exchanges?.[provider]
+                if (prior?.key === revision)
+                  throw new AuthOutcome.Failure(
+                    prior.reason === "refreshing" ? "exchange-uncertain" : prior.reason,
+                    provider,
+                    "file",
+                  )
+                current.meta.exchanges ??= Object.create(null)
+                current.meta.exchanges![provider] = { key: revision, reason: "refreshing" }
+                // A process may disappear after the provider consumes the token. Fence reuse before sending.
+                await atomic(io, current.sidecar, current.meta)
+                return revision
+              })
+              const settle = (reason?: "exchange-uncertain" | "refresh-rejected") =>
+                locked(async (store, io) => {
+                  const current = await state(store, io)
+                  const prior = current.meta.exchanges?.[provider]
+                  if (prior?.key !== receipt) return
+                  if (reason) prior.reason = reason
+                  else delete current.meta.exchanges![provider]
+                  await atomic(io, current.sidecar, current.meta)
+                })
+              try {
+                const result = await fn()
+                await settle()
+                return result
+              } catch (error) {
+                const reason = AuthOutcome.known(error)?.reason
+                await settle(
+                  reason === "exchange-unavailable"
+                    ? undefined
+                    : reason === "refresh-rejected"
+                      ? "refresh-rejected"
+                      : "exchange-uncertain",
+                ).catch((failure) => {
+                  if (AuthOutcome.control(error)) throw error
+                  throw failure
+                })
+                throw error
+              }
+            },
             options,
           )
         }),

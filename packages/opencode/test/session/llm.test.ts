@@ -23,6 +23,8 @@ import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
 import { Session as SessionNs } from "@/session/session"
 import { USER_AGENT } from "../../src/installation" // kilocode_change
+import { KiloAuth } from "../../src/kilocode/auth/authority" // kilocode_change
+import { Env } from "../../src/env" // kilocode_change
 
 type ConfigModel = NonNullable<NonNullable<NonNullable<Config.Info["provider"]>[string]>["models"]>[string] // kilocode_change
 
@@ -48,10 +50,16 @@ const openAIConfig = (model: ModelsDev.Provider["models"][string], baseURL: stri
   }
 }
 
-const it = testEffect(Layer.mergeAll(LLM.defaultLayer, Provider.defaultLayer))
+// kilocode_change start - direct LLM fixtures perform real credential admission before dispatch.
+const it = testEffect(Layer.mergeAll(LLM.defaultLayer, Provider.defaultLayer, Config.defaultLayer, Env.defaultLayer))
 
 // LLM.stream returns a Stream, not an Effect, so we can't use the serviceUse proxy.
-const drain = (input: LLM.StreamInput) => LLM.Service.use((svc) => svc.stream(input).pipe(Stream.runDrain))
+const drain = (input: LLM.StreamInput) =>
+  Effect.gen(function* () {
+    const authority = yield* KiloAuth.capture({ providerID: input.model.providerID, modelID: input.model.id })
+    return yield* LLM.Service.use((svc) => svc.stream({ ...input, authAuthority: authority }).pipe(Stream.runDrain))
+  })
+// kilocode_change end
 
 // drainWith builds an isolated runtime so the custom layer fully owns LLM and
 // its transitive deps — `Effect.provide(layer)` over an existing runtime layers
@@ -61,12 +69,15 @@ const drainWith = (layer: Layer.Layer<LLM.Service>, input: LLM.StreamInput) =>
   Effect.gen(function* () {
     const ctx = yield* InstanceRef
     if (!ctx) return yield* Effect.die("InstanceRef not provided")
+    const authority = yield* KiloAuth.capture({ providerID: input.model.providerID, modelID: input.model.id }) // kilocode_change
     return yield* Effect.promise(() =>
       Effect.runPromise(
-        LLM.Service.use((svc) => svc.stream(input).pipe(Stream.runDrain)).pipe(
+        // kilocode_change start - retain the real admission in the isolated runtime.
+        LLM.Service.use((svc) => svc.stream({ ...input, authAuthority: authority }).pipe(Stream.runDrain)).pipe(
           Effect.provide(layer),
           Effect.provideService(InstanceRef, ctx),
         ),
+        // kilocode_change end
       ),
     )
   })

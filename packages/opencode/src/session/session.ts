@@ -34,6 +34,7 @@ import { BackgroundProcess } from "@/kilocode/background-process"
 import { KiloSession, kiloSessionFork } from "@/kilocode/session"
 import { SessionKnowledge } from "@/kilocode/session/knowledge"
 import { KiloContextPolicy } from "@/kilocode/session/context-policy"
+import { KiloSessionIdentity } from "@/kilocode/session/identity" // kilocode_change
 import { SessionExport } from "@/kilocode/session-export"
 import * as SandboxPolicy from "@/kilocode/sandbox/policy"
 import { baseKey, cumulativeSessionDiff } from "@/kilocode/session-portability/cumulative-diff" // kilocode_change
@@ -751,6 +752,7 @@ export const layer: Layer.Layer<
 
     const updateMessage = <T extends MessageV2.Info>(msg: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        Database.use((db) => KiloSessionIdentity.message(db, msg)) // kilocode_change - fail before update side effects; the projector repeats this atomically
         // kilocode_change start - persisted user-turn policy cannot be replaced on update
         if (msg.role === "user") {
           const previous = yield* MessageV2.get({ sessionID: msg.sessionID, messageID: msg.id }).pipe(Effect.option)
@@ -770,6 +772,7 @@ export const layer: Layer.Layer<
 
     const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        Database.use((db) => KiloSessionIdentity.part(db, part)) // kilocode_change
         // kilocode_change start - ignore FK errors when session was deleted while processor was still running
         yield* KiloSession.runSyncSafe(
           sync.run(MessageV2.Event.PartUpdated, {
@@ -1029,6 +1032,7 @@ export const layer: Layer.Layer<
       field: string
       delta: string
     }) {
+      Database.use((db) => KiloSessionIdentity.part(db, { ...input, id: input.partID })) // kilocode_change - streamed deltas retain their persisted owner
       yield* bus.publish(MessageV2.Event.PartDelta, input)
     })
 

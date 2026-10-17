@@ -3,6 +3,9 @@ import * as Log from "@opencode-ai/core/util/log"
 import { ProviderError } from "@/provider/error"
 import { isRecord } from "@/util/record"
 import { OpenAIWebSocket } from "./ws"
+import { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
+import { AuthSource } from "@/kilocode/auth/source" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 
 export const TITLE_HEADER = "x-kilo-title"
 
@@ -44,12 +47,22 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
   }
 
   async function websocketFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const guard = AuthRequest.bound(init) // kilocode_change
+    await guard?.check() // kilocode_change
     const url = input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url
     const internalHeaders = OpenAIWebSocket.normalizeHeaders(init?.headers)
     const httpInit = withoutInternalHeaders(init)
+    // kilocode_change start - account only the actual fallback HTTP request.
+    const http = async () =>
+      AuthRequest.fetch(
+        httpFetch,
+        input,
+        guard ? { ...httpInit, headers: await guard.headers(httpInit?.headers) } : httpInit,
+      )
+    // kilocode_change end
 
     if (init?.method !== "POST" || !new URL(url).pathname.endsWith("/responses")) {
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     }
 
     const body = (() => {
@@ -61,34 +74,35 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
         return undefined
       }
     })()
-    if (!body?.stream) return httpFetch(input, httpInit)
+    if (!body?.stream) return http() // kilocode_change
     if (internalHeaders[TITLE_HEADER] === "true") {
       log.debug("http fallback", { reason: "title" })
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     }
 
     const sessionID = internalHeaders["x-session-affinity"] ?? internalHeaders["session-id"]
     if (!sessionID) {
       log.debug("http fallback", { reason: "missing_session" })
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     }
-    const key = `${sessionID}:conversation`
+    const key = `${sessionID}:${guard?.expected.authority ?? AuthSource.connection(url, internalHeaders)}:conversation` // kilocode_change
 
     const entry = pool.get(key) ?? { lastUsedAt: Date.now(), busy: false, fallback: false, streamFailures: 0 }
     pool.set(key, entry)
 
     if (entry.fallback) {
       log.debug("http fallback", { key, reason: "fallback_active" })
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     }
     if (entry.busy) {
       log.debug("http fallback", { key, reason: "busy" })
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     }
 
     entry.busy = true
     entry.lastUsedAt = Date.now()
     try {
+      await guard?.check() // kilocode_change - includes pooled connection reuse
       entry.socket = await socket(
         entry,
         options?.url ?? url,
@@ -108,6 +122,11 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
         body,
         idleTimeout,
         signal: init?.signal ?? undefined,
+        // kilocode_change start - check authority and reserve each physical response.create.
+        check: async () => {
+          await guard?.send()
+        },
+        // kilocode_change end
         onFirstEvent: () => resolveFirstEvent(true),
         onTerminal: (event) => {
           entry.busy = false
@@ -144,8 +163,15 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
       if (!entry.fallback) return response
       discard(response) // kilocode_change
       log.debug("http fallback", { key, reason: "websocket_retries_exhausted" })
-      return httpFetch(input, httpInit)
+      return http() // kilocode_change
     } catch (error) {
+      // kilocode_change start - typed authority/resource failures cannot select paid fallback.
+      if (guard?.error() || AuthOutcome.known(error)) {
+        invalidate(entry)
+        entry.busy = false
+        throw guard?.error() ?? error
+      }
+      // kilocode_change end
       entry.busy = false
       entry.lastUsedAt = Date.now()
       if (OpenAIWebSocket.isAbortError(error)) {
@@ -161,7 +187,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
         fallback: entry.fallback ? "http" : undefined,
       })
       invalidate(entry)
-      if (entry.fallback) return httpFetch(input, httpInit)
+      if (entry.fallback) return http() // kilocode_change
       return failedResponse(
         new ProviderError.ResponseStreamError(error instanceof Error ? error.message : String(error), {
           cause: error,
@@ -194,7 +220,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
     pool.clear()
   }
 
-  return Object.assign(websocketFetch, { close })
+  return AuthRequest.delegate(Object.assign(websocketFetch, { close })) // kilocode_change - interception itself is not a model send
 }
 
 function connectionLimitError(event: Record<string, unknown>) {

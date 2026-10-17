@@ -15,6 +15,7 @@ import { Agent } from "@/agent/agent"
 import { Auth } from "@/auth"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
+import { Env } from "@/env" // kilocode_change
 import { Command } from "@/command"
 import * as Observability from "@opencode-ai/core/effect/observability"
 import { File } from "@/file"
@@ -61,6 +62,8 @@ import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors
 import { serveUIEffect } from "@/server/shared/ui"
 import { ServerAuth } from "@/server/auth"
 import { InstanceHttpApi, RootHttpApi } from "./api"
+import { KiloRuntimeHttp } from "@/kilocode/server/httpapi/runtime" // kilocode_change
+import * as PassiveInstance from "@/kilocode/server/httpapi/passive-instance" // kilocode_change
 import { PublicApi } from "./public"
 import {
   authorizationLayer,
@@ -128,6 +131,7 @@ const v2HttpApiAuthLayer = v2AuthorizationLayer.pipe(Layer.provide(ServerAuth.Co
 const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
 const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
   Layer.provide([controlHandlers, globalHandlers]),
+  Layer.provide(KiloRuntimeHttp.layer), // kilocode_change
   Layer.provide(schemaErrorLayer),
   Layer.provide(httpApiAuthLayer),
 )
@@ -158,9 +162,11 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     workspaceHandlers,
   ]),
   provideKiloHttpApiHandlers, // kilocode_change
+  Layer.provide(KiloRuntimeHttp.layer), // kilocode_change
 )
 
 const instanceRoutes = instanceApiRoutes.pipe(
+  Layer.provide(PassiveInstance.layer), // kilocode_change
   Layer.provide([httpApiAuthLayer, v2HttpApiAuthLayer, workspaceRoutingLive, instanceContextLayer, schemaErrorLayer]),
 )
 
@@ -208,6 +214,7 @@ export function createRoutes(
       Auth.defaultLayer,
       Command.defaultLayer,
       Config.defaultLayer,
+      Env.defaultLayer, // kilocode_change - stable auth-readiness dependency, shared across requests
       File.defaultLayer,
       FileWatcher.defaultLayer,
       Format.defaultLayer,

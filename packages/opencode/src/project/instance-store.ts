@@ -16,6 +16,7 @@ export interface LoadInput {
 }
 
 export interface Interface {
+  readonly peek: (directory: string) => Effect.Effect<InstanceContext | undefined> // kilocode_change - noninitializing completed-context inspection
   readonly load: (input: LoadInput) => Effect.Effect<InstanceContext>
   readonly reload: (input: LoadInput) => Effect.Effect<InstanceContext>
   readonly dispose: (ctx: InstanceContext) => Effect.Effect<void>
@@ -38,6 +39,17 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
     const bootstrap = yield* InstanceBootstrap.Service
     const scope = yield* Scope.Scope
     const cache = new Map<string, Entry>()
+
+    // kilocode_change start - passive observations never create or await an unfinished instance
+    const peek: Interface["peek"] = (directory) =>
+      Effect.gen(function* () {
+        const key = AppFileSystem.resolve(directory)
+        const entry = cache.get(key)
+        if (!entry || !Deferred.isDoneUnsafe(entry.deferred)) return
+        const exit = yield* Deferred.await(entry.deferred).pipe(Effect.exit)
+        if (cache.get(key) === entry && Exit.isSuccess(exit)) return exit.value
+      })
+    // kilocode_change end
 
     const boot = (input: LoadInput & { directory: string }) =>
       Effect.gen(function* () {
@@ -192,6 +204,7 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
     yield* Effect.addFinalizer(() => disposeAll().pipe(Effect.ignore))
 
     return Service.of({
+      peek, // kilocode_change
       load,
       reload,
       dispose,

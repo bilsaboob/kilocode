@@ -4,6 +4,7 @@ import { SyncEvent } from "@/sync"
 import "@/server/event"
 import "@/kilocode/indexing-event" // kilocode_change - register indexing.status before HttpApi event schemas
 import { KiloContextPolicy } from "@/kilocode/session/context-policy" // kilocode_change - register context event before schema snapshot
+import { KiloRuntimeHttp } from "@/kilocode/server/httpapi/runtime" // kilocode_change
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { described } from "./metadata"
@@ -12,6 +13,8 @@ const GlobalHealth = Schema.Struct({
   healthy: Schema.Literal(true),
   version: Schema.String,
   contextPolicy: Schema.optional(KiloContextPolicy.Profile), // kilocode_change
+  runtime: KiloRuntimeHttp.Info, // kilocode_change
+  compactionBudget: KiloRuntimeHttp.Budget, // kilocode_change - effective nonsecret startup limits
 })
 
 const GlobalEventSchema = Schema.Struct({
@@ -47,6 +50,7 @@ export const GlobalPaths = {
 export const GlobalApi = HttpApi.make("global").add(
   HttpApiGroup.make("global")
     .add(
+      ...KiloRuntimeHttp.endpoints, // kilocode_change
       HttpApiEndpoint.get("health", GlobalPaths.health, {
         success: described(GlobalHealth, "Health information"),
       }).annotateMerge(

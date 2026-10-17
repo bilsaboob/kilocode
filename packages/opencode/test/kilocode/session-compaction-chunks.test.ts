@@ -15,6 +15,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Snapshot } from "../../src/snapshot"
 import { KiloCompactionChunks } from "../../src/kilocode/session/compaction-chunks"
 import { KiloCompactionState } from "../../src/kilocode/session/compaction-state"
+import { KiloCompactionBudget } from "../../src/kilocode/session/compaction-budget"
 import { KiloSessionCompaction } from "../../src/kilocode/session/compaction"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -56,6 +57,20 @@ const svc = {
   updatePart<T extends MessageV2.Part>(part: T) {
     return run(SessionNs.Service.use((svc) => svc.updatePart(part)))
   },
+}
+
+function marker(input: Parameters<typeof KiloSessionCompaction.create>[0]) {
+  return KiloSessionCompaction.create(input).pipe(
+    Effect.tap((msg) =>
+      Effect.gen(function* () {
+        yield* KiloCompactionBudget.inherit({
+          sessionID: msg.sessionID,
+          messageID: msg.id,
+          messages: yield* Effect.promise(() => svc.messages({ sessionID: msg.sessionID })),
+        })
+      }),
+    ),
+  )
 }
 
 const summary = Layer.succeed(
@@ -294,7 +309,7 @@ describe("KiloCompactionChunks", () => {
           const baseline = await assistant(session.id, original.id, tmp.path, "completed original response")
           const before = JSON.stringify(await svc.messages({ sessionID: session.id }))
           await Effect.runPromise(
-            KiloSessionCompaction.create({
+            marker({
               session: store,
               sessionID: session.id,
               agent: "build",
@@ -334,7 +349,12 @@ describe("KiloCompactionChunks", () => {
             expect(saved.some((message) => KiloCompactionState.bound(message, saved))).toBe(outcome === "stop")
             expect(
               JSON.stringify(
-                saved.filter((message) => message.info.id === original.id || message.info.id === baseline.id),
+                saved
+                  .filter((message) => message.info.id === original.id || message.info.id === baseline.id)
+                  .map((message) => ({
+                    ...message,
+                    parts: message.parts.filter((part) => !KiloCompactionBudget.internal(part)),
+                  })),
               ),
             ).toBe(before)
             expect(KiloCompactionState.latest(saved)?.id).toBe(outcome === "stop" ? undefined : baseline.id)
@@ -404,7 +424,7 @@ describe("KiloCompactionChunks", () => {
         const second = await user(session.id, "second " + "c".repeat(10_000))
         await assistant(session.id, second.id, tmp.path, "reply " + "d".repeat(10_000))
         await Effect.runPromise(
-          KiloSessionCompaction.create({
+          marker({
             session: store,
             sessionID: session.id,
             agent: "build",
@@ -459,7 +479,7 @@ describe("KiloCompactionChunks", () => {
         const second = await user(session.id, "second " + "c".repeat(10_000))
         await assistant(session.id, second.id, tmp.path, "reply " + "d".repeat(10_000))
         await Effect.runPromise(
-          KiloSessionCompaction.create({
+          marker({
             session: store,
             sessionID: session.id,
             agent: "build",
@@ -505,7 +525,7 @@ describe("KiloCompactionChunks", () => {
           const first = await user(session.id, "first " + "a".repeat(20_000))
           await assistant(session.id, first.id, tmp.path, "reply " + "b".repeat(20_000))
           await Effect.runPromise(
-            KiloSessionCompaction.create({
+            marker({
               session: store,
               sessionID: session.id,
               agent: "build",
@@ -559,7 +579,7 @@ describe("KiloCompactionChunks", () => {
         const session = await svc.create({})
         const first = await user(session.id, "single huge request " + "a".repeat(80_000))
         await Effect.runPromise(
-          KiloSessionCompaction.create({
+          marker({
             session: store,
             sessionID: session.id,
             agent: "build",
@@ -605,7 +625,7 @@ describe("KiloCompactionChunks", () => {
         const first = await user(session.id, "first " + "a".repeat(80_000))
         await assistant(session.id, first.id, tmp.path, "reply " + "b".repeat(80_000))
         await Effect.runPromise(
-          KiloSessionCompaction.create({
+          marker({
             session: store,
             sessionID: session.id,
             agent: "build",
@@ -670,7 +690,7 @@ describe("KiloCompactionChunks", () => {
           await assistant(session.id, old.id, tmp.path, "old reply")
           const large = await user(session.id, "large replay " + "x".repeat(40_000))
           await Effect.runPromise(
-            KiloSessionCompaction.create({
+            marker({
               session: store,
               sessionID: session.id,
               agent: "build",
@@ -719,7 +739,7 @@ describe("KiloCompactionChunks", () => {
               const reads: string[] = []
               stub.push(reply("second summary", (input) => reads.push(JSON.stringify(input.messages))))
               await Effect.runPromise(
-                KiloSessionCompaction.create({
+                marker({
                   session: store,
                   sessionID: session.id,
                   agent: "build",

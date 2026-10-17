@@ -172,25 +172,7 @@ function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID
 }
 
 function createCompactionMarker(sessionID: SessionID) {
-  return SessionNs.Service.use((ssn) =>
-    Effect.gen(function* () {
-      const msg = yield* ssn.updateMessage({
-        id: MessageID.ascending(),
-        role: "user",
-        model: ref,
-        sessionID,
-        agent: "build",
-        time: { created: Date.now() },
-      })
-      yield* ssn.updatePart({
-        id: PartID.ascending(),
-        messageID: msg.id,
-        sessionID: msg.sessionID,
-        type: "compaction",
-        auto: false,
-      })
-    }),
-  )
+  return createSummaryCompaction(sessionID) // kilocode_change - use production admission and the durable root binding.
 }
 
 // kilocode_change start - successful test processors persist a usable summary before its commit
@@ -618,12 +600,23 @@ describe("session.compaction.create", () => {
         const msgs = yield* ssn.messages({ sessionID: info.id })
         expect(msgs).toHaveLength(1)
         expect(msgs[0].info.role).toBe("user")
-        expect(msgs[0].parts).toHaveLength(1)
-        expect(msgs[0].parts[0]).toMatchObject({
+        // kilocode_change start - the marker also retains its private, ignored resource receipt.
+        expect(msgs[0].parts).toHaveLength(2)
+        const markers = msgs[0].parts.filter((part) => part.type === "compaction")
+        expect(markers).toHaveLength(1)
+        expect(markers[0]).toMatchObject({
           type: "compaction",
           auto: true,
           overflow: true,
         })
+        expect(msgs[0].parts.find((part) => part.type === "text" && part.ignored)).toMatchObject({
+          type: "text",
+          ignored: true,
+          metadata: {
+            kilo_compaction_budget: { version: 1, root: msgs[0].info.id, requests: 0, milliseconds: 0 },
+          },
+        })
+        // kilocode_change end
 
         const v2 = yield* SessionV2.Service.use((svc) => svc.messages({ sessionID: info.id })).pipe(
           Effect.provide(SessionV2.defaultLayer),

@@ -10,6 +10,9 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { tool as nativeTool, ToolFailure, type JsonSchema, type LLMEvent } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
+import type { AuthRequest } from "@/kilocode/auth/request" // kilocode_change
+import { AuthTransport } from "@/kilocode/auth/transport" // kilocode_change
+import { AuthOutcome } from "@/kilocode/auth/outcome" // kilocode_change
 
 export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
@@ -19,6 +22,7 @@ export type StreamResult =
   | { readonly type: "unsupported"; readonly reason: string }
 
 type StreamInput = {
+  readonly guard?: AuthRequest.Guard // kilocode_change
   readonly model: Provider.Model
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
@@ -64,8 +68,11 @@ function statusWithFetch(
 }
 
 export function stream(input: StreamInput): StreamResult {
-  const fetch = providerFetch(input)
-  const current = statusWithFetch(input, fetch)
+  // kilocode_change start - preserve typed auth failures across native HTTP retries
+  const original = providerFetch(input)
+  const fetch = input.guard ? AuthTransport.native(input.guard, original ?? globalThis.fetch) : original
+  const current = statusWithFetch(input, original)
+  // kilocode_change end
   if (current.type === "unsupported") return current
 
   // Integration point with @opencode-ai/llm: native-request lowers session data
@@ -141,8 +148,8 @@ export function nativeTools(tools: Record<string, Tool>, input: Pick<StreamInput
                 abortSignal: input.abort,
               })
             },
-            catch: (error) => new ToolFailure({ message: errorMessage(error), error }),
-          }),
+            catch: (error) => AuthOutcome.known(error) ?? new ToolFailure({ message: errorMessage(error), error }), // kilocode_change
+          }).pipe(Effect.catchIf((error) => error instanceof AuthOutcome.Failure, Effect.die)), // kilocode_change
       }),
     ]),
   )

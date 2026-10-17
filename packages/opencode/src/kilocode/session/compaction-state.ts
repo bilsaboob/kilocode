@@ -3,6 +3,7 @@ import { PartID, type MessageID } from "@/session/schema"
 import { KiloSessionMessageOrder } from "./message-order"
 import { Effect, Exit } from "effect"
 import type { Session } from "@/session/session"
+import { KiloSessionIdentity } from "./identity"
 
 export namespace KiloCompactionState {
   function record(message: MessageV2.WithParts): unknown {
@@ -223,18 +224,27 @@ export namespace KiloCompactionState {
     message: MessageV2.User
     target: MessageID
   }) {
-    return Effect.gen(function* () {
-      const message = yield* input.session.updateMessage(input.message)
-      yield* input.session.updatePart(followup(message, input.target))
-      return message
-    }).pipe(
-      Effect.onExit((exit) =>
-        Exit.isFailure(exit)
-          ? input.session.removeMessage({ sessionID: input.message.sessionID, messageID: input.message.id })
-          : Effect.void,
-      ),
-      Effect.uninterruptible,
-    )
+    return Effect.suspend(() => {
+      let owned = false
+      return Effect.gen(function* () {
+        const message = yield* KiloSessionIdentity.create(
+          input.message,
+          (info) => input.session.updateMessage(info),
+          () => {
+            owned = true
+          },
+        )
+        yield* input.session.updatePart(followup(message, input.target))
+        return message
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) && owned
+            ? input.session.removeMessage({ sessionID: input.message.sessionID, messageID: input.message.id })
+            : Effect.void,
+        ),
+        Effect.uninterruptible,
+      )
+    })
   }
 
   export function mark(input: {
@@ -287,5 +297,27 @@ export namespace KiloCompactionState {
     )
       return undefined
     return latest?.message.info.role === "assistant" ? latest.message.info : undefined
+  }
+
+  export function progress(messages: MessageV2.WithParts[], source: string) {
+    return latest(
+      messages.filter((message) => {
+        if (
+          message.info.role !== "assistant" ||
+          message.info.parentID !== source ||
+          message.info.summary ||
+          message.info.time.completed === undefined ||
+          !successful(message.info)
+        )
+          return false
+        const tools = message.parts.filter((part) => part.type === "tool")
+        if (tools.length)
+          return (
+            tools.every((part) => part.state.status === "completed" || part.state.status === "error") &&
+            tools.some((part) => part.state.status === "completed")
+          )
+        return message.parts.some((part) => part.type === "text" && !part.ignored && !!part.text.trim())
+      }),
+    )
   }
 }

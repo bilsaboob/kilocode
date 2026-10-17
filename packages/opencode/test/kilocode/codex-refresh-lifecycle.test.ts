@@ -5,6 +5,7 @@ import { expect } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Auth } from "../../src/auth"
 import { registerDisposer } from "../../src/effect/instance-registry"
+import { AuthStaleError, AuthStore } from "../../src/kilocode/auth/store"
 import { CodexAuthPlugin } from "../../src/plugin/openai/codex"
 import { InstanceLayer } from "../../src/project/instance-layer"
 import { InstanceStore } from "../../src/project/instance-store"
@@ -15,7 +16,7 @@ import { testEffectShared } from "../lib/effect"
 const it = testEffectShared(Layer.mergeAll(Auth.defaultLayer, InstanceLayer.layer, CrossSpawnSpawner.defaultLayer))
 
 it.live(
-  "Codex token renewal preserves workspaces while explicit auth changes still dispose them",
+  "Codex renewal and explicit auth changes preserve healthy workspace instances",
   () =>
     Effect.gen(function* () {
       const content = process.env.KILO_AUTH_CONTENT
@@ -34,6 +35,7 @@ it.live(
       )
       const auth = yield* Auth.Service
       const store = yield* InstanceStore.Service
+      const credentials = AuthStore.create()
       const previous = yield* auth.get("openai")
       yield* Effect.acquireRelease(
         auth.set(
@@ -128,6 +130,7 @@ it.live(
       expect(yield* auth.get("openai")).toMatchObject({ access: "renewed-access", refresh: "renewed-refresh" })
       for (const context of contexts) expect(yield* store.load({ directory: context.directory })).toBe(context)
 
+      const renewed = yield* Effect.promise(() => credentials.snapshot("openai"))
       const changed = yield* Effect.promise(async () =>
         app.request("/auth/openai", {
           method: "PUT",
@@ -136,14 +139,24 @@ it.live(
         }),
       )
       expect(changed.status).toBe(200)
-      expect(disposed.toSorted()).toEqual(directories.toSorted())
-      expect(aborted.signal.aborted).toBe(true)
-      disposed.length = 0
-      for (const directory of directories) yield* store.load({ directory })
+      expect(disposed).toEqual([])
+      expect(aborted.signal.aborted).toBe(false)
+      expect(yield* auth.get("openai")).toMatchObject({ type: "api", key: "explicit-account-change" })
+      yield* Effect.promise(async () => {
+        await expect(credentials.check(renewed)).rejects.toBeInstanceOf(AuthStaleError)
+      })
+      for (const context of contexts) expect(yield* store.load({ directory: context.directory })).toBe(context)
+      const replacement = yield* Effect.promise(() => credentials.snapshot("openai"))
       const removed = yield* Effect.promise(async () => app.request("/auth/openai", { method: "DELETE" }))
       expect(removed.status).toBe(200)
-      expect(disposed.toSorted()).toEqual(directories.toSorted())
+      expect(disposed).toEqual([])
+      expect(aborted.signal.aborted).toBe(false)
       expect(yield* auth.get("openai")).toBeUndefined()
+      yield* Effect.promise(async () => {
+        await expect(credentials.check(replacement)).rejects.toBeInstanceOf(AuthStaleError)
+      })
+      for (const context of contexts) expect(yield* store.load({ directory: context.directory })).toBe(context)
+      expect(requests).toEqual(["/oauth/token", "/responses"])
     }),
   30_000,
 )

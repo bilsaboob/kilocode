@@ -4,6 +4,7 @@ import path from "node:path"
 import { CodexAuthExpiredError, refreshCodexAuth } from "../../src/kilocode/provider/codex-refresh"
 import { AuthSourceError, AuthStaleError, AuthStorageError } from "../../src/kilocode/auth/store"
 import { MessageV2 } from "../../src/session/message-v2"
+import { AuthOutcome } from "../../src/kilocode/auth/outcome"
 import { ProviderID } from "../../src/provider/schema"
 import { expired, fixture, tokens, fault } from "./fixture/auth-store"
 
@@ -121,14 +122,14 @@ describe("Codex auth refresh authority", () => {
         refresh: async () => {
           entered.resolve()
           await release.promise
-          throw new Error("Token refresh failed: 401")
+          throw new AuthOutcome.Failure("refresh-rejected")
         },
       }).catch((err) => err)
       await entered.promise
       const next = {
         ...expired(),
         access: "same-token-new-revision",
-        expires: Date.now() + 60_000,
+        expires: Date.now() + 120_000,
         ...(change === "account" && { accountId: "other-account" }),
       }
       if (change === "generation") await f.store.set("openai", next)
@@ -232,35 +233,45 @@ describe("Codex auth refresh authority", () => {
         auth: expired(),
         account: () => undefined,
         refresh: async () => {
-          throw new Error("Token refresh failed: 401")
+          throw new AuthOutcome.Failure("refresh-rejected")
         },
       }),
     ).rejects.toBeInstanceOf(CodexAuthExpiredError)
   })
 
-  test("transient failures and aborts release pending entries and exchange locks", async () => {
-    await using f = await fixture(expired())
-    const input = { store: f.store, auth: expired(), account: () => undefined }
-    await expect(
-      refreshCodexAuth({
-        ...input,
-        refresh: async () => {
-          throw new Error("offline")
-        },
-      }),
-    ).rejects.toThrow("offline")
-    await expect(
-      refreshCodexAuth({
+  for (const failure of ["network", "timeout", "stop"] as const) {
+    test(`${failure} releases the exchange lock but fences reuse of a possibly consumed token`, async () => {
+      await using f = await fixture(expired())
+      const input = { store: f.store, auth: expired(), account: () => undefined }
+      const stop = new DOMException("Stopped", "AbortError")
+      let calls = 0
+      const error = await refreshCodexAuth({
         ...input,
         timeout: 1,
-        refresh: async (_, signal) =>
-          new Promise<never>((_, reject) => {
+        refresh: async (_, signal) => {
+          calls++
+          if (failure === "network") throw new Error("offline")
+          if (failure === "stop") throw stop
+          return new Promise<never>((_, reject) => {
             signal.addEventListener("abort", () => reject(signal.reason), { once: true })
-          }),
-      }),
-    ).rejects.toMatchObject({ name: "TimeoutError" })
-    expect((await refreshCodexAuth({ ...input, refresh: async () => tokens() })).access).toBe("next-access")
-  })
+          })
+        },
+      }).catch((error: unknown) => error)
+      if (failure === "stop") expect(error).toBe(stop)
+      else expect(error).toMatchObject({ name: "CredentialReadinessError", reason: "exchange-uncertain" })
+      const refresh = async () => {
+        calls++
+        return tokens()
+      }
+      await expect(refreshCodexAuth({ ...input, refresh })).rejects.toMatchObject({ reason: "exchange-uncertain" })
+      expect(calls).toBe(1)
+      await f.store.set("openai", expired())
+      const auth = (await f.store.all()).openai
+      if (auth.type !== "oauth") throw new Error("Invalid OAuth fixture")
+      expect((await refreshCodexAuth({ ...input, auth, refresh })).access).toBe("next-access")
+      expect(calls).toBe(2)
+    })
+  }
 
   for (const method of ["write", "rename"] as const) {
     test(`sidecar ${method} failure accepts no result and leaves credentials and authority unchanged`, async () => {

@@ -6,7 +6,12 @@ export interface Runner<A, E = never> {
   readonly busy: boolean
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
   readonly startShell: (work: Effect.Effect<A, E>, ready?: Latch.Latch) => Effect.Effect<A, E | Busy>
+  // kilocode_change start - use the same runner for preparation and manual compaction ownership
+  readonly admit: <B, E2, R>(work: Effect.Effect<B, E2, R>) => Effect.Effect<B, E2 | Busy, R>
+  readonly startExclusive: (work: Effect.Effect<A, E>) => Effect.Effect<A, E | Busy>
+  // kilocode_change end
   readonly cancel: Effect.Effect<void>
+  readonly dispose: Effect.Effect<void> // kilocode_change - retire a scoped ownership reference
 }
 
 export class Cancelled extends Schema.TaggedErrorClass<Cancelled>()("RunnerCancelled", {}) {}
@@ -43,12 +48,15 @@ export const make = <A, E = never>(
     onIdle?: Effect.Effect<void>
     onBusy?: Effect.Effect<void>
     onInterrupt?: Effect.Effect<A, E>
+    pending?: () => boolean // kilocode_change - include queued recovery in exclusive admission
+    key?: string // kilocode_change - one ownership cell per session across instances
   },
 ): Runner<A, E> => {
   const ref = SynchronizedRef.makeUnsafe<State<A, E>>({ _tag: "Idle" })
   const idle = opts?.onIdle ?? Effect.void
   const onBusy = opts?.onBusy ?? Effect.void
   const onInterrupt = opts?.onInterrupt
+  const ownership = KiloRunner.ownership(() => new Busy(), opts?.key) // kilocode_change
   let ids = 0
 
   const state = () => SynchronizedRef.getUnsafe(ref)
@@ -68,27 +76,37 @@ export const make = <A, E = never>(
   const idleIfCurrent = () =>
     SynchronizedRef.modify(ref, (st) => [st._tag === "Idle" ? idle : Effect.void, st] as const).pipe(Effect.flatten)
 
-  const finishRun = (id: number, done: Deferred.Deferred<A, E | Cancelled>, exit: Exit.Exit<A, E>) =>
+  // kilocode_change start - settle ownership before publishing completion to waiters
+  const finishRun = (
+    id: number,
+    done: Deferred.Deferred<A, E | Cancelled>,
+    exit: Exit.Exit<A, E>,
+    settled: () => void, // kilocode_change
+  ) =>
     SynchronizedRef.modify(
       ref,
       (st) =>
         [
           Effect.gen(function* () {
             if (st._tag === "Running" && st.run.id === id) yield* idle
+            yield* Effect.sync(settled) // kilocode_change - finalizers finish before publishing completion
             yield* complete(done, exit)
           }),
           st._tag === "Running" && st.run.id === id ? ({ _tag: "Idle" } as const) : st,
         ] as const,
     ).pipe(Effect.flatten)
 
+  // kilocode_change end
+
   // kilocode_change start - do not let work publish busy before the Running state is committed
   const startRun = (work: Effect.Effect<A, E>, done: Deferred.Deferred<A, E | Cancelled>) => {
     const id = next()
     return KiloRunner.start({
-      work,
+      work: ownership.work(work), // kilocode_change
       scope,
-      finish: (exit) => finishRun(id, done, exit),
+      finish: (exit, settled) => finishRun(id, done, exit, settled),
       handle: (fiber) => ({ id, done, fiber }) satisfies RunHandle<A, E>,
+      acquire: () => ownership.acquire(),
     })
   }
   // kilocode_change end
@@ -121,6 +139,7 @@ export const make = <A, E = never>(
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
+        if (ownership.exclusive) return [Effect.die(new Busy()), st] as const
         switch (st._tag) {
           case "Running":
           case "ShellThenRun":
@@ -141,22 +160,38 @@ export const make = <A, E = never>(
       }),
     ).pipe(Effect.flatten)
 
-  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch): Effect.Effect<A, E | Busy> =>
+  const startShell = (
+    work: Effect.Effect<A, E>,
+    ready?: Latch.Latch,
+    exclusive = false,
+  ): Effect.Effect<A, E | Busy> => // kilocode_change
     SynchronizedRef.modifyEffect(
       ref,
       // kilocode_change end
       Effect.fnUntraced(function* (st) {
-        if (st._tag !== "Idle") {
+        // kilocode_change start - admission includes shared ownership and pending recovery.
+        if (st._tag !== "Idle" || ownership.busy || opts?.pending?.()) {
           const reject: Effect.Effect<A, E | Busy> = Effect.fail(new Busy())
           return [reject, st] as const
         }
-        yield* onBusy
+        // kilocode_change end
+        // kilocode_change start - reserve actual execution before forking; publish only after state commit
+        const release = ownership.acquire(exclusive)
         const id = next()
         const cancelled = yield* Deferred.make<void>()
-        const fiber = yield* work.pipe(Effect.ensuring(finishShell(id)), Effect.forkChild)
-        const shell = { id, cancelled, ready, fiber } satisfies ShellHandle<A, E>
+        const started = yield* KiloRunner.start({
+          work: onBusy.pipe(Effect.andThen(ownership.work(work))),
+          scope,
+          child: !exclusive,
+          acquire: () => release,
+          finish: () => finishShell(id),
+          handle: (fiber) => ({ id, cancelled, ready, fiber }) satisfies ShellHandle<A, E>,
+        })
+        const shell = started.run
+        const fiber = shell.fiber
         return [
           Effect.gen(function* () {
+            // kilocode_change end
             const exit = yield* Fiber.await(fiber)
             if (Exit.isSuccess(exit)) return exit.value
             if (
@@ -167,11 +202,11 @@ export const make = <A, E = never>(
               return yield* Effect.die(new Cancelled())
             }
             return yield* Effect.failCause(exit.cause)
-          }),
+          }).pipe((wait) => KiloRunner.open(started.ready, wait)), // kilocode_change
           { _tag: "Shell", shell },
         ] as const
       }),
-    ).pipe(Effect.flatten)
+    ).pipe(Effect.uninterruptible, Effect.flatten) // kilocode_change - claim and fork cannot be interrupted apart
 
   const cancel = SynchronizedRef.modify(ref, (st) => {
     switch (st._tag) {
@@ -211,11 +246,14 @@ export const make = <A, E = never>(
       return state()
     },
     get busy() {
-      return state()._tag !== "Idle"
+      return state()._tag !== "Idle" || ownership.busy || Boolean(opts?.pending?.()) // kilocode_change
     },
     ensureRunning,
     startShell,
-    cancel,
+    admit: ownership.admit, // kilocode_change
+    startExclusive: (work) => startShell(work, undefined, true), // kilocode_change
+    cancel: ownership.cancel(cancel), // kilocode_change - abort admitted preparation and detached helpers too
+    dispose: ownership.dispose(cancel), // kilocode_change
   }
 }
 

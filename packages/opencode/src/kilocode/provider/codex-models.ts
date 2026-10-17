@@ -3,8 +3,12 @@ import { Schema } from "effect"
 import { z } from "zod"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { AuthStaleError, AuthStore } from "@/kilocode/auth/store"
+import { codexExpiring } from "./codex-expiry"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 export namespace CodexModels {
+  const deferred = new AsyncLocalStorage<boolean>()
+  export const defer = <A>(body: () => Promise<A>) => deferred.run(true, body)
   export const Capability = Schema.Union([
     Schema.Struct({
       status: Schema.Literal("ready"),
@@ -111,7 +115,7 @@ export namespace CodexModels {
       }
       const current = (await check()).value
       if (current?.type !== "oauth") return unavailable("The Codex account changed before loading model limits.")
-      const auth = current.access && current.expires > now() ? current : await input.refresh(current)
+      const auth = !codexExpiring(current, now()) ? current : await input.refresh(current)
       await check()
       if (identity(expected.value) !== identity(auth)) throw new AuthStaleError()
       await store.check(await store.snapshot("openai", auth), true)
@@ -225,9 +229,11 @@ export namespace CodexModels {
           const expected = await origin.catch(() => undefined)
           if (!expected) return unavailable("Codex credentials could not be prepared for model-limit discovery.")
           const binding = digest([input.endpoint, version, AuthStore.generation(expected), identity(expected.value)])
-          const result = await query(input, expected, store).catch(() =>
-            unavailable("Codex credentials could not be prepared for model-limit discovery."),
-          )
+          const result = deferred.getStore()
+            ? unavailable("Model limits require an authenticated dispatch.")
+            : await query(input, expected, store).catch(() =>
+                unavailable("Codex credentials could not be prepared for model-limit discovery."),
+              )
           if (!(result instanceof Map)) return Object.freeze({ ...result, binding })
           const models = new Map([...result].map(([key, value]) => [key, Object.freeze({ ...value, binding })]))
           scopes.set(models, binding)
@@ -273,7 +279,7 @@ export namespace CodexModels {
       return capability.binding
         ? unavailable("The Codex model-limit binding is unavailable; reload the provider before new work.")
         : capability
-    return bind(lookup(await loader(), model), loader)
+    return bind(lookup(await deferred.run(false, loader), model), loader)
   }
 
   export function mark(

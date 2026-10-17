@@ -5,6 +5,7 @@ import type { MessageV2 } from "@/session/message-v2"
 import { PartID } from "@/session/schema"
 import { Session } from "@/session/session"
 import { KiloResponse } from "./response"
+import { KiloUsage } from "./usage"
 
 export namespace KiloResponseAccounting {
   type Options = Pick<MessageV2.StepFinishPart, "snapshot" | "model">
@@ -27,7 +28,11 @@ export namespace KiloResponseAccounting {
           usage: receipt.usage ?? new Usage({}),
           metadata: receipt.metadata,
         })
-        const meta = { ...KiloResponse.metadata(receipt), partID: entry.part }
+        const meta = {
+          ...KiloResponse.metadata(receipt),
+          measurement: KiloUsage.report(receipt, billing.tokens),
+          partID: entry.part,
+        }
         const fingerprint = JSON.stringify([meta, billing, receipt.finish, entry.snapshot, entry.model])
         if (entry.fingerprint === fingerprint) continue
         if (receipt.usage || (receipt.finished && receipt.status === "completed")) {

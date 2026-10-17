@@ -105,3 +105,75 @@ for (const role of ["logout", "relogin"] as const) {
     expect(calls).toBe(1)
   }, 20_000)
 }
+
+test("authorization newest-start ordering is shared across processes, not a local pending map", async () => {
+  await using f = await fixture()
+  const store = AuthStore.create(path.join(f.dir, "share/kilo/auth.json"))
+  await store.set("openai", expired())
+  const before = await store.snapshot("openai")
+  using first = worker({ root: f.dir, state: "first", role: "attempt", stale: true })
+  using second = worker({ root: f.dir, state: "second", role: "attempt" })
+  await Promise.all([first.wait("ready"), second.wait("ready")])
+  first.start()
+  await first.wait("begun")
+  second.start()
+  await second.done
+  first.proc.send("finish")
+  await first.done
+  await first.wait("stale")
+  const after = await store.snapshot("openai")
+  expect(after.loginGeneration).toBe(before.loginGeneration)
+  expect(after.tokenRevision).toBe(before.tokenRevision)
+  expect((await store.all()).openai).toEqual(expired())
+}, 20_000)
+
+test("ambiguous rotation fences waiting and later processes until explicit reauthentication", async () => {
+  await using f = await fixture()
+  const store = AuthStore.create(path.join(f.dir, "share/kilo/auth.json"))
+  await store.set("openai", expired())
+  const before = await store.snapshot("openai")
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let calls = 0
+  using server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch() {
+      calls++
+      entered.resolve()
+      await release.promise
+      return Response.json(calls === 1 ? { access_token: "ambiguous-secret" } : tokens())
+    },
+  })
+  using first = worker({ root: f.dir, state: "a", role: "refresh", uncertain: true, url: server.url.href })
+  using second = worker({ root: f.dir, state: "b", role: "refresh", uncertain: true, url: server.url.href })
+  try {
+    await Promise.all([first.wait("ready"), second.wait("ready")])
+    first.start()
+    await entered.promise
+    second.start()
+    await second.wait("waiting")
+    release.resolve()
+    await Promise.all([first.done, second.done])
+    await Promise.all([first.wait("uncertain"), second.wait("uncertain")])
+    await store.set("unrelated", { type: "api", key: "unrelated-fixture" })
+    using later = worker({ root: f.dir, state: "c", role: "refresh", uncertain: true, url: server.url.href })
+    await later.wait("ready")
+    later.start()
+    await later.done
+    await later.wait("uncertain")
+    expect(calls).toBe(1)
+    expect(await store.snapshot("openai")).toEqual(before)
+    expect(await store.observe("openai", true)).toMatchObject({ issue: "exchange-uncertain" })
+    await store.set("openai", expired())
+    using fresh = worker({ root: f.dir, state: "d", role: "refresh", url: server.url.href })
+    await fresh.wait("ready")
+    fresh.start()
+    await fresh.done
+    expect(calls).toBe(2)
+    expect(await store.observe("openai", true)).toMatchObject({ issue: undefined })
+    expect((await store.all()).openai).toMatchObject({ access: "next-access" })
+  } finally {
+    release.resolve()
+  }
+}, 30_000)
