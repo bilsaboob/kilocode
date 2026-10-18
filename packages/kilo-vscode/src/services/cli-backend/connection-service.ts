@@ -12,6 +12,7 @@ type SSEEventFilter = (event: SSEPayload, directory?: string) => boolean
 type NotificationDismissListener = (notificationId: string) => void
 type LanguageChangeListener = (locale: string) => void
 type ProfileChangeListener = (data: unknown) => void
+type AuthChangeListener = () => void | Promise<void>
 type MigrationCompleteListener = () => void
 type FavoritesChangeListener = (favorites: Array<{ providerID: string; modelID: string }>) => void
 type ClearPendingPromptsListener = () => void
@@ -66,6 +67,8 @@ export class KiloConnectionService {
   private readonly notificationDismissListeners: Set<NotificationDismissListener> = new Set()
   private readonly languageChangeListeners: Set<LanguageChangeListener> = new Set()
   private readonly profileChangeListeners: Set<ProfileChangeListener> = new Set()
+  private readonly authChangeListeners: Set<AuthChangeListener> = new Set()
+  private authGeneration = 0
   private readonly migrationCompleteListeners: Set<MigrationCompleteListener> = new Set()
   private readonly favoritesChangeListeners: Set<FavoritesChangeListener> = new Set()
   private readonly clearPendingPromptsListeners: Set<ClearPendingPromptsListener> = new Set()
@@ -363,6 +366,32 @@ export class KiloConnectionService {
     }
   }
 
+  onAuthChanged(listener: AuthChangeListener): () => void {
+    this.authChangeListeners.add(listener)
+    return () => {
+      this.authChangeListeners.delete(listener)
+    }
+  }
+
+  /** An auth refresh in another panel supersedes an older profile response. */
+  beginAuthRefresh(): () => boolean {
+    const generation = ++this.authGeneration
+    return () => generation === this.authGeneration
+  }
+
+  /** Refresh clients after provider-scoped auth invalidation, without disposing server instances. */
+  async notifyAuthChanged(): Promise<void> {
+    await Promise.all(
+      Array.from(this.authChangeListeners, async (listener) => {
+        try {
+          await listener()
+        } catch (error) {
+          console.warn("[Kilo New] ConnectionService: auth refresh listener failed:", error)
+        }
+      }),
+    )
+  }
+
   /**
    * Subscribe to migration-complete events broadcast from any KiloProvider. Returns unsubscribe function.
    */
@@ -567,6 +596,8 @@ export class KiloConnectionService {
     this.stateListeners.clear()
     this.notificationDismissListeners.clear()
     this.profileChangeListeners.clear()
+    this.authChangeListeners.clear()
+    this.authGeneration++
     this.migrationCompleteListeners.clear()
     this.favoritesChangeListeners.clear()
     this.clearPendingPromptsListeners.clear()

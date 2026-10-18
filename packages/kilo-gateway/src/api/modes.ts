@@ -40,17 +40,21 @@ export type OrganizationModeConfig = z.infer<typeof OrganizationModeConfigSchema
 export type OrganizationMode = z.infer<typeof OrganizationModeSchema>
 
 /**
- * In-memory cache for organization modes, keyed by organizationId.
+ * In-memory cache for organization modes, scoped to organization and credential authority.
  */
 const cache = new Map<string, { modes: OrganizationMode[]; timestamp: number }>()
+const pending = new Map<string, { revision: number; task: Promise<OrganizationMode[]> }>()
 const TTL = 5 * 60 * 1000 // 5 minutes
+let generation = 0
 
 /**
  * Clear the organization modes cache.
  * Should be called when switching organizations.
  */
 export function clearModesCache() {
+  generation++
   cache.clear()
+  pending.clear()
 }
 
 /**
@@ -58,40 +62,62 @@ export function clearModesCache() {
  *
  * @param token - Bearer authentication token
  * @param organizationId - Organization UUID
+ * @param authority - Optional login-generation identity for callers with durable auth metadata
  * @returns Array of organization modes, or empty array on error
  */
-export async function fetchOrganizationModes(token: string, organizationId: string): Promise<OrganizationMode[]> {
-  const cached = cache.get(organizationId)
+export async function fetchOrganizationModes(
+  token: string,
+  organizationId: string,
+  authority?: string,
+): Promise<OrganizationMode[]> {
+  const revision = generation
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify([organizationId, authority ?? token])),
+  )
+  const key = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+  for (const [id, entry] of cache) {
+    if (Date.now() - entry.timestamp >= TTL) cache.delete(id)
+  }
+  const cached = cache.get(key)
   if (cached && Date.now() - cached.timestamp < TTL) {
     return cached.modes
   }
 
-  try {
-    const url = `${KILO_API_BASE}/api/organizations/${encodeURIComponent(organizationId)}/modes`
-    const response = await fetch(url, {
-      headers: {
-        ...getDefaultHeaders(),
-        Authorization: `Bearer ${token}`,
-      },
-      signal: AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS),
-    })
+  const active = pending.get(key)
+  if (active?.revision === revision) return active.task
+  const task = (async () => {
+    try {
+      const url = `${KILO_API_BASE}/api/organizations/${encodeURIComponent(organizationId)}/modes`
+      const response = await fetch(url, {
+        headers: {
+          ...getDefaultHeaders(),
+          Authorization: `Bearer ${token}`,
+        },
+        signal: AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS),
+      })
 
-    if (!response.ok) {
+      if (!response.ok) {
+        return []
+      }
+
+      const json = await response.json()
+      const parsed = ResponseSchema.safeParse(json)
+
+      if (!parsed.success) {
+        return []
+      }
+
+      const modes = parsed.data.modes
+      if (revision === generation) cache.set(key, { modes, timestamp: Date.now() })
+      return modes
+    } catch (err) {
+      console.warn("[Kilo Gateway] Error fetching organization modes:", err)
       return []
     }
-
-    const json = await response.json()
-    const parsed = ResponseSchema.safeParse(json)
-
-    if (!parsed.success) {
-      return []
-    }
-
-    const modes = parsed.data.modes
-    cache.set(organizationId, { modes, timestamp: Date.now() })
-    return modes
-  } catch (err) {
-    console.warn("[Kilo Gateway] Error fetching organization modes:", err)
-    return []
-  }
+  })()
+  if (revision === generation) pending.set(key, { revision, task })
+  return task.finally(() => {
+    if (pending.get(key)?.task === task) pending.delete(key)
+  })
 }

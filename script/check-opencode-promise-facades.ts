@@ -29,6 +29,11 @@ const allow: Record<string, string> = {
 }
 
 const testAllow: Record<string, { count: number; reason: string }> = {
+  "kilocode/auth-admission.test.ts": {
+    count: 4,
+    reason:
+      "passive HTTP integration shares the production store, prevents fixture downloads, and disposes completed contexts without bootstrap",
+  },
   "kilocode/config-resilience.test.ts": { count: 4, reason: "existing runtime integration test" },
   "kilocode/config-validation.test.ts": { count: 2, reason: "existing runtime integration test" },
   "kilocode/plan-followup.test.ts": { count: 4, reason: "existing runtime integration test" },
@@ -43,7 +48,8 @@ const owned = (file: string) => file.startsWith("kilocode/") || file.startsWith(
 const hits: Array<{ file: string; line: number }> = []
 const glob = new Bun.Glob("**/*.ts")
 
-for (const file of glob.scanSync({ cwd: DIR, onlyFiles: true })) {
+for (const entry of glob.scanSync({ cwd: DIR, onlyFiles: true })) {
+  const file = entry.split(path.sep).join("/")
   if (owned(file)) continue
   const text = await Bun.file(path.join(DIR, file)).text()
   for (const match of text.matchAll(PATTERN)) {
@@ -60,7 +66,8 @@ const drift = Object.entries(allow).flatMap(([file, reason]) => {
 })
 
 const testHits: Array<{ file: string; line: number }> = []
-for (const file of glob.scanSync({ cwd: TEST_DIR, onlyFiles: true })) {
+for (const entry of glob.scanSync({ cwd: TEST_DIR, onlyFiles: true })) {
+  const file = entry.split(path.sep).join("/")
   const text = await Bun.file(path.join(TEST_DIR, file)).text()
   for (const match of text.matchAll(TEST_PATTERN)) {
     const line = text.slice(0, match.index ?? 0).split("\n").length

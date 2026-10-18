@@ -14,7 +14,7 @@ import type {
   AppLogResponses,
   AppSkillsErrors,
   AppSkillsResponses,
-  Auth as Auth3,
+  Auth as Auth4,
   AuthRemoveErrors,
   AuthRemoveResponses,
   AuthSetErrors,
@@ -75,6 +75,7 @@ import type {
   ExperimentalConsoleGetResponses,
   ExperimentalConsoleListOrgsErrors,
   ExperimentalConsoleListOrgsResponses,
+  ExperimentalConsoleSwitchOrgErrors,
   ExperimentalConsoleSwitchOrgResponses,
   ExperimentalResourceListErrors,
   ExperimentalResourceListResponses,
@@ -120,6 +121,10 @@ import type {
   GlobalEventResponses,
   GlobalHealthErrors,
   GlobalHealthResponses,
+  GlobalQuiesceErrors,
+  GlobalQuiesceResponses,
+  GlobalReleaseQuiescenceErrors,
+  GlobalReleaseQuiescenceResponses,
   GlobalUpgradeErrors,
   GlobalUpgradeResponses,
   IndexingModelsErrors,
@@ -225,6 +230,8 @@ import type {
   ProjectUpdateResponses,
   Prompt,
   ProviderAuthErrors,
+  ProviderAuthReadinessErrors,
+  ProviderAuthReadinessResponses,
   ProviderAuthResponses,
   ProviderListErrors,
   ProviderListResponses,
@@ -495,7 +502,7 @@ export class Auth extends HeyApiClient {
   public set<ThrowOnError extends boolean = false>(
     parameters: {
       providerID: string
-      auth?: Auth3
+      auth?: Auth4
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -669,6 +676,65 @@ export class Config extends HeyApiClient {
 }
 
 export class Global extends HeyApiClient {
+  /**
+   * Release a runtime restart reservation
+   */
+  public releaseQuiescence<ThrowOnError extends boolean = false>(
+    parameters?: {
+      runtimeID?: string
+      token?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "runtimeID" },
+            { in: "body", key: "token" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      GlobalReleaseQuiescenceResponses,
+      GlobalReleaseQuiescenceErrors,
+      ThrowOnError
+    >({
+      url: "/global/quiesce",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Reserve an idle runtime for restart
+   */
+  public quiesce<ThrowOnError extends boolean = false>(
+    parameters?: {
+      runtimeID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "body", key: "runtimeID" }] }])
+    return (options?.client ?? this.client).post<GlobalQuiesceResponses, GlobalQuiesceErrors, ThrowOnError>({
+      url: "/global/quiesce",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
   /**
    * Get health
    *
@@ -1276,7 +1342,11 @@ export class Console extends HeyApiClient {
         },
       ],
     )
-    return (options?.client ?? this.client).post<ExperimentalConsoleSwitchOrgResponses, unknown, ThrowOnError>({
+    return (options?.client ?? this.client).post<
+      ExperimentalConsoleSwitchOrgResponses,
+      ExperimentalConsoleSwitchOrgErrors,
+      ThrowOnError
+    >({
       url: "/experimental/console/switch",
       ...options,
       ...params,
@@ -3526,6 +3596,44 @@ export class Permission extends HeyApiClient {
   }
 }
 
+export class Auth3 extends HeyApiClient {
+  /**
+   * Inspect local credential readiness
+   */
+  public readiness<ThrowOnError extends boolean = false>(
+    parameters: {
+      providerID: string
+      directory?: string
+      workspace?: string
+      modelID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "providerID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "modelID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      ProviderAuthReadinessResponses,
+      ProviderAuthReadinessErrors,
+      ThrowOnError
+    >({
+      url: "/provider/{providerID}/auth/readiness",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Oauth extends HeyApiClient {
   /**
    * Start OAuth authorization
@@ -3584,6 +3692,7 @@ export class Oauth extends HeyApiClient {
       providerID: string
       directory?: string
       workspace?: string
+      attemptID?: string
       method?: number
       code?: string
     },
@@ -3597,6 +3706,7 @@ export class Oauth extends HeyApiClient {
             { in: "path", key: "providerID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "body", key: "attemptID" },
             { in: "body", key: "method" },
             { in: "body", key: "code" },
           ],
@@ -3679,6 +3789,11 @@ export class Provider extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _auth?: Auth3
+  get auth2(): Auth3 {
+    return (this._auth ??= new Auth3({ client: this.client }))
   }
 
   private _oauth?: Oauth

@@ -62,7 +62,7 @@ export interface MigrationContext {
   migrationCache: MigrationCache
   migrationCheckInFlight: boolean
   lastMigrationHadErrors?: boolean
-  disposeGlobal(): Promise<void>
+  refreshAuth(): Promise<void>
   broadcastComplete(): void
 }
 
@@ -274,7 +274,8 @@ export async function handleStartMigration(
 
 export async function handleFinalizeLegacyMigration(ctx: MigrationContext): Promise<void> {
   if (!ctx.extensionContext) return
-  await ctx.disposeGlobal()
+  // Config writes already apply their own lifecycle; credential-only imports must not restart workspaces.
+  await ctx.refreshAuth()
   await MigrationService.setMigrationStatus(
     ctx.extensionContext as Parameters<typeof MigrationService.setMigrationStatus>[0],
     ctx.lastMigrationHadErrors ? "completed_with_errors" : "completed",

@@ -971,6 +971,7 @@ export interface CompleteProviderOAuthMessage {
   requestId: string
   providerID: string
   method: number
+  attemptID: string
   code?: string
 }
 

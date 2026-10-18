@@ -48,6 +48,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Set authentication credentials",
@@ -104,6 +121,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -171,6 +205,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Write a log entry to the server logs with specified level and metadata.",
@@ -208,6 +259,151 @@
           {
             "lang": "js",
             "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.app.log({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/global/quiesce": {
+      "post": {
+        "tags": ["global"],
+        "operationId": "global.quiesce",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "RuntimeLease",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeLease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "summary": "Reserve an idle runtime for restart",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "runtimeID": {
+                    "type": "string"
+                  }
+                },
+                "required": ["runtimeID"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.global.quiesce({\n  ...\n})"
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["global"],
+        "operationId": "global.releaseQuiescence",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "summary": "Release a runtime restart reservation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "runtimeID": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": ["runtimeID", "token"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.global.releaseQuiescence({\n  ...\n})"
           }
         ]
       }
@@ -259,9 +455,15 @@
                       },
                       "required": ["version", "window", "automaticPercent", "admissionPercent", "id"],
                       "additionalProperties": false
+                    },
+                    "runtime": {
+                      "$ref": "#/components/schemas/RuntimeInfo"
+                    },
+                    "compactionBudget": {
+                      "$ref": "#/components/schemas/CompactionBudgetSettings"
                     }
                   },
-                  "required": ["healthy", "version"],
+                  "required": ["healthy", "version", "runtime", "compactionBudget"],
                   "additionalProperties": false,
                   "description": "Health information"
                 }
@@ -274,6 +476,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -314,6 +533,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Subscribe to global events from the Kilo system using server-sent events.",
@@ -348,6 +584,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -388,6 +641,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -437,6 +707,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -509,6 +796,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -627,6 +931,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the current Kilo configuration settings and preferences.",
@@ -681,6 +1002,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -766,6 +1104,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get warnings generated during config loading (e.g., invalid JSON, schema errors).",
@@ -837,6 +1192,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all configured AI providers and their default models.",
@@ -888,6 +1260,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -989,6 +1378,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "500": {
             "description": "InternalServerError",
             "content": {
@@ -1040,6 +1446,23 @@
                 "schema": {
                   "type": "boolean",
                   "description": "Switch success"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -1139,6 +1562,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of available tools with their JSON schema parameters for a specific provider and model combination.",
@@ -1195,6 +1635,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -1265,6 +1722,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List all git worktrees for the current project and whether Kilo manages them.",
@@ -1319,6 +1793,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -1393,6 +1884,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Remove a git worktree and delete its branch.",
@@ -1459,6 +1967,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -1546,6 +2071,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get file diffs for a worktree compared to its base branch. Includes uncommitted changes.",
@@ -1614,6 +2156,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -1691,6 +2250,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -1843,6 +2419,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all Kilo sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
@@ -1898,6 +2491,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2027,6 +2637,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Search for text patterns across files in the project using ripgrep.",
@@ -2121,6 +2748,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Search for files or directories by name or pattern in the project directory.",
@@ -2184,6 +2828,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2253,6 +2914,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List files and directories in a specified path.",
@@ -2315,6 +2993,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Read the content of a specified file.",
@@ -2373,6 +3068,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get the git status of all files in the project.",
@@ -2425,6 +3137,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2482,6 +3211,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the current working directory and related path information for the Kilo instance.",
@@ -2533,6 +3279,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2591,6 +3354,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2670,6 +3450,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the current git diff for the working tree or against the default branch.",
@@ -2721,6 +3518,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2788,6 +3602,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -2867,6 +3698,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all available commands in the Kilo system.",
@@ -2922,6 +3770,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -2999,6 +3864,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all available skills in the Kilo system.",
@@ -3054,6 +3936,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -3115,6 +4014,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get formatter status",
@@ -3170,6 +4086,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -3231,6 +4164,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -3352,6 +4302,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Start OAuth authentication flow for a Model Context Protocol (MCP) server.",
@@ -3431,6 +4398,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Remove OAuth credentials for an MCP server.",
@@ -3507,6 +4491,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/McpServerNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -3605,6 +4606,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Start OAuth flow and wait for callback (opens browser).",
@@ -3675,6 +4693,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/McpServerNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -3750,6 +4785,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Disconnect an MCP server.",
@@ -3807,6 +4859,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of projects that have been opened with Kilo.",
@@ -3861,6 +4930,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the currently active project that Kilo is working with.",
@@ -3912,6 +4998,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -3991,6 +5094,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProjectNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -4105,6 +5225,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of available shells on the system.",
@@ -4163,6 +5300,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all active pseudo-terminal (PTY) sessions managed by Kilo.",
@@ -4217,6 +5371,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -4328,6 +5499,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve detailed information about a specific pseudo-terminal (PTY) session.",
@@ -4403,6 +5591,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PtyNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -4519,6 +5724,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Remove and terminate a specific pseudo-terminal (PTY) session.",
@@ -4614,6 +5836,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Create a short-lived ticket for opening a PTY WebSocket connection.",
@@ -4669,6 +5908,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -4750,6 +6006,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QuestionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -4854,6 +6127,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Reject a question request from the AI assistant.",
@@ -4909,6 +6199,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -4990,6 +6297,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PermissionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -5084,6 +6408,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PermissionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -5183,6 +6524,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Enable or disable allowing all permissions without prompts.",
@@ -5213,6 +6571,92 @@
           {
             "lang": "js",
             "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.permission.allowEverything({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/provider/{providerID}/auth/readiness": {
+      "get": {
+        "tags": ["provider"],
+        "operationId": "provider.auth.readiness",
+        "parameters": [
+          {
+            "name": "providerID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "modelID",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "AuthReadiness",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthReadiness"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "summary": "Inspect local credential readiness",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createKiloClient } from \"@kilocode/sdk\n\nconst client = createKiloClient()\nawait client.provider.auth.readiness({\n  ...\n})"
           }
         ]
       }
@@ -5288,6 +6732,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all available AI providers, including both available and connected ones.",
@@ -5346,6 +6807,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -5413,6 +6891,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -5511,6 +7006,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Handle the OAuth callback from a provider after user authorization.",
@@ -5521,6 +7033,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "attemptID": {
+                    "type": "string"
+                  },
                   "method": {
                     "type": "number",
                     "description": "Auth method index"
@@ -5662,6 +7177,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get a list of all Kilo sessions, sorted by most recently updated.",
@@ -5716,6 +7248,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -5840,6 +7389,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the current status of all sessions, including active, idle, and completed states.",
@@ -5917,6 +7483,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -5999,6 +7582,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Delete a session and permanently remove all associated data, including messages and history.",
@@ -6074,6 +7674,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -6194,6 +7811,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve all child sessions that were forked from the specified parent session.",
@@ -6278,6 +7912,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the todo list associated with a specific session, showing tasks and action items.",
@@ -6351,6 +8002,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -6469,6 +8137,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve all messages in a session, including user prompts and AI responses.",
@@ -6556,6 +8241,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -6760,6 +8462,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve a specific message from a session by its message ID.",
@@ -6850,11 +8569,21 @@
             }
           },
           "409": {
-            "description": "SessionBusyError",
+            "description": "SessionBusyError | RuntimeConflict",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionBusyError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -6935,6 +8664,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7028,6 +8774,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Abort an active session and stop any ongoing AI processing or command execution.",
@@ -7106,6 +8869,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7206,6 +8986,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "500": {
             "description": "InternalServerError",
             "content": {
@@ -7283,6 +9080,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7374,6 +9188,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "SessionBusyError | RuntimeConflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7469,6 +9303,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7662,6 +9513,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Send a new command to a session for execution by the AI assistant.",
@@ -7824,11 +9692,21 @@
             }
           },
           "409": {
-            "description": "SessionBusyError",
+            "description": "SessionBusyError | RuntimeConflict",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionBusyError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -7950,11 +9828,21 @@
             }
           },
           "409": {
-            "description": "SessionBusyError",
+            "description": "SessionBusyError | RuntimeConflict",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionBusyError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -8061,11 +9949,21 @@
             }
           },
           "409": {
-            "description": "SessionBusyError",
+            "description": "SessionBusyError | RuntimeConflict",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionBusyError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -8161,6 +10059,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/PermissionNotFoundError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -8262,6 +10177,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -8380,6 +10312,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Delete a part from a message.",
@@ -8475,6 +10424,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Update a part in a message.",
@@ -8535,6 +10501,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -8617,6 +10600,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Start sync loops for workspaces in the current project that have active sessions.",
@@ -8681,6 +10681,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -8799,6 +10816,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Update a session to belong to the current workspace through the sync event system.",
@@ -8896,6 +10930,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -9055,6 +11106,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve sessions in the requested order. Items keep that order across pages; use cursor.next or cursor.previous to move through the ordered list.",
@@ -9136,6 +11204,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -9246,6 +11331,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "503": {
             "description": "ServiceUnavailableError",
             "content": {
@@ -9329,6 +11431,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -9426,6 +11545,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SessionNotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -9557,6 +11693,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "500": {
             "description": "UnknownError",
             "content": {
@@ -9638,6 +11791,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "503": {
             "description": "ServiceUnavailableError",
             "content": {
@@ -9715,6 +11885,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UnauthorizedError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -9815,6 +12002,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "503": {
             "description": "ServiceUnavailableError",
             "content": {
@@ -9881,6 +12085,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -9957,6 +12178,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Open the help dialog in the TUI to display user assistance information.",
@@ -10009,6 +12247,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10067,6 +12322,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Open the theme dialog.",
@@ -10119,6 +12391,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10177,6 +12466,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Submit the prompt.",
@@ -10229,6 +12535,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10289,6 +12612,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -10362,6 +12702,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10449,6 +12806,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -10548,6 +12922,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Navigate the TUI to display the specified session.",
@@ -10629,6 +13020,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the next TUI request from the queue for processing.",
@@ -10681,6 +13089,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10762,6 +13187,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List all available workspace adapters for the current project.",
@@ -10817,6 +13259,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -10877,6 +13336,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -10967,6 +13443,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Register missing workspaces returned by workspace adapters.",
@@ -11034,6 +13527,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -11107,6 +13617,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Remove an existing workspace.",
@@ -11171,6 +13698,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -11282,6 +13826,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -11452,6 +14013,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Save an agent builder payload as a canonical agent markdown file.",
@@ -11582,6 +14160,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List tracked background processes for the current instance.",
@@ -11652,6 +14247,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -11728,6 +14340,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get the retained output tail for one background process.",
@@ -11798,6 +14427,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -11874,6 +14520,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Stop and restart a background process with its original command.",
@@ -11935,6 +14598,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -12002,6 +14682,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -12135,6 +14832,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -12484,6 +15198,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "502": {
             "description": "CodexImage25UpstreamError",
             "content": {
@@ -12606,6 +15337,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Resolve global, project, and effective config values with source metadata for inheritance-aware settings UI.",
@@ -12655,6 +15403,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -12741,6 +15506,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List config source metadata in load order without exposing config contents or secrets.",
@@ -12792,6 +15574,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -12859,6 +15658,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List project instruction files used by Kilo and return their current contents.",
@@ -12908,6 +15724,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -12986,6 +15819,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve TUI-compatible recent and favorite model selections.",
@@ -13035,6 +15885,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -13120,6 +15987,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the effective TUI configuration for the current instance directory.",
@@ -13184,6 +16068,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -13379,6 +16280,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List valid TUI keybind commands, descriptions, groups, and default bindings from the CLI schema.",
@@ -13443,6 +16361,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -13520,6 +16455,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve the current code indexing status for the active project.",
@@ -13578,6 +16530,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Retrieve code indexing warnings for the active project.",
@@ -13629,6 +16598,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -13757,6 +16743,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Fetch user profile and organizations from Kilo Gateway",
@@ -13825,6 +16828,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -13993,6 +17013,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Fetch custom modes defined for the current organization",
@@ -14084,6 +17121,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -14196,6 +17250,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -14342,6 +17413,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Proxy an audio transcription request to the Kilo Gateway",
@@ -14480,6 +17568,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Fetch notifications from Kilo Gateway for CLI display",
@@ -14537,6 +17642,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -14713,6 +17835,23 @@
               }
             }
           },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "503": {
             "description": "ServiceUnavailable",
             "content": {
@@ -14796,6 +17935,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -14926,6 +18082,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -15092,6 +18265,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Fetch full session data from the Kilo cloud for preview",
@@ -15186,6 +18376,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Download a cloud-synced session and write it to local storage with fresh IDs.",
@@ -15264,6 +18471,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Write a heap snapshot for the CLI process to the log directory.",
@@ -15321,6 +18545,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -15399,6 +18640,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -15497,6 +18755,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "List deterministic file reads and changes recorded for a session.",
@@ -15552,6 +18827,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -15636,6 +18928,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Resume a pending session after reconnecting network-dependent services.",
@@ -15717,6 +19026,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Stop a pending session instead of resuming after network reconnect.",
@@ -15779,6 +19105,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -15847,6 +19190,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Close the remote WebSocket connection to UserConnectionDO.",
@@ -15909,6 +19269,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -16005,6 +19382,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get the effective sandbox state for one session.",
@@ -16098,6 +19492,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Toggle the ephemeral sandbox override for one session.",
@@ -16154,6 +19565,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -16270,6 +19698,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -16430,6 +19875,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -16668,6 +20130,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -16969,6 +20448,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Get all pending suggestion requests across all sessions.",
@@ -17046,6 +20542,23 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
                 }
               }
             }
@@ -17147,6 +20660,23 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "description": "Dismiss a suggestion request from the AI assistant.",
@@ -17204,6 +20734,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -17286,6 +20833,23 @@
                     },
                     {
                       "$ref": "#/components/schemas/InvalidRequestError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "RuntimeConflict | SessionBusyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RuntimeConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionBusyError"
                     }
                   ]
                 }
@@ -17410,6 +20974,9 @@
     "schemas": {
       "Event": {
         "anyOf": [
+          {
+            "$ref": "#/components/schemas/EventSessionAuth1"
+          },
           {
             "$ref": "#/components/schemas/EventServerConnected"
           },
@@ -17884,6 +21451,113 @@
           }
         },
         "required": ["_tag", "message"],
+        "additionalProperties": false
+      },
+      "RuntimeConflict": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["RuntimeConflict"]
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["active", "changed", "leased"]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["name", "reason", "message"],
+        "additionalProperties": false
+      },
+      "SessionBusyError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["SessionBusyError"]
+          },
+          "sessionID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "sessionID", "message"],
+        "additionalProperties": false
+      },
+      "RuntimeLease": {
+        "type": "object",
+        "properties": {
+          "runtimeID": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          }
+        },
+        "required": ["runtimeID", "token", "expiresAt"],
+        "additionalProperties": false
+      },
+      "RuntimeInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["id", "version", "capabilities"],
+        "additionalProperties": false
+      },
+      "CompactionBudgetSettings": {
+        "type": "object",
+        "properties": {
+          "requests": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 1000
+          },
+          "milliseconds": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 86400000
+          }
+        },
+        "required": ["requests", "milliseconds"],
         "additionalProperties": false
       },
       "Event.tui.prompt.append": {
@@ -18390,6 +22064,44 @@
           "data": {
             "type": "object",
             "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "local-valid",
+                  "refresh-needed",
+                  "refreshing",
+                  "exchange-unavailable",
+                  "exchange-uncertain",
+                  "refresh-rejected",
+                  "authority-changed",
+                  "source-unmanaged",
+                  "storage-unavailable",
+                  "unverifiable",
+                  "external-owner",
+                  "no-credentials"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unknown",
+                  "ready",
+                  "refreshing",
+                  "transient-unavailable",
+                  "sign-in-required",
+                  "account-changed",
+                  "unmanaged-source",
+                  "storage-unavailable"
+                ]
+              },
+              "action": {
+                "type": "string",
+                "enum": ["none", "retry-explicitly", "sign-in", "reload", "update-source", "check-storage"]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["file", "env", "config", "plugin", "none", "unknown"]
+              },
               "providerID": {
                 "type": "string"
               },
@@ -18908,6 +22620,40 @@
           }
         ]
       },
+      "AuthAuthority": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["file", "env", "config", "plugin", "none", "unknown"]
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["oauth", "api", "anonymous", "external"]
+          },
+          "authority": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "env": {
+            "type": "string"
+          }
+        },
+        "required": ["version", "providerID", "source", "kind", "authority", "managed", "env"],
+        "additionalProperties": false
+      },
       "UserMessage": {
         "type": "object",
         "properties": {
@@ -19096,6 +22842,15 @@
               "hash"
             ],
             "additionalProperties": false
+          },
+          "authAuthority": {
+            "$ref": "#/components/schemas/AuthAuthority"
+          },
+          "authAuthorities": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AuthAuthority"
+            }
           }
         },
         "required": ["id", "sessionID", "role", "time", "agent", "model"],
@@ -20433,6 +24188,9 @@
           },
           "payload": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/EventSessionAuth"
+              },
               {
                 "$ref": "#/components/schemas/EventServerConnected"
               },
@@ -23646,6 +27404,104 @@
         "required": ["_tag", "requestID", "message"],
         "additionalProperties": false
       },
+      "AuthReadiness": {
+        "type": "object",
+        "properties": {
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "ready",
+              "refreshing",
+              "transient-unavailable",
+              "sign-in-required",
+              "account-changed",
+              "unmanaged-source",
+              "storage-unavailable"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": ["file", "env", "config", "plugin", "none", "unknown"]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "local-valid",
+              "refresh-needed",
+              "refreshing",
+              "exchange-unavailable",
+              "exchange-uncertain",
+              "refresh-rejected",
+              "authority-changed",
+              "source-unmanaged",
+              "storage-unavailable",
+              "unverifiable",
+              "external-owner",
+              "no-credentials"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": ["none", "retry-explicitly", "sign-in", "reload", "update-source", "check-storage"]
+          },
+          "authority": {
+            "type": "string"
+          },
+          "runtimeID": {
+            "type": "string"
+          },
+          "observedAt": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["NaN"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["-Infinity"]
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "validation": {
+            "type": "string",
+            "enum": ["local"]
+          },
+          "disruption": {
+            "type": "string",
+            "enum": ["none", "provider", "runtime"]
+          }
+        },
+        "required": [
+          "providerID",
+          "state",
+          "source",
+          "reason",
+          "action",
+          "runtimeID",
+          "observedAt",
+          "validation",
+          "disruption"
+        ],
+        "additionalProperties": false
+      },
       "ProviderAuthMethod": {
         "type": "object",
         "properties": {
@@ -23760,6 +27616,9 @@
       "ProviderAuthAuthorization": {
         "type": "object",
         "properties": {
+          "attemptID": {
+            "type": "string"
+          },
           "url": {
             "type": "string"
           },
@@ -23971,23 +27830,6 @@
           }
         },
         "required": ["type", "prompt", "description", "agent"],
-        "additionalProperties": false
-      },
-      "SessionBusyError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["SessionBusyError"]
-          },
-          "sessionID": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "sessionID", "message"],
         "additionalProperties": false
       },
       "V2SessionsResponse": {
@@ -27014,6 +30856,126 @@
           }
         },
         "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "EventSessionAuth": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.auth"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "providerID": {
+                "type": "string"
+              },
+              "modelID": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unknown",
+                  "ready",
+                  "refreshing",
+                  "transient-unavailable",
+                  "sign-in-required",
+                  "account-changed",
+                  "unmanaged-source",
+                  "storage-unavailable"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["file", "env", "config", "plugin", "none", "unknown"]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "local-valid",
+                  "refresh-needed",
+                  "refreshing",
+                  "exchange-unavailable",
+                  "exchange-uncertain",
+                  "refresh-rejected",
+                  "authority-changed",
+                  "source-unmanaged",
+                  "storage-unavailable",
+                  "unverifiable",
+                  "external-owner",
+                  "no-credentials"
+                ]
+              },
+              "action": {
+                "type": "string",
+                "enum": ["none", "retry-explicitly", "sign-in", "reload", "update-source", "check-storage"]
+              },
+              "authority": {
+                "type": "string"
+              },
+              "runtimeID": {
+                "type": "string"
+              },
+              "observedAt": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity", "-Infinity", "NaN"]
+                  }
+                ]
+              },
+              "validation": {
+                "type": "string",
+                "enum": ["local"]
+              },
+              "disruption": {
+                "type": "string",
+                "enum": ["none", "provider", "runtime"]
+              },
+              "sessionID": {
+                "type": "string"
+              },
+              "messageID": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "providerID",
+              "state",
+              "source",
+              "reason",
+              "action",
+              "runtimeID",
+              "observedAt",
+              "validation",
+              "disruption",
+              "sessionID",
+              "messageID"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
       "EventServerConnected": {
@@ -31280,6 +35242,122 @@
           }
         },
         "required": ["id", "name", "enabled", "env", "endpoint", "options"],
+        "additionalProperties": false
+      },
+      "EventSessionAuth1": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.auth"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "providerID": {
+                "type": "string"
+              },
+              "modelID": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unknown",
+                  "ready",
+                  "refreshing",
+                  "transient-unavailable",
+                  "sign-in-required",
+                  "account-changed",
+                  "unmanaged-source",
+                  "storage-unavailable"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["file", "env", "config", "plugin", "none", "unknown"]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "local-valid",
+                  "refresh-needed",
+                  "refreshing",
+                  "exchange-unavailable",
+                  "exchange-uncertain",
+                  "refresh-rejected",
+                  "authority-changed",
+                  "source-unmanaged",
+                  "storage-unavailable",
+                  "unverifiable",
+                  "external-owner",
+                  "no-credentials"
+                ]
+              },
+              "action": {
+                "type": "string",
+                "enum": ["none", "retry-explicitly", "sign-in", "reload", "update-source", "check-storage"]
+              },
+              "authority": {
+                "type": "string"
+              },
+              "runtimeID": {
+                "type": "string"
+              },
+              "observedAt": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  }
+                ]
+              },
+              "validation": {
+                "type": "string",
+                "enum": ["local"]
+              },
+              "disruption": {
+                "type": "string",
+                "enum": ["none", "provider", "runtime"]
+              },
+              "sessionID": {
+                "type": "string"
+              },
+              "messageID": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "providerID",
+              "state",
+              "source",
+              "reason",
+              "action",
+              "runtimeID",
+              "observedAt",
+              "validation",
+              "disruption",
+              "sessionID",
+              "messageID"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
       "EventTuiToastShow1": {

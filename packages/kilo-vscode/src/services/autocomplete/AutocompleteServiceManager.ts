@@ -86,6 +86,7 @@ export class AutocompleteServiceManager {
   private inlineCompletionProviderKind: "classic" | "next-edit" | null = null
   private unsubscribeState: (() => void) | null = null
   private unsubscribeEvent: (() => void) | null = null
+  private unsubscribeAuth: (() => void) | null = null
   // Resolved copy of the classic provider's ignore controller for synchronous
   // snippet filtering. Null until the async initialize() resolves.
   private ignoreControllerSync: { validateAccess(fsPath: string): boolean } | null = null
@@ -171,9 +172,9 @@ export class AutocompleteServiceManager {
       void this.load()
     })
 
-    // Reset error backoff when auth state changes (login, logout, org switch).
-    // The CLI emits global.disposed after these actions, which is the most
-    // reliable signal that credentials may have changed.
+    // Auth changes invalidate only the affected provider, not healthy instances.
+    this.unsubscribeAuth = connectionService.onAuthChanged(() => this.inlineCompletionProvider.resetBackoff())
+    // Actual configuration resets can also change credential routing.
     this.unsubscribeEvent = connectionService.onEventFiltered(
       (event) => event.type === "global.disposed",
       () => this.inlineCompletionProvider.resetBackoff(),
@@ -477,6 +478,8 @@ export class AutocompleteServiceManager {
     this.unsubscribeState = null
     this.unsubscribeEvent?.()
     this.unsubscribeEvent = null
+    this.unsubscribeAuth?.()
+    this.unsubscribeAuth = null
 
     // Dispose inline completion provider registration
     if (this.inlineCompletionProviderDisposable) {

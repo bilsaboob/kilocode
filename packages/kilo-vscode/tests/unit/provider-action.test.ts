@@ -101,7 +101,7 @@ describe("createProviderAction", () => {
       type: "providerOAuthReady",
       requestId: oauthId,
       providerID: "anthropic",
-      authorization: { url: "https://example.com", method: "code", instructions: "Code: 1234" },
+      authorization: { attemptID: "attempt-1", url: "https://example.com", method: "code", instructions: "Code: 1234" },
     })
 
     expect(seen).toEqual(["disconnect:openai", "oauth:code"])
@@ -138,6 +138,44 @@ describe("createProviderAction", () => {
     })
 
     expect(seen).toEqual([])
+    action.dispose()
+  })
+
+  it("ignores cancelled authorization results and keeps the restarted callback ID", () => {
+    const transport = createTransport()
+    const action = createProviderAction(transport)
+    const start = () =>
+      action.send(
+        { type: "authorizeProviderOAuth", providerID: "openai", method: 1 },
+        {
+          onOAuthReady: (message) =>
+            action.send({
+              type: "completeProviderOAuth",
+              providerID: message.providerID,
+              method: 1,
+              attemptID: message.authorization.attemptID!,
+              code: "fixture-code",
+            }),
+        },
+      )
+    const old = start()
+    action.clear()
+    const current = start()
+    for (const [requestId, attemptID] of [
+      [old, "old-attempt"],
+      [current, "new-attempt"],
+      [old, "old-attempt"],
+    ]) {
+      transport.receive({
+        type: "providerOAuthReady",
+        requestId,
+        providerID: "openai",
+        authorization: { attemptID, url: "https://example.com", method: "code", instructions: "Code" },
+      })
+    }
+    expect(transport.sent.filter((message) => message.type === "completeProviderOAuth")).toEqual([
+      expect.objectContaining({ providerID: "openai", method: 1, attemptID: "new-attempt", code: "fixture-code" }),
+    ])
     action.dispose()
   })
 })

@@ -1,5 +1,5 @@
 import path from "path"
-import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
+import { Context, Duration, Effect, Layer, Option, Schedule, Schema, Scope } from "effect" // kilocode_change
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Global } from "./global"
 import { Flag } from "./flag/flag"
@@ -124,6 +124,19 @@ export const Event = {
 
 declare const KILO_MODELS_DEV: Record<string, Provider> | undefined
 
+// kilocode_change start - local metadata inspection must not build the refreshing service
+export const local = Effect.fn("ModelsDev.local")(function* () {
+  const fs = yield* AppFileSystem.Service
+  const source = Flag.KILO_MODELS_URL || "https://models.dev"
+  const file =
+    Flag.KILO_MODELS_PATH ??
+    path.join(Global.Path.cache, source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`)
+  const disk = yield* fs.readJson(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
+  const data = disk ?? (typeof KILO_MODELS_DEV === "undefined" ? undefined : KILO_MODELS_DEV)
+  return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {}
+})
+// kilocode_change end
+
 export interface Interface {
   readonly get: () => Effect.Effect<Record<string, Provider>>
   readonly refresh: (force?: boolean) => Effect.Effect<void>
@@ -201,8 +214,6 @@ export const layer = Layer.effect(
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
-    const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
-
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
       if (!force && (yield* fresh())) return
       yield* Effect.scoped(
@@ -224,10 +235,16 @@ export const layer = Layer.effect(
       )
     })
 
-    if (!Flag.KILO_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-      // Schedule.spaced runs the effect once, then waits between completions.
-      yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
-    }
+    // kilocode_change start - constructing passive API dependencies must not start catalog I/O
+    const scope = yield* Scope.Scope
+    const start = yield* Effect.cached(
+      Effect.gen(function* () {
+        if (Flag.KILO_DISABLE_MODELS_FETCH || process.argv.includes("--get-yargs-completions")) return
+        yield* refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore, Effect.forkIn(scope))
+      }),
+    )
+    const get = (): Effect.Effect<Record<string, Provider>> => start.pipe(Effect.andThen(cachedGet))
+    // kilocode_change end
 
     return Service.of({ get, refresh })
   }),

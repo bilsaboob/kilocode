@@ -23,6 +23,9 @@ import {
   UnknownProviderReason,
 } from "../schema"
 
+import { Dispatch } from "./dispatch" // kilocode_change
+export { Dispatch } from "./dispatch" // kilocode_change
+
 export interface Interface {
   readonly execute: (
     request: HttpClientRequest.HttpClientRequest,
@@ -359,8 +362,10 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
     const executeOnce = (request: HttpClientRequest.HttpClientRequest) =>
       Effect.gen(function* () {
         const redactedNames = yield* Headers.CurrentRedactedNames
+        const dispatch = yield* Dispatch // kilocode_change
+        const headers = yield* dispatch({ transport: "http", url: request.url, headers: request.headers }) // kilocode_change
         return yield* http
-          .execute(request)
+          .execute(HttpClientRequest.setHeaders(request, headers)) // kilocode_change
           .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
       })
     return Service.of({

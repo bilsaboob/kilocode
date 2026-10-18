@@ -12,9 +12,7 @@ export interface AuthContext {
   readonly client: KiloClient | null
   postMessage(msg: unknown): void
   getWorkspaceDirectory(): string
-  disposeGlobal(): Promise<void>
-  fetchAndSendProviders(): Promise<void>
-  fetchAndSendAgents(): Promise<void>
+  refreshAuth(current?: () => boolean): Promise<boolean>
 }
 
 /**
@@ -25,7 +23,8 @@ export interface AuthContext {
  * @param getAttempt - Returns the latest attempt counter (may have changed if user cancelled).
  */
 export async function handleLogin(ctx: AuthContext, attempt: number, getAttempt: () => number): Promise<void> {
-  if (!ctx.client) return
+  const client = ctx.client
+  if (!client || attempt !== getAttempt()) return
 
   console.log("[Kilo New] KiloProvider: 🔐 Starting login flow...")
 
@@ -33,10 +32,11 @@ export async function handleLogin(ctx: AuthContext, attempt: number, getAttempt:
     const dir = ctx.getWorkspaceDirectory()
 
     // Step 1: Initiate OAuth authorization
-    const { data: auth } = await ctx.client.provider.oauth.authorize(
+    const { data: auth } = await client.provider.oauth.authorize(
       { providerID: "kilo", method: 0, directory: dir },
       { throwOnError: true },
     )
+    if (attempt !== getAttempt()) return
     console.log("[Kilo New] KiloProvider: 🔐 Got auth URL:", auth.url)
 
     // Parse code from instructions (format: "Open URL and enter code: ABCD-1234")
@@ -52,18 +52,18 @@ export async function handleLogin(ctx: AuthContext, attempt: number, getAttempt:
     })
 
     // Step 2: Wait for callback (blocks until polling completes)
-    await ctx.client.provider.oauth.callback({ providerID: "kilo", method: 0, directory: dir }, { throwOnError: true })
+    await client.provider.oauth.callback(
+      { providerID: "kilo", method: 0, attemptID: auth.attemptID, directory: dir },
+      { throwOnError: true },
+    )
 
     // Check if this attempt was cancelled
     if (attempt !== getAttempt()) return
 
     console.log("[Kilo New] KiloProvider: 🔐 Login successful")
 
-    await ctx.disposeGlobal()
-
-    // Step 3: Fetch profile and push to webview
-    const { data: profile } = await ctx.client.kilo.profile(undefined, { throwOnError: true })
-    ctx.postMessage({ type: "profileData", data: profile })
+    if (!(await ctx.refreshAuth(() => attempt === getAttempt()))) return
+    if (attempt !== getAttempt()) return
     ctx.postMessage({ type: "deviceAuthComplete" })
   } catch (error) {
     if (attempt !== getAttempt()) return
@@ -84,9 +84,7 @@ export async function handleLogout(ctx: AuthContext): Promise<void> {
     console.log("[Kilo New] KiloProvider: 🚪 Logged out successfully")
     ctx.postMessage({ type: "profileData", data: null })
 
-    await ctx.disposeGlobal()
-
-    await ctx.fetchAndSendProviders()
+    await ctx.refreshAuth()
   } catch (error) {
     console.error("[Kilo New] KiloProvider: ❌ Logout failed:", error)
     ctx.postMessage({
@@ -118,25 +116,7 @@ export async function handleSetOrganization(ctx: AuthContext, organizationId: st
     return
   }
 
-  await ctx.disposeGlobal()
-
-  // Org switch succeeded — refresh profile and providers independently (best-effort)
-  try {
-    const result = await ctx.client.kilo.profile()
-    ctx.postMessage({ type: "profileData", data: result.data ?? null })
-  } catch (error) {
-    console.error("[Kilo New] KiloProvider: Failed to refresh profile after org switch:", error)
-  }
-  try {
-    await ctx.fetchAndSendProviders()
-  } catch (error) {
-    console.error("[Kilo New] KiloProvider: Failed to refresh providers after org switch:", error)
-  }
-  try {
-    await ctx.fetchAndSendAgents()
-  } catch (error) {
-    console.error("[Kilo New] KiloProvider: Failed to refresh agents after org switch:", error)
-  }
+  await ctx.refreshAuth()
 }
 
 /** Handle profile refresh request. */

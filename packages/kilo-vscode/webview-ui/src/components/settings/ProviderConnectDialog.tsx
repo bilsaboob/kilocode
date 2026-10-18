@@ -235,9 +235,13 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     )
   }
 
-  function complete(code?: string) {
+  function complete(authorization: ProviderAuthAuthorization, code?: string) {
     const index = state.methodIndex
-    if (index === undefined) return
+    if (index === undefined || authorization !== state.authorization || state.phase === "connecting") return
+    if (!authorization.attemptID) {
+      fail(language.t("provider.connect.status.failed", { error: "Missing authorization attempt" }))
+      return
+    }
 
     setState({
       ...state,
@@ -251,6 +255,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
         type: "completeProviderOAuth",
         providerID: props.providerID,
         method: index,
+        attemptID: authorization.attemptID,
         code,
       },
       {
@@ -433,6 +438,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
   }
 
   const OAuthCodeView: Component = () => {
+    const authorization = state.authorization!
     const [value, setValue] = createSignal("")
 
     onMount(() => {
@@ -447,7 +453,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
         setState({ ...state, error: language.t("provider.connect.oauth.code.required") })
         return
       }
-      complete(code)
+      complete(authorization, code)
     }
 
     return (
@@ -493,6 +499,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
   }
 
   const OAuthAutoView: Component = () => {
+    const authorization = state.authorization!
     const code = createMemo(() => {
       const instructions = state.authorization?.instructions
       if (!instructions) return ""
@@ -502,7 +509,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
 
     onMount(() => {
       if (state.authorization?.url) openExternal(state.authorization.url)
-      complete()
+      complete(authorization)
     })
 
     return (

@@ -150,6 +150,7 @@ describe("connectProvider", () => {
     ])
     expect(calls.refresh).toBe(1)
     expect(calls.posts).toContainEqual({ type: "providerConnected", requestId: "req", providerID: "azure" })
+    expect(calls.dispose).toBe(0)
   })
 
   it("stores azure endpoint URL metadata from provider prompts", async () => {
@@ -308,6 +309,7 @@ describe("saveCustomProvider", () => {
 
     expect(calls.config).toHaveLength(1)
     expect(calls.config[0].config.disabled_providers).toEqual(["openai"])
+    expect(calls.dispose).toBe(1)
   })
 })
 
@@ -328,6 +330,7 @@ describe("disconnectProvider", () => {
     expect(calls.remove).toEqual([{ providerID: "myprovider" }])
     expect(calls.refresh).toBe(1)
     expect(calls.posts).toContainEqual({ type: "providerDisconnected", requestId: "req", providerID: "myprovider" })
+    expect(calls.dispose).toBe(1)
   })
 
   it("does not duplicate configured providers already disabled", async () => {
@@ -343,6 +346,7 @@ describe("disconnectProvider", () => {
 
     expect(calls.config).toHaveLength(0)
     expect(calls.refresh).toBe(1)
+    expect(calls.dispose).toBe(0)
   })
 
   it("deletes saved custom provider config when disconnecting", async () => {

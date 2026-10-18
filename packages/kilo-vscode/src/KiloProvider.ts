@@ -362,6 +362,7 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
   private unsubscribeNotificationDismiss: (() => void) | null = null
   private unsubscribeLanguageChange: (() => void) | null = null
   private unsubscribeProfileChange: (() => void) | null = null
+  private unsubscribeAuthChange: (() => void) | null = null
   private unsubscribeFavoritesChange: (() => void) | null = null
   private unsubscribeMigrationComplete: (() => void) | null = null // legacy-migration
   private unsubscribeClearPendingPrompts: (() => void) | null = null
@@ -967,10 +968,12 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
           this.postMessage({ type: "deviceAuthCancelled" })
           break
         case "logout":
+          this.loginAttempt++
           await handleLogout(this.authCtx)
           break
         case "setOrganization":
           if (typeof message.organizationId === "string" || message.organizationId === null) {
+            this.loginAttempt++
             await handleSetOrganization(this.authCtx, message.organizationId)
           }
           break
@@ -1359,6 +1362,7 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
     this.unsubscribeNotificationDismiss?.()
     this.unsubscribeLanguageChange?.()
     this.unsubscribeProfileChange?.()
+    this.unsubscribeAuthChange?.()
     this.unsubscribeFavoritesChange?.()
     this.unsubscribeClearPendingPrompts?.()
     this.unsubscribeDirectoryProvider?.()
@@ -1446,6 +1450,7 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
       this.unsubscribeProfileChange = this.connectionService.onProfileChanged((data) => {
         this.postMessage({ type: "profileData", data })
       })
+      this.unsubscribeAuthChange = this.connectionService.onAuthChanged(() => this.reloadAfterAuthChange())
 
       // Subscribe to favorites change broadcast from other KiloProvider instances
       this.unsubscribeFavoritesChange = this.connectionService.onFavoritesChanged((favorites) => {
@@ -1992,7 +1997,13 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
       (m) => this.postMessage(m),
       getErrorMessage,
       this.getWorkspaceDirectory(),
-      () => this.fetchAndSendProviders(),
+      async () => {
+        if (pid === "kilo") {
+          await this.refreshAuth()
+          return
+        }
+        await this.connectionService.notifyAuthChanged()
+      },
     )
     const set = (m: unknown) => {
       this.cachedConfigMessage = m
@@ -2003,12 +2014,13 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
     const key = typeof msg.apiKey === "string" ? msg.apiKey : undefined
     const keyChanged = msg.apiKeyChanged === true
     const code = typeof msg.code === "string" ? msg.code : undefined
+    const attempt = typeof msg.attemptID === "string" ? msg.attemptID : ""
     const config = msg.config && typeof msg.config === "object" ? (msg.config as Record<string, unknown>) : undefined
     const metadata =
       msg.metadata && typeof msg.metadata === "object" ? (msg.metadata as Record<string, unknown>) : undefined
     if (msg.type === "connectProvider" && key) return connectProviderAction(ctx, rid, pid, key, metadata)
     if (msg.type === "authorizeProviderOAuth") return authorizeOAuthAction(ctx, rid, pid, method)
-    if (msg.type === "completeProviderOAuth") return completeOAuthAction(ctx, rid, pid, method, code)
+    if (msg.type === "completeProviderOAuth") return completeOAuthAction(ctx, rid, pid, method, attempt, code)
     if (msg.type === "disconnectProvider") return disconnectProviderAction(ctx, rid, pid, this.cachedConfigMessage, set)
     if (msg.type === "saveCustomProvider" && config)
       return saveCustomProviderAction(ctx, rid, pid, config, key, keyChanged, this.cachedConfigMessage, set)
@@ -3141,32 +3153,27 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
       client: this.client,
       postMessage: (msg) => this.postMessage(msg),
       getWorkspaceDirectory: () => this.getWorkspaceDirectory(),
-      disposeGlobal: () => this.disposeGlobal(),
-      fetchAndSendProviders: () => this.fetchAndSendProviders(),
-      fetchAndSendAgents: () => this.fetchAndSendAgents(),
+      refreshAuth: (current) => this.refreshAuth(current),
     }
   }
 
-  private async disposeGlobal(): Promise<void> {
-    if (!this.client) return
+  private async refreshAuth(current: () => boolean = () => true): Promise<boolean> {
+    const client = this.client
+    if (!client || !current()) return false
+    const latest = this.connectionService.beginAuthRefresh()
+    const active = () => current() && latest() && client === this.client
 
-    await this.client.global
-      .dispose()
-      .catch((e: unknown) => console.warn("[Kilo New] KiloProvider: global.dispose() after org switch failed:", e))
-
-    // Org switch succeeded — refresh profile and providers independently (best-effort)
     try {
-      const profileResult = await this.client!.kilo.profile()
+      const profileResult = await client.kilo.profile()
+      if (!active()) return false
       // Broadcast to all webviews (sidebar, profile tab, agent manager, etc.)
       this.connectionService.notifyProfileChanged(profileResult.data ?? null)
     } catch (error) {
-      console.error("[Kilo New] KiloProvider: Failed to refresh profile after org switch:", error)
+      console.error("[Kilo New] KiloProvider: Failed to refresh profile after auth change:", error)
     }
-    try {
-      await this.fetchAndSendProviders()
-    } catch (error) {
-      console.error("[Kilo New] KiloProvider: Failed to refresh providers after org switch:", error)
-    }
+    if (!active()) return false
+    await this.connectionService.notifyAuthChanged()
+    return active()
   }
 
   /**
@@ -3786,7 +3793,9 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
         self.migrationCheckInFlight = val
       },
       refreshSessions: () => this.refreshSessions(),
-      disposeGlobal: () => this.disposeGlobal(),
+      refreshAuth: async () => {
+        await this.refreshAuth()
+      },
       broadcastComplete: () => this.connectionService.notifyMigrationComplete(),
     }
   }
@@ -3836,6 +3845,7 @@ export class KiloProvider implements vscode.WebviewViewProvider, TelemetryProper
     this.unsubscribeNotificationDismiss?.()
     this.unsubscribeLanguageChange?.()
     this.unsubscribeProfileChange?.()
+    this.unsubscribeAuthChange?.()
     this.unsubscribeFavoritesChange?.()
     this.unsubscribeMigrationComplete?.()
     this.unsubscribeClearPendingPrompts?.()

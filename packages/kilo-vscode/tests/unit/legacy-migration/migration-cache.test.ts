@@ -23,7 +23,7 @@ function makeContext(cache: MigrationCache): MigrationContext {
     refreshSessions: () => {},
     migrationCache: cache,
     migrationCheckInFlight: false,
-    disposeGlobal: async () => {},
+    refreshAuth: async () => {},
     broadcastComplete: () => {},
   } as unknown as MigrationContext
 }

@@ -3,6 +3,7 @@ import { Headers } from "effect/unstable/http"
 import { LLMError, TransportReason } from "../../schema"
 import * as HttpTransport from "./http"
 import type { Transport } from "./index"
+import { Dispatch } from "../dispatch" // kilocode_change
 
 export interface WebSocketRequest {
   readonly url: string
@@ -250,10 +251,20 @@ export const json = <Body, Message>(input: JsonInput<Body, Message>): JsonTransp
     const decoder = new TextDecoder()
     return Stream.unwrap(
       Effect.gen(function* () {
+        const dispatch = yield* Dispatch // kilocode_change
+        // kilocode_change start - bind connection setup separately from the physical send.
+        const headers = yield* dispatch({
+          transport: "websocket",
+          phase: "open",
+          url: prepared.url,
+          headers: prepared.headers,
+        }) // kilocode_change
+        // kilocode_change end
         const connection = yield* Effect.acquireRelease(
-          webSocket.open({ url: prepared.url, headers: prepared.headers }),
+          webSocket.open({ url: prepared.url, headers }), // kilocode_change
           (connection) => connection.close,
         )
+        yield* dispatch({ transport: "websocket", phase: "send", url: prepared.url, headers }) // kilocode_change
         yield* connection.sendText(prepared.message)
         return connection.messages.pipe(Stream.map((message) => messageText(message, decoder)))
       }),

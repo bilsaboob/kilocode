@@ -278,18 +278,21 @@ async function removeCustom(ctx: ActionContext, id: string, global: Config, merg
     tasks.push(saveProject(ctx, { provider: { [id]: null } }))
   }
   await Promise.all(tasks)
+  return tasks.length > 0
 }
 
 async function disableConfigured(ctx: ActionContext, id: string, config: Config) {
   const disabled = config.disabled_providers ?? []
-  if (disabled.includes(id)) return
+  if (disabled.includes(id)) return false
   await saveGlobal(ctx, { disabled_providers: [...disabled, id] })
+  return true
 }
 
 async function enableConfigured(ctx: ActionContext, id: string, config: Config) {
   const disabled = disabledWithout(config.disabled_providers, id)
-  if (disabled.length === (config.disabled_providers ?? []).length) return
+  if (disabled.length === (config.disabled_providers ?? []).length) return false
   await saveGlobal(ctx, { disabled_providers: disabled })
+  return true
 }
 
 export async function connectProvider(
@@ -305,7 +308,6 @@ export async function connectProvider(
     const meta = cleanMetadata(metadata)
     const auth = meta ? { type: "api" as const, key: apiKey, metadata: meta } : { type: "api" as const, key: apiKey }
     await ctx.client.auth.set({ providerID: id, auth }, { throwOnError: true })
-    await ctx.disposeGlobal(`provider connect (${id})`)
     await ctx.fetchAndSendProviders()
     ctx.postMessage({ type: "providerConnected", requestId, providerID: id })
   } catch (error) {
@@ -347,16 +349,26 @@ export async function completeProviderOAuth(
   requestId: string,
   providerID: string,
   method: number,
+  attemptID: string,
   code?: string,
 ) {
   const id = validateID(ctx, requestId, providerID, "connect")
   if (!id) return
+  if (!attemptID) {
+    postError(
+      ctx,
+      requestId,
+      providerID,
+      "connect",
+      "Missing authorization attempt. Start provider authorization again.",
+    )
+    return
+  }
   try {
     await ctx.client.provider.oauth.callback(
-      { providerID: id, method, code, directory: ctx.workspaceDir },
+      { providerID: id, method, attemptID, code, directory: ctx.workspaceDir },
       { throwOnError: true },
     )
-    await ctx.disposeGlobal(`provider oauth (${id})`)
     await ctx.fetchAndSendProviders()
     ctx.postMessage({ type: "providerConnected", requestId, providerID: id })
   } catch (error) {
@@ -397,24 +409,20 @@ export async function disconnectProvider(
       ctx.postMessage({ type: "profileData", data: null })
     }
 
-    if (custom) {
-      await removeCustom(ctx, id, config.global, config.merged)
-    }
-
     // Config-sourced built-in providers stay "connected" after auth.remove
     // because the server rebuilds state from config. Add to disabled_providers
     // so the server excludes them while preserving config for re-enable.
-    if (configured && !oauth && !custom) {
-      await disableConfigured(ctx, id, config.global)
-    }
-
-    if (oauth) {
-      await enableConfigured(ctx, id, config.global)
-    }
+    const changed = custom
+      ? await removeCustom(ctx, id, config.global, config.merged)
+      : configured && !oauth
+        ? await disableConfigured(ctx, id, config.global)
+        : oauth
+          ? await enableConfigured(ctx, id, config.global)
+          : false
 
     if (configured) await refreshConfig(ctx, setCachedConfig)
 
-    await ctx.disposeGlobal(`provider disconnect (${id})`)
+    if (changed) await ctx.disposeGlobal(`provider config disconnect (${id})`)
     await ctx.fetchAndSendProviders()
     ctx.postMessage({ type: "providerDisconnected", requestId, providerID: id })
   } catch (error) {
