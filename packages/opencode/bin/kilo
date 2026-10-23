@@ -26,8 +26,9 @@ function run(target, fallback) {
         stdio: "inherit",
       })
     } catch (error) {
-      if (fallback) {
-        run(fallback)
+      const next = fallback?.()
+      if (next) {
+        run(next)
         return
       }
       console.error(error.message)
@@ -48,8 +49,9 @@ function run(target, fallback) {
   child.on("error", (error) => {
     clear() // kilocode_change
     // kilocode_change start - fall through to findBinary() if cached binary fails
-    if (fallback) {
-      run(fallback)
+    const next = fallback?.()
+    if (next) {
+      run(next)
       return
     }
     // kilocode_change end
@@ -134,32 +136,14 @@ function supportsAvx2() {
   }
 
   if (platform === "windows") {
-    const cmd =
-      '(Add-Type -MemberDefinition "[DllImport(""kernel32.dll"")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);" -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)'
-
-    for (const exe of ["powershell.exe", "pwsh.exe", "pwsh", "powershell"]) {
-      try {
-        const result = childProcess.spawnSync(exe, ["-NoProfile", "-NonInteractive", "-Command", cmd], {
-          encoding: "utf8",
-          timeout: 3000,
-          windowsHide: true,
-        })
-        if (result.status !== 0) continue
-        const out = (result.stdout || "").trim().toLowerCase()
-        if (out === "true" || out === "1") return true
-        if (out === "false" || out === "0") return false
-      } catch {
-        continue
-      }
-    }
-
-    return false
+    return require(path.join(scriptDir, "kilocode", "windows-avx2.cjs")).supportsAvx2(arch) // kilocode_change
   }
 
   return false
 }
 
-const names = (() => {
+let names // kilocode_change
+function candidates() /* kilocode_change */ {
   const avx2 = supportsAvx2()
   const baseline = arch === "x64" && !avx2
 
@@ -202,9 +186,10 @@ const names = (() => {
     return [base, `${base}-baseline`]
   }
   return [base]
-})()
+} // kilocode_change
 
 function findBinary(startDir) {
+  names ??= candidates() // kilocode_change
   let current = startDir
   for (;;) {
     const modules = path.join(current, "node_modules")
@@ -222,14 +207,25 @@ function findBinary(startDir) {
   }
 }
 
+// kilocode_change start
 const resolved = envPath || (fs.existsSync(cached) ? cached : findBinary(scriptDir))
 if (!resolved) {
-  console.error(
-    "It seems that your package manager failed to install the right version of the Kilo CLI for your platform. You can try manually installing " +
-      names.map((n) => `\"${n}\"`).join(" or ") +
-      " package",
-  )
+  if (platform === "windows" && arch === "arm64") {
+    console.error(
+      "The Kilo CLI native binary for Windows ARM64 could not be found.\n" +
+      "If the native package is unavailable, you can try downloading the pre-built x64 binary from the GitHub Releases page to run under Windows 11 emulation.\n" +
+      "Alternatively, use WSL2 with the Linux ARM64 build."
+    )
+  } else {
+    console.error(
+      "It seems that your package manager failed to install the right version of the Kilo CLI for your platform.\n" +
+      "You can try manually installing the " +
+        names.map((n) => `"${n}"`).join(" or ") +
+        " package, or download a pre-built binary from the GitHub Releases page."
+    )
+  }
   process.exit(1)
 }
+// kilocode_change end
 
-run(resolved, resolved === cached ? findBinary(scriptDir) : undefined) // kilocode_change - preserve cached binary fallback
+run(resolved, resolved === cached ? () => findBinary(scriptDir) : undefined) // kilocode_change - preserve cached binary fallback

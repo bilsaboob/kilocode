@@ -6,12 +6,18 @@ import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.rpc.dto.SessionChangeDto
+import ai.kilocode.rpc.dto.SessionChangeKindDto
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -22,9 +28,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class KiloBackendSessionManagerTest {
+
+    companion object {
+        private const val WAIT_MS = 10_000L
+    }
 
     private val mock = MockCliServer()
     private val log = TestLog()
@@ -50,6 +61,27 @@ class KiloBackendSessionManagerTest {
         }
     }
 
+    /**
+     * Runs [push] once a collector is attached to the change stream and returns the first change.
+     * The stream has no replay, so pushing before subscription would drop the event.
+     */
+    private suspend fun awaitChange(app: KiloBackendAppService, push: () -> Unit): SessionChangeDto =
+        withTimeout(10_000) {
+            val ready = CompletableDeferred<Unit>()
+            val change = scope.async {
+                app.sessions.changes.onSubscription { ready.complete(Unit) }.first()
+            }
+            ready.await()
+            push()
+            change.await()
+        }
+
+    /** One SSE `data:` frame, which must stay on a single line or the frame is truncated. */
+    private fun lifecycle(type: String, id: String, dir: String): String =
+        """{"type":"$type","properties":{"sessionID":"$id","info":""" +
+            """{"id":"$id","projectID":"prj","directory":"$dir","title":"T","version":"1",""" +
+            """"time":{"created":1,"updated":2}}}}"""
+
     // ------ Lifecycle ------
 
     @Test
@@ -67,7 +99,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `session manager throws when not started`() = runBlocking {
+    fun `session manager throws when not started`() = runBlocking<Unit> {
         val app = setup()
         // Don't connect — manager is not started
 
@@ -77,7 +109,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `session manager stops on app disconnect`() = runBlocking {
+    fun `session manager stops on app disconnect`() = runBlocking<Unit> {
         val app = setup()
         ready(app)
 
@@ -97,7 +129,10 @@ class KiloBackendSessionManagerTest {
     @Test
     fun `list returns sessions from server`() = runBlocking {
         mock.sessions = """[
-            {"id":"ses_1","slug":"s1","projectID":"prj","directory":"/test","title":"Session 1","version":"1","time":{"created":1000,"updated":2000}},
+            {
+                "id":"ses_1","slug":"s1","projectID":"prj","directory":"/test","title":"Session 1","version":"1",
+                "time":{"created":1000,"updated":2000},"share":{"url":"https://app.kilo.ai/s/tok"}
+            },
             {"id":"ses_2","slug":"s2","projectID":"prj","directory":"/test","title":"Session 2","version":"1","time":{"created":3000,"updated":4000}}
         ]"""
         val app = setup()
@@ -109,6 +144,50 @@ class KiloBackendSessionManagerTest {
         assertEquals("Session 1", result.sessions[0].title)
         assertEquals(1000.0, result.sessions[0].time.created)
         assertEquals("ses_2", result.sessions[1].id)
+        assertEquals("https://app.kilo.ai/s/tok", result.sessions.first().share?.url)
+        assertNull(result.sessions.last().share)
+    }
+
+    @Test
+    fun `get preserves the share link when reopening a session`() = runBlocking {
+        mock.sessions = """[
+            {
+                "id":"ses_unshared","slug":"unshared","projectID":"prj","directory":"/test",
+                "title":"Unshared","version":"1","time":{"created":1000,"updated":2000}
+            },
+            {
+                "id":"ses_shared","slug":"shared","projectID":"prj","directory":"/test",
+                "title":"Shared","version":"1","time":{"created":1000,"updated":2000},
+                "share":{"url":"https://app.kilo.ai/s/tok"}
+            }
+        ]"""
+        val app = setup()
+        ready(app)
+
+        val session = app.sessions.get("ses_shared", "/test")
+
+        assertEquals("ses_shared", session.id)
+        assertEquals("https://app.kilo.ai/s/tok", session.share?.url)
+        assertNull(app.sessions.get("ses_unshared", "/test").share)
+    }
+
+    @Test
+    fun `session loaders treat null and blank share links as unshared`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        for (share in listOf("null", """{"url":""}""", """{"url":" "}""")) {
+            mock.sessions = """[{
+                "id":"ses_1","slug":"s1","projectID":"prj","directory":"/test","title":"T","version":"1",
+                "time":{"created":1000,"updated":2000},"project":{"id":"prj","worktree":"/test","name":"Repo"},
+                "share":$share
+            }]"""
+            mock.recentSessions = mock.sessions
+
+            assertNull(app.sessions.list("/test").sessions.single().share, "list: $share")
+            assertNull(app.sessions.get("ses_1", "/test").share, "get: $share")
+            assertNull(app.sessions.recent("/test", 5).sessions.single().share, "recent: $share")
+        }
     }
 
     @Test
@@ -129,7 +208,11 @@ class KiloBackendSessionManagerTest {
     @Test
     fun `recent returns global sessions from experimental endpoint`() = runBlocking {
         mock.recentSessions = """[
-            {"id":"ses_1","slug":"s1","projectID":"prj","directory":"/repo","title":"Session 1","version":"1","time":{"created":1000,"updated":5000},"project":{"id":"prj","worktree":"/repo","name":"Repo"},"summary":{"additions":10,"deletions":2,"files":3}},
+            {
+                "id":"ses_1","slug":"s1","projectID":"prj","directory":"/repo","title":"Session 1","version":"1",
+                "time":{"created":1000,"updated":5000},"project":{"id":"prj","worktree":"/repo","name":"Repo"},
+                "summary":{"additions":10,"deletions":2,"files":3},"share":{"url":"https://app.kilo.ai/s/tok"}
+            },
             {"id":"ses_2","slug":"s2","projectID":"prj","directory":"/repo-wt","title":"Session 2","version":"1","time":{"created":2000,"updated":4000},"project":{"id":"prj","worktree":"/repo","name":"Repo"},"parentID":"ses_parent"}
         ]"""
         val app = setup()
@@ -143,6 +226,8 @@ class KiloBackendSessionManagerTest {
         assertEquals("/repo", result.sessions[0].directory)
         assertEquals(10, result.sessions[0].summary?.additions)
         assertEquals("ses_parent", result.sessions[1].parentID)
+        assertEquals("https://app.kilo.ai/s/tok", result.sessions.first().share?.url)
+        assertNull(result.sessions.last().share)
     }
 
     @Test
@@ -159,6 +244,19 @@ class KiloBackendSessionManagerTest {
         assertTrue(path.contains("roots=true"), path)
         assertTrue(path.contains("limit=5.0"), path)
         assertTrue(path.contains("archived=false"), path)
+    }
+
+    @Test
+    fun `recent narrows the worktree family to the current worktree`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        app.sessions.recent("/repo/.kilo/worktrees/feature", 5)
+
+        val path = mock.lastExperimentalSessionPath ?: error("missing experimental session request")
+        // current=true is what keeps a worktree chat from listing the main checkout's sessions.
+        assertTrue(path.contains("current=true"), path)
+        assertFalse(path.contains("current=false"), path)
     }
 
     @Test
@@ -181,7 +279,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `recent throws when not started`() = runBlocking {
+    fun `recent throws when not started`() = runBlocking<Unit> {
         val app = setup()
 
         assertFailsWith<IllegalStateException> {
@@ -225,7 +323,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `cloudSessions throws when not started`() = runBlocking {
+    fun `cloudSessions throws when not started`() = runBlocking<Unit> {
         val app = setup()
 
         assertFailsWith<IllegalStateException> {
@@ -309,6 +407,154 @@ class KiloBackendSessionManagerTest {
         assertEquals("/test", session.directory)
     }
 
+    // ------ Session fork ------
+
+    @Test
+    fun `fork posts to fork endpoint with empty body and directory override`() = runBlocking {
+        mock.sessionFork = """{
+            "id": "ses_forked",
+            "slug": "forked",
+            "projectID": "prj_test",
+            "directory": "/worktree/path",
+            "title": "Forked",
+            "version": "1.0.0",
+            "time": {"created": 1000, "updated": 1000}
+        }"""
+        val app = setup()
+        ready(app)
+
+        val session = app.sessions.fork("ses_source", "/worktree/path")
+
+        assertEquals("ses_forked", session.id)
+        assertEquals("/worktree/path", session.directory)
+        val path = mock.lastForkPath ?: error("missing fork request")
+        assertTrue(path.startsWith("/session/ses_source/fork?"), "Expected fork path, got $path")
+        assertTrue(URLDecoder.decode(path, "UTF-8").contains("directory=/worktree/path"), path)
+        // The CLI accepts a bodyless fork; a non-empty body would be rejected.
+        assertEquals("", mock.lastForkBody)
+    }
+
+    @Test
+    fun `fork sends the message id as a json body for a per-message fork`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        app.sessions.fork("ses_source", "/worktree/path", "msg_7")
+
+        assertEquals("""{"messageID":"msg_7"}""", mock.lastForkBody)
+    }
+
+    @Test
+    fun `fork handoff records a hidden synthetic note for the forked session`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        ForkHandoff.record(app.chat, "ses_forked", "/worktree/path")
+
+        val path = mock.lastPromptPath ?: error("missing prompt request")
+        assertTrue(path.startsWith("/session/ses_forked/prompt_async?"), "Expected prompt path, got $path")
+        assertTrue(URLDecoder.decode(path, "UTF-8").contains("directory=/worktree/path"), path)
+        val body = mock.lastPromptBody ?: error("missing prompt body")
+        // noReply keeps the note from starting a turn; synthetic keeps it out of the transcript.
+        assertTrue(body.contains(""""noReply":true"""), body)
+        assertTrue(body.contains(""""synthetic":true"""), body)
+        assertTrue(body.contains("<system-reminder>"), body)
+        assertTrue(body.contains("This session was forked from an existing session"), body)
+        // The fork may live in another directory than the context it copied, so the note names it.
+        assertTrue(body.contains("Use this as the current working directory: /worktree/path"), body)
+    }
+
+    @Test
+    fun `fork handoff failure does not propagate`() = runBlocking<Unit> {
+        mock.promptStatus = 500
+        val app = setup()
+        ready(app)
+
+        // The forked session is already usable without the note, so a failed handoff must not surface.
+        ForkHandoff.record(app.chat, "ses_forked", "/worktree/path")
+
+        assertNotNull(mock.lastPromptBody)
+    }
+
+    @Test
+    fun `fork surfaces server failure`() = runBlocking {
+        mock.sessionForkStatus = 500
+        mock.sessionFork = """{"error":"boom"}"""
+        val app = setup()
+        ready(app)
+
+        val err = assertFailsWith<RuntimeException> {
+            app.sessions.fork("ses_source", "/worktree")
+        }
+
+        assertTrue(err.message.orEmpty().contains("HTTP 500"))
+        assertTrue(err.message.orEmpty().contains("boom"))
+    }
+
+    @Test
+    fun `fork throws before start`() = runBlocking<Unit> {
+        val app = setup()
+
+        assertFailsWith<IllegalStateException> {
+            app.sessions.fork("ses_source", "/worktree")
+        }
+    }
+
+    // ------ Session share ------
+
+    @Test
+    fun `share posts to share endpoint and returns the share url`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        val session = app.sessions.share("ses_1", "/my dir/project")
+
+        assertEquals("https://app.kilo.ai/s/tok", session.share?.url)
+        assertEquals("POST", mock.lastShareMethod)
+        val path = mock.lastSharePath ?: error("missing share request")
+        assertTrue(path.startsWith("/session/ses_1/share?"), "Expected share path, got $path")
+        assertTrue(path.contains("directory=%2Fmy%20dir%2Fproject"), "Expected encoded directory in $path")
+    }
+
+    @Test
+    fun `unshare deletes the share and clears the url`() = runBlocking {
+        val app = setup()
+        ready(app)
+
+        val session = app.sessions.unshare("ses_1", "/test")
+
+        assertNull(session.share)
+        assertEquals("DELETE", mock.lastShareMethod)
+        val path = mock.lastSharePath ?: error("missing unshare request")
+        assertTrue(path.startsWith("/session/ses_1/share?"), "Expected share path, got $path")
+    }
+
+    @Test
+    fun `share surfaces server failure`() = runBlocking {
+        // The CLI collapses "not signed in" and "sharing disabled" into a bare 500; all the UI can do
+        // is report that it failed, so the manager must at least propagate the status.
+        mock.sessionShareStatus = 500
+        mock.sessionShare = """{"error":"boom"}"""
+        val app = setup()
+        ready(app)
+
+        val err = assertFailsWith<RuntimeException> {
+            app.sessions.share("ses_1", "/test")
+        }
+
+        assertTrue(err.message.orEmpty().contains("HTTP 500"))
+        assertTrue(err.message.orEmpty().contains("boom"))
+    }
+
+    @Test
+    fun `share throws before start`() = runBlocking<Unit> {
+        val app = setup()
+
+        assertFailsWith<IllegalStateException> {
+            app.sessions.share("ses_1", "/test")
+        }
+    }
+
     // ------ Session delete ------
 
     @Test
@@ -339,6 +585,36 @@ class KiloBackendSessionManagerTest {
     }
 
     // ------ SSE status tracking ------
+
+    @Test
+    fun `start subscribes before returning and preserves immediate session events`() = runBlocking {
+        val app = setup()
+        ready(app)
+        val events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 2)
+        // This scope queues dispatched coroutines until the test suspends.
+        val manager = KiloBackendSessionManager(this, log)
+        try {
+            manager.start(app.api!!, app.http!!, app.port, events)
+            assertEquals(1, events.subscriptionCount.value, "start must subscribe before returning")
+
+            assertTrue(events.tryEmit(
+                SseEvent("session.created", lifecycle("session.created", "ses_immediate", "/repo/wt")),
+            ))
+            assertTrue(events.tryEmit(
+                SseEvent(
+                    "session.status",
+                    """{"type":"session.status","properties":{"sessionID":"ses_immediate","status":{"type":"busy"}}}""",
+                ),
+            ))
+
+            withTimeout(WAIT_MS) {
+                manager.statuses.first { it["ses_immediate"]?.type == "busy" }
+            }
+            assertEquals("/repo/wt", manager.sessionDirectory("ses_immediate"))
+        } finally {
+            manager.stop()
+        }
+    }
 
     @Test
     fun `SSE session status events update status map`() = runBlocking {
@@ -385,6 +661,61 @@ class KiloBackendSessionManagerTest {
         }
 
         assertEquals("idle", app.sessions.statuses.value["ses_x"]?.type)
+    }
+
+    // ------ SSE session lifecycle tracking ------
+
+    @Test
+    fun `SSE session created is republished on changes`() = runBlocking {
+        val app = setup()
+        ready(app)
+        mock.awaitSseConnection()
+
+        val result = awaitChange(app) {
+            mock.pushEvent("session.created", lifecycle("session.created", "ses_live", "/repo/wt"))
+        }
+
+        assertEquals("ses_live", result.id)
+        assertEquals("/repo/wt", result.directory)
+        assertEquals(SessionChangeKindDto.CREATED, result.kind)
+    }
+
+    @Test
+    fun `SSE session lifecycle records and clears the directory for activity lookups`() = runBlocking {
+        val app = setup()
+        ready(app)
+        mock.awaitSseConnection()
+
+        // The change is published only after the directory is recorded, so awaiting the event is
+        // enough — no polling. A session this frame never listed must still resolve a directory,
+        // otherwise the Agent Manager worktree row cannot be badged.
+        awaitChange(app) {
+            mock.pushEvent("session.created", lifecycle("session.created", "ses_elsewhere", "/repo/wt"))
+        }
+        assertEquals("/repo/wt", app.sessions.sessionDirectory("ses_elsewhere"))
+
+        awaitChange(app) {
+            mock.pushEvent("session.deleted", lifecycle("session.deleted", "ses_elsewhere", "/repo/wt"))
+        }
+        assertNull(app.sessions.sessionDirectory("ses_elsewhere"))
+    }
+
+    @Test
+    fun `activity badges a session this frame only learned about from events`() = runBlocking {
+        val app = setup()
+        ready(app)
+        assertTrue(mock.awaitSseConnection(), "SSE client did not connect")
+
+        mock.pushEvent("session.created", lifecycle("session.created", "ses_other_frame", "/repo/wt"))
+        mock.pushEvent(
+            "session.status",
+            """{"type":"session.status","properties":{"sessionID":"ses_other_frame","status":{"type":"busy"}}}""",
+        )
+
+        val snap = withTimeout(WAIT_MS) {
+            app.activity.activity.first { it.containsKey("ses_other_frame") }
+        }
+        assertEquals("/repo/wt", snap["ses_other_frame"]?.directory)
     }
 
     @Test
@@ -457,7 +788,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `start after stop re-activates`() = runBlocking {
+    fun `start after stop re-activates`() = runBlocking<Unit> {
         val app = setup()
         ready(app)
 
@@ -595,7 +926,7 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
-    fun `rename throws before start`() = runBlocking {
+    fun `rename throws before start`() = runBlocking<Unit> {
         val app = setup()
         // Don't connect — manager is not started
 
@@ -616,7 +947,8 @@ class KiloBackendSessionManagerTest {
             "title": "With Summary",
             "version": "1",
             "time": {"created": 1, "updated": 1},
-            "summary": {"additions": 42, "deletions": 7, "files": 3}
+            "summary": {"additions": 42, "deletions": 7, "files": 3},
+            "revert": {"messageID":"msg_1","partID":"prt_1","snapshot":"snap_1","diff":"patch","workspace":"not-a-git-repo"}
         }]"""
         val app = setup()
         ready(app)
@@ -627,6 +959,9 @@ class KiloBackendSessionManagerTest {
         assertEquals(42, session.summary!!.additions)
         assertEquals(7, session.summary!!.deletions)
         assertEquals(3, session.summary!!.files)
+        assertEquals("msg_1", session.revert?.messageID)
+        assertEquals("prt_1", session.revert?.partID)
+        assertEquals("not-a-git-repo", session.revert?.workspace)
     }
 
     @Test

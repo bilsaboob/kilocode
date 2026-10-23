@@ -2,13 +2,15 @@ import * as vscode from "vscode"
 import { buildWebviewHtml, getWebviewFontSize } from "./utils"
 import { watchFontSizeConfig } from "./kilo-provider/font-size"
 import { appendOutput, getWorkspaceRoot } from "./review-utils"
-import { getDiffMarkdownRender, setDiffMarkdownRender } from "./review-settings"
+import { getDiffMarkdownRender, getUserDiffStyle, setDiffMarkdownRender, setUserDiffStyle } from "./review-settings"
 
 export interface DiffVirtualFile {
   file: string
   patch?: string
   additions: number
   deletions: number
+  status?: "added" | "deleted" | "modified"
+  files?: Omit<DiffVirtualFile, "files" | "initialDiffStyle">[]
   initialDiffStyle: "unified" | "split"
 }
 
@@ -32,9 +34,12 @@ export class DiffVirtualProvider implements vscode.Disposable {
   }
 
   public open(diff: DiffVirtualFile): void {
+    const style = getUserDiffStyle()
+    if (style) diff.initialDiffStyle = style
     this.pending = diff
+    const count = diff.files?.length ?? 1
     const filename = diff.file.split("/").pop() ?? diff.file
-    const title = `Changes: ${filename}`
+    const title = count > 1 ? `Changes: ${count} files` : `Changes: ${filename}`
 
     if (this.panel) {
       this.panel.title = title
@@ -91,6 +96,11 @@ export class DiffVirtualProvider implements vscode.Disposable {
 
     if (type === "diffVirtual.setMarkdownRender" && typeof msg.render === "boolean") {
       void setDiffMarkdownRender(msg.render)
+      return
+    }
+
+    if (type === "diffVirtual.setDiffStyle" && (msg.style === "unified" || msg.style === "split")) {
+      void setUserDiffStyle(msg.style)
     }
   }
 

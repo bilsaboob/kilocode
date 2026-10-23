@@ -6,11 +6,11 @@
 
 import { Component, createEffect, createSignal, onCleanup } from "solid-js"
 import { deferredHighlight } from "@kilocode/kilo-ui/context/marked"
-import { Icon } from "@kilocode/kilo-ui/icon"
+import { IconButton } from "@kilocode/kilo-ui/icon-button"
 import { Tooltip } from "@kilocode/kilo-ui/tooltip"
 import { useLanguage } from "../../context/language"
 
-export const PermissionCommand: Component<{ command: string }> = (props) => {
+export const PermissionCommand: Component<{ command: string; plain?: boolean }> = (props) => {
   const language = useLanguage()
   const [copied, setCopied] = createSignal(false)
   const state = { signal: { aborted: false } }
@@ -23,10 +23,11 @@ export const PermissionCommand: Component<{ command: string }> = (props) => {
 
     const pre = document.createElement("pre")
     const code = document.createElement("code")
-    code.dataset.lang = "shellscript"
+    if (!props.plain) code.dataset.lang = "shellscript"
     code.textContent = command
     pre.append(code)
     ref.replaceChildren(pre)
+    if (props.plain) return
 
     const signal = { aborted: false }
     state.signal = signal
@@ -47,14 +48,15 @@ export const PermissionCommand: Component<{ command: string }> = (props) => {
     <div data-slot="permission-command">
       <div data-slot="permission-command-code" ref={ref} />
       <Tooltip value={language.t("ui.permission.copyCommand")} placement="top">
-        <button
+        <IconButton
+          icon={copied() ? "check-small" : "copy"}
+          variant="ghost"
+          size="small"
           data-slot="permission-command-copy"
           data-copied={copied() ? "" : undefined}
           onClick={copy}
           aria-label={language.t("ui.permission.copyCommand")}
-        >
-          <Icon name={copied() ? "check-small" : "copy"} size="small" />
-        </button>
+        />
       </Tooltip>
     </div>
   )

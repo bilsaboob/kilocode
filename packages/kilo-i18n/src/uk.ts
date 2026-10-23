@@ -1,12 +1,5 @@
 export const dict = {
   // Kilo Gateway provider translations
-  "provider.connect.kiloGateway.line1":
-    "Kilo Gateway надає доступ до добірки надійних оптимізованих моделей для агентів кодування.",
-  "provider.connect.kiloGateway.line2":
-    "За допомогою одного API-ключа ви отримаєте доступ до таких моделей, як Claude, GPT, Gemini, GLM та інших.",
-  "provider.connect.kiloGateway.visit.prefix": "Відвідайте ",
-  "provider.connect.kiloGateway.visit.link": "kilo.ai",
-  "provider.connect.kiloGateway.visit.suffix": " щоб отримати свій API-ключ.",
   "provider.connect.kiloGateway.byok.prefix": "Для отримання додаткової статистики використання використовуйте ",
   "provider.connect.kiloGateway.byok.link": "BYOK через Kilo's Gateway",
   "provider.connect.kiloGateway.byok.suffix": ".",
@@ -24,14 +17,9 @@ export const dict = {
   "settings.providers.note.vercel": "Єдиний доступ до моделей ШІ з розумною маршрутизацією",
 
   // Reasoning block label
-  "ui.permission.run": "Виконати",
   "ui.reasoning.label": "Міркування",
 
   // Marketplace
-  "marketplace.tab.skills": "Навички",
-  "marketplace.tab.mcpServers": "MCP-сервери",
-  "marketplace.category.all": "Усі",
-  "marketplace.placeholder": "Буде реалізовано",
   "marketplace.card.installed": "Встановлено",
   "marketplace.card.install": "Встановити",
   "marketplace.card.remove": "Видалити",
@@ -42,6 +30,30 @@ export const dict = {
   "marketplace.install.scope": "Область",
   "marketplace.install.scope.project": "Проєкт",
   "marketplace.install.scope.global": "Глобально",
+  "marketplace.install.scope.project.description":
+    "Лише цей проєкт. Встановлені файли можна додати до системи контролю версій і надати команді.",
+  "marketplace.install.scope.global.description":
+    "Усі проєкти на цьому комп'ютері. Зберігається у вашій користувацькій конфігурації.",
+  "marketplace.install.destination": "Місце встановлення",
+  "marketplace.install.includedSkills": "Включені навички",
+  "marketplace.install.about.mcp":
+    "MCP-сервер надає Kilo додаткові інструменти для роботи із зовнішніми сервісами або локальними програмами.",
+  "marketplace.install.about.agent": "Агент додає багаторазову роль із власними інструкціями та дозволами.",
+  "marketplace.install.about.skill":
+    "Навичка додає інструкції та ресурси для певних завдань, які Kilo може завантажити за потреби.",
+  "marketplace.install.mcp.warning":
+    "MCP-сервери можуть виконувати локальні команди або підключатися до зовнішніх сервісів. Kilo запитає дозвіл перед використанням їхніх інструментів, якщо ваші дозволи не дають змоги робити це автоматично.",
+  "marketplace.install.project.warning":
+    "Файли проєкту можуть бути додані до системи контролю версій. Не зберігайте тут секрети, якщо конфігурація не посилається на змінну середовища.",
+  "marketplace.install.learnMore": "Дізнайтеся, як працює встановлення з Marketplace",
+  "marketplace.install.learnMcp": "Докладніше про MCP",
+  "marketplace.install.about.plugin":
+    "Плагін додає до Kilo користувацькі інструменти та інтеграції. Плагіни виконуються з повними правами доступу.",
+  "marketplace.install.plugin.warning":
+    "Плагіни виконують код із повними правами доступу. Вони можуть читати й змінювати ваші файли, виконувати команди та отримувати доступ до ваших облікових даних і мережі. Встановлюйте лише плагіни, яким довіряєте.",
+  "marketplace.intro":
+    "Встановлюйте багаторазових агентів, навички, інструменти MCP та плагіни для одного або всіх проєктів.",
+  "marketplace.intro.learnMore": "Про Marketplace",
   "marketplace.install.prerequisites": "Передумови",
   "marketplace.install.installing": "Встановлення...",
   "marketplace.install.cancel": "Скасувати",
@@ -49,27 +61,36 @@ export const dict = {
   "marketplace.install.failed": "Встановлення не вдалося",
   "marketplace.install.done": "Готово",
   "marketplace.install.close": "Закрити",
+  "marketplace.install.mcp.signIn.message": "{{name}} встановлено, але потрібно увійти, перш ніж можна буде використовувати його інструменти.",
+  "marketplace.install.mcp.signIn.button": "Увійти",
+  "marketplace.install.mcp.signIn.waiting": "Очікування входу через браузер…",
+  "marketplace.install.mcp.signIn.cancel": "Скасувати",
+  "marketplace.install.mcp.signIn.skip": "Пізніше",
+  "marketplace.install.mcp.signIn.success": "Вхід у {{name}} виконано.",
+  "marketplace.install.mcp.signIn.failed": "Не вдалося увійти в {{name}}.",
   "marketplace.remove.title": "Видалити {{name}}?",
   "marketplace.remove.confirm":
     "Ви впевнені, що хочете видалити цей {{type}}? Це видалить його з вашої конфігурації {{scope}}.",
   "marketplace.remove.cancel": "Скасувати",
+  "marketplace.remove.mcp.skills":
+    "Це також видалить супутні навички, що належать цьому встановленню. Незалежно встановлені навички буде збережено.",
   "marketplace.remove.confirm.button": "Видалити",
-  "marketplace.tab.mcp": "MCP",
-  "marketplace.tab.agents": "Агенти",
   "marketplace.search": "Пошук...",
   "marketplace.filter.all": "Усі елементи",
   "marketplace.filter.notInstalled": "Не встановлено",
+  "marketplace.filter.relevant": "Відповідні моєму робочому простору",
   "marketplace.empty": "Елементів не знайдено",
+  "marketplace.empty.relevant": "Для цього робочого простору не знайдено відповідних елементів маркетплейсу.",
   "marketplace.badge.mcpServer": "MCP-сервер",
-  "marketplace.badge.mode": "Режим",
+  "marketplace.badge.skills": "Містить навички",
   "marketplace.card.by": "від {{author}}",
   "marketplace.install.method": "Метод встановлення",
   "marketplace.install.parameters": "Параметри",
   "marketplace.install.optional": "(необов'язково)",
-  "marketplace.install.required": "{{name}} є обов'язковим",
   "marketplace.scope.project": "проєкт",
   "marketplace.scope.global": "глобально",
   "marketplace.remove.type.mcp": "MCP-сервер",
+  "marketplace.remove.type.plugin": "плагін",
   "marketplace.remove.type.skill": "навичка",
   "marketplace.remove.type.agent": "агент",
   "marketplace.remove.failed": "Не вдалося видалити {{name}}",
@@ -80,7 +101,7 @@ export const dict = {
   "marketplace.warning.busyMany": "Виконується кілька сесій, їх буде перервано",
   "marketplace.warning.installAnyway": "Встановити все одно",
   "marketplace.warning.cancel": "Скасувати",
-  "marketplace.contribute.prompt": "Бракує навички, агента або MCP-сервера?",
+  "marketplace.contribute.prompt": "Бракує навички, агента, MCP-сервера або плагіна?",
   "marketplace.contribute.cta": "Зробити внесок на GitHub",
   "marketplace.migration.notice":
     "Режими замінено агентами. Якщо ви раніше встановлювали режими з маркетплейсу, видаліть їх та перевстановіть як агенти для переходу на новий формат.",
@@ -92,6 +113,8 @@ export const dict = {
   "plan.followup.answer.newSession.description": "Реалізувати в новій сесії з чистим контекстом",
   "plan.followup.answer.continue": "Продовжити тут",
   "plan.followup.answer.continue.description": "Реалізувати план у цій сесії",
+  "plan.followup.answer.keepRefining": "Продовжити уточнення",
+  "plan.followup.answer.keepRefining.description": "Продовжити планування без реалізації наразі",
 
   // Slow-repo snapshot prompt
   "snapshot.slowRepo.header": "Знімок виконується повільно",
@@ -106,8 +129,6 @@ export const dict = {
 
   // Edit-tool header and shell-tool section labels
   "ui.messagePart.openInDiffViewer": "Відкрити в переглядачі відмінностей",
-  "ui.messagePart.shell.command": "Команда",
-  "ui.messagePart.shell.output": "Вивід",
   "ui.messagePart.openInEditor": "Відкрити в редакторі",
 
   // Message feedback (thumbs up/down per assistant response)

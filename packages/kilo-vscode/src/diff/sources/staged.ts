@@ -1,6 +1,5 @@
 import * as vscode from "vscode"
 import { GitOps } from "../../agent-manager/GitOps"
-import { generatedLike } from "../../agent-manager/local-diff"
 import { appendOutput, getWorkspaceRoot } from "../../review-utils"
 import { imageMime, loadImage } from "../shared/image"
 import { resolveInside } from "../shared/path"
@@ -9,6 +8,8 @@ import type { DiffSource, DiffSourceDescriptor, DiffSourceFetch } from "./types"
 import {
   blobOid,
   blobSize,
+  applyGeneratedAttributes,
+  createFileEntry,
   INDEX_REF,
   MAX_DETAIL_BYTES,
   parseNameStatus,
@@ -16,6 +17,7 @@ import {
   parseRawOids,
   showBlob,
   showBlobBytes,
+  stamp,
   summarize,
   type FileEntry,
 } from "./git-status"
@@ -29,9 +31,21 @@ export const STAGED_DESCRIPTOR: DiffSourceDescriptor = {
   capabilities: { revert: false, comments: true },
 }
 
-function stamp(entry: FileEntry, before: string, after: string): FileEntry {
-  if (!imageMime(entry.file)) return entry
-  return { ...entry, stamp: `${entry.status}:${before}:${after}` }
+export interface StagedDiffSourceOptions {
+  /**
+   * Resolve the directory to diff. Defaults to the VS Code workspace root.
+   * Agent Manager passes a worktree path so the source diffs inside the
+   * worktree rather than the main checkout.
+   */
+  dir?: () => string | undefined
+  /**
+   * When true, a `dir` that resolves to undefined yields an empty diff rather
+   * than falling back to the workspace root.
+   */
+  strictDir?: boolean
+  /** Shared GitOps / log so sources don't each spawn their own channel. */
+  git?: GitOps
+  log?: (...args: unknown[]) => void
 }
 
 /**
@@ -39,12 +53,17 @@ function stamp(entry: FileEntry, before: string, after: string): FileEntry {
  * Polls on the standard interval; revert isn't supported (use `git reset` from
  * a real git client). Read-only view.
  */
-export function createStagedDiffSource(): DiffSource {
-  const output = vscode.window.createOutputChannel("Kilo Diff: Staged")
-  const log = (...args: unknown[]) => appendOutput(output, "StagedDiffSource", ...args)
-  const git = new GitOps({ log })
+export function createStagedDiffSource(opts: StagedDiffSourceOptions = {}): DiffSource {
+  const output = opts.git ? undefined : vscode.window.createOutputChannel("Kilo Diff: Staged")
+  const log = opts.log ?? ((...args: unknown[]) => appendOutput(output!, "StagedDiffSource", ...args))
+  const git = opts.git ?? new GitOps({ log })
 
-  const root = (): string | undefined => getWorkspaceRoot()
+  const root = (): string | undefined => {
+    const dir = opts.dir?.()
+    if (dir) return dir
+    if (opts.strictDir) return undefined
+    return getWorkspaceRoot()
+  }
 
   const listEntries = async (dir: string): Promise<FileEntry[]> => {
     const [nameStatus, numstat, raw] = await Promise.all([
@@ -61,7 +80,7 @@ export function createStagedDiffSource(): DiffSource {
     }
     const counts = parseNumstat(numstat.code === 0 ? numstat.stdout : "")
     const refs = parseRawOids(raw.code === 0 ? raw.stdout : "")
-    return parseNameStatus(nameStatus.stdout).map((item) => {
+    const entries = parseNameStatus(nameStatus.stdout).map((item) => {
       const ref = refs.get(item.file)
       const entry = {
         file: item.file,
@@ -77,6 +96,7 @@ export function createStagedDiffSource(): DiffSource {
         item.status === "deleted" ? "missing" : (ref?.after ?? "missing"),
       )
     })
+    return applyGeneratedAttributes(git, dir, entries, true)
   }
 
   return {
@@ -143,15 +163,17 @@ export function createStagedDiffSource(): DiffSource {
         deletions: entry.deletions,
         status: entry.status,
         tracked: true,
-        generatedLike: generatedLike(file),
+        generatedLike: entry.generatedLike,
         summarized,
         stamp: entry.stamp ?? `${entry.status}:${entry.additions}:${entry.deletions}`,
       }
     },
 
     dispose(): void {
-      git.dispose()
-      output.dispose()
+      // Only dispose resources we own (created here). Injected git/log are
+      // owned by the caller.
+      if (!opts.git) git.dispose()
+      output?.dispose()
     },
   }
 }
@@ -179,18 +201,13 @@ async function fileEntry(
     dir,
   )
   const stats = parseNumstat(counts.code === 0 ? counts.stdout : "")
-  const entry = {
-    file: item.file,
-    status: item.status,
-    additions: stats.get(item.file)?.additions ?? 0,
-    deletions: stats.get(item.file)?.deletions ?? 0,
-    tracked: true,
-    binary: stats.get(item.file)?.binary ?? false,
-  }
-  if (!imageMime(item.file)) return entry
+  const entry = createFileEntry(item, stats)
+  const marked = (await applyGeneratedAttributes(git, dir, [entry], true)).at(0)
+  if (!marked) return undefined
+  if (!imageMime(item.file)) return marked
   const [before, after] = await Promise.all([
     item.status === "added" ? "missing" : blobOid(git, dir, "HEAD", item.file),
     item.status === "deleted" ? "missing" : blobOid(git, dir, INDEX_REF, item.file),
   ])
-  return stamp(entry, before, after)
+  return stamp(marked, before, after)
 }

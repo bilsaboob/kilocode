@@ -2,18 +2,22 @@
  * Pure tab-ordering logic for the agent manager.
  */
 
-/**
- * Reorder an array by moving the item at `from` to the position of `to`.
- * Returns a new array, or undefined if either ID is not found or they are equal.
- */
-export function reorderTabs(tabs: readonly string[], from: string, to: string): string[] | undefined {
-  if (from === to) return undefined
-  const fi = tabs.indexOf(from)
-  const ti = tabs.indexOf(to)
-  if (fi === -1 || ti === -1) return undefined
-  const result = [...tabs]
-  result.splice(fi, 1)
-  result.splice(ti, 0, from)
+export { applyPinnedTabs, reorderTabs, togglePinnedTab } from "../src/utils/tab-order"
+
+/** Restore durable ordering without moving tabs that only exist in this webview. */
+export function mergeTransientTabs(
+  previous: string[],
+  incoming: string[],
+  transient: (id: string) => boolean,
+): string[] {
+  const result = [...incoming]
+  for (const [index, id] of previous.entries()) {
+    if (!transient(id) || result.includes(id)) continue
+    const before = previous.slice(0, index).findLast((item) => result.includes(item))
+    const after = previous.slice(index + 1).find((item) => result.includes(item))
+    const position = before ? result.indexOf(before) + 1 : after ? result.indexOf(after) : result.length
+    result.splice(position, 0, id)
+  }
   return result
 }
 

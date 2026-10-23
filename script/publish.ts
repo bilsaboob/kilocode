@@ -3,36 +3,20 @@
 import { Script } from "@opencode-ai/script"
 import { $ } from "bun"
 import { fileURLToPath } from "url"
+import { apply } from "./kilocode/changeset-version" // kilocode_change
 
 console.log("=== publishing ===\n")
 
+// kilocode_change start - keep JetBrains CLI pin reviewable outside CLI release commits
+const jetbrainsPkg = fileURLToPath(new URL("../packages/kilo-jetbrains/package.json", import.meta.url))
+const jetbrainsPin = await Bun.file(jetbrainsPkg).text()
+// kilocode_change end
+
 // kilocode_change start - consume changesets on the publish runner so changelog
-// changes are included in the release commit. Previously this ran in the
-// version job on a separate runner whose workspace was discarded.
-{
-  await $`bun install`
-  const paths = ["packages/kilo-vscode/CHANGELOG.md", "packages/opencode/CHANGELOG.md"]
-  const before = new Map<string, string>()
-  for (const p of paths) {
-    before.set(
-      p,
-      await Bun.file(p)
-        .text()
-        .catch(() => ""),
-    )
-  }
-  await $`bunx changeset version`
-  // Changeset computes its own version from package.json, but we use
-  // Script.version. Fix the heading in any changelog that was modified.
-  for (const p of paths) {
-    const content = await Bun.file(p)
-      .text()
-      .catch(() => "")
-    if (content !== before.get(p)) {
-      await Bun.write(p, content.replace(/^## .+$/m, `## ${Script.version}`))
-    }
-  }
-}
+// changes are included in the release commit. The same step runs in the
+// build-vscode job so the packaged VSIX ships the current changelog.
+await $`bun install`
+await apply(Script.version)
 // kilocode_change end
 
 const pkgjsons = await Array.fromAsync(
@@ -42,6 +26,13 @@ const pkgjsons = await Array.fromAsync(
 ).then((arr) => arr.filter((x) => !x.includes("node_modules") && !x.includes("dist")))
 
 for (const file of pkgjsons) {
+  // kilocode_change start - create a follow-up PR for JetBrains CLI pin bumps
+  if (file === jetbrainsPkg) {
+    console.log("preserved JetBrains CLI pin:", file)
+    await Bun.file(file).write(jetbrainsPin)
+    continue
+  }
+  // kilocode_change end
   let pkg = await Bun.file(file).text()
   pkg = pkg.replaceAll(/"version": "[^"]+"/g, `"version": "${Script.version}"`)
   console.log("updated:", file)
@@ -102,11 +93,15 @@ if (Script.release) {
 console.log("\n=== cli ===\n")
 await import(`../packages/opencode/script/publish.ts`)
 
+// kilocode_change - Kilo does not ship the upstream preview CLI package
+
 console.log("\n=== sdk ===\n")
 await import(`../packages/sdk/js/script/publish.ts`)
 
 console.log("\n=== plugin ===\n")
 await import(`../packages/plugin/script/publish.ts`)
+
+// kilocode_change - Kilo does not publish the upstream-owned @opencode-ai/ui package
 
 // kilocode_change start
 console.log("\n=== vscode ===\n")
@@ -122,3 +117,34 @@ await import(`../packages/kilo-vscode/script/publish.ts`)
 
 const dir = fileURLToPath(new URL("..", import.meta.url))
 process.chdir(dir)
+
+// kilocode_change start - non-blocking JetBrains CLI pin bump PR after CLI release
+await createJetbrainsPinPr()
+// kilocode_change end
+
+// kilocode_change start
+async function createJetbrainsPinPr() {
+  console.log("\n=== jetbrains cli pin bump pr ===\n")
+  if (!Script.release) {
+    console.log("Skipping JetBrains CLI pin bump PR: not a release build")
+    return
+  }
+  const args = ["--version", Script.version, "--pr"]
+  if (Script.preview) args.push("--pre-release")
+  const result = await $`bun .kilo/skills/release-jetbrains/script/set-pin.ts ${args}`.nothrow()
+  const out = result.stdout.toString().trim()
+  const err = result.stderr.toString().trim()
+  if (result.exitCode === 0) {
+    if (out) console.log(out)
+    const url = out.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0]
+    if (url) console.log(`::notice title=JetBrains CLI pin bump PR::${url}`)
+    return
+  }
+  console.warn("JetBrains CLI pin bump PR creation failed; release will continue.")
+  if (out) console.warn(out)
+  if (err) console.warn(err)
+  console.warn(
+    "::warning title=JetBrains CLI pin bump PR failed::Release completed, but the JetBrains CLI pin bump PR was not created. Check the logs above and create it manually if needed.",
+  )
+}
+// kilocode_change end

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect, PlatformError, Result } from "effect"
@@ -32,6 +32,17 @@ const launch: Launch = {
     HTTPS_PROXY: "http://127.0.0.1:9000",
     no_proxy: "*",
   },
+}
+
+// chmod-based permission tests only work when the test user is not root,
+// since root bypasses filesystem permission checks entirely.
+function readable(dir: string) {
+  try {
+    readdirSync(dir)
+    return true
+  } catch {
+    return false
+  }
 }
 
 describe("sandbox launch preparation", () => {
@@ -75,7 +86,7 @@ describe("sandbox launch preparation", () => {
     expect(args.args.slice(-4)).toEqual(["--", "/bin/sh", "-c", "printf '%s' 'hello world'"])
   })
 
-  test("layers Linux writable roots before protected git metadata without changing the network namespace", () => {
+  test("keeps the host network namespace in Linux allow mode", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "kilo-bubblewrap-policy-"))
     const git = path.join(root, ".git")
     mkdirSync(git)
@@ -100,6 +111,82 @@ describe("sandbox launch preparation", () => {
       expect(result.args).not.toContain("--unshare-net")
       expect(result.args.slice(-3)).toEqual(["--", "/bin/echo", "hello"])
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("isolates the Linux network namespace in deny mode", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "kilo-bubblewrap-network-"))
+    const input = makeProfile("deny")
+    const profile: Profile = {
+      ...input,
+      filesystem: {
+        allowWrite: [{ path: root, kind: "subtree" }],
+        denyWrite: [],
+        denyNames: [],
+      },
+    }
+
+    try {
+      const result = generateBubblewrap(profile, { ...launch, cwd: root }, "/opt/kilo/bwrap")
+      expect(result.args).toContain("--unshare-net")
+      expect(result.args.indexOf("--unshare-net")).toBeGreaterThan(result.args.indexOf("--unshare-pid"))
+      expect(result.args.slice(-3)).toEqual(["--", "/bin/echo", "hello"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("re-binds unreadable directories read-only instead of failing Linux setup", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "kilo-bubblewrap-unreadable-"))
+    const git = path.join(root, ".git")
+    const secrets = path.join(root, "secrets")
+    mkdirSync(git)
+    mkdirSync(secrets)
+    chmodSync(secrets, 0o000)
+    const profile: Profile = {
+      ...makeProfile("allow"),
+      filesystem: {
+        allowWrite: [{ path: root, kind: "subtree" }],
+        denyWrite: [],
+        denyNames: [".git"],
+      },
+    }
+
+    try {
+      if (readable(secrets)) return
+      const result = generateBubblewrap(profile, { ...launch, cwd: root }, "/opt/kilo/bwrap")
+      const writable = result.args.indexOf("--bind")
+      expect(result.args.slice(writable, writable + 3)).toEqual(["--bind", root, root])
+      const first = result.args.indexOf("--ro-bind", writable + 3)
+      expect(result.args.slice(first, first + 3)).toEqual(["--ro-bind", git, git])
+      const second = result.args.indexOf("--ro-bind", first + 3)
+      expect(result.args.slice(second, second + 3)).toEqual(["--ro-bind", secrets, secrets])
+    } finally {
+      chmodSync(secrets, 0o700)
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects an unreadable writable root", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "kilo-bubblewrap-root-"))
+    chmodSync(root, 0o000)
+    const profile: Profile = {
+      ...makeProfile("allow"),
+      filesystem: {
+        allowWrite: [{ path: root, kind: "subtree" }],
+        denyWrite: [],
+        denyNames: [".git"],
+      },
+    }
+
+    try {
+      if (readable(root)) return
+      expect(() => generateBubblewrap(profile, { ...launch, cwd: root }, "/opt/kilo/bwrap")).toThrow(
+        `Writable root is not readable: ${root}`,
+      )
+    } finally {
+      chmodSync(root, 0o700)
       rmSync(root, { recursive: true, force: true })
     }
   })
@@ -167,24 +254,33 @@ describe("sandbox launch preparation", () => {
   })
 
   test("merges profile environment values and applies exact deny names", async () => {
-    const result = await Effect.runPromise(Effect.scoped(run(makeProfile("allow"), prepare(launch))))
-    expect(result.environment?.KEEP).toBe("profile")
-    expect(result.environment?.DROP).toBeUndefined()
-    expect(result.environment?.RESET).toBeUndefined()
-    expect(result.environment?.HTTPS_PROXY).toBe("http://127.0.0.1:9000")
-    expect(result.environment?.no_proxy).toBe("*")
-    expect(result.environment?.PATH).toBeUndefined()
+    const input = makeProfile("allow")
+    const result = await Effect.runPromise(Effect.scoped(run(input, prepare(launch))).pipe(Effect.result))
+    if (!backendSupport(input.network).available) {
+      expect(Result.isFailure(result)).toBe(true)
+      return
+    }
+    expect(Result.isSuccess(result)).toBe(true)
+    if (Result.isFailure(result)) return
+    expect(result.success.environment?.KEEP).toBe("profile")
+    expect(result.success.environment?.DROP).toBeUndefined()
+    expect(result.success.environment?.RESET).toBeUndefined()
+    expect(result.success.environment?.HTTPS_PROXY).toBe("http://127.0.0.1:9000")
+    expect(result.success.environment?.no_proxy).toBe("*")
+    expect(result.success.environment?.PATH).toBeUndefined()
   })
 
-  test("fails proxy mode closed before launching a process", async () => {
+  test("prepares proxy mode when platform support is available", async () => {
+    const input = makeProfile("proxy")
     const result = await Effect.runPromise(
-      Effect.scoped(run(makeProfile("proxy"), prepare(launch))).pipe(Effect.result),
+      Effect.scoped(run(input, prepare(launch))).pipe(Effect.result),
     )
-    expect(Result.isFailure(result)).toBe(true)
-    if (Result.isFailure(result)) {
-      expect(result.failure.reason._tag).toBe("BadResource")
-      expect(result.failure.message).toContain("proxy network mode and allowedHosts are not supported")
+    if (!backendSupport(input.network).available) {
+      expect(Result.isFailure(result)).toBe(true)
+      return
     }
+    expect(Result.isSuccess(result)).toBe(true)
+    if (Result.isSuccess(result)) expect(result.success.environment?.HTTPS_PROXY).toContain("http://kilo:")
   })
 
   test("fails non-empty allowedHosts closed before launching a process", async () => {
@@ -196,8 +292,7 @@ describe("sandbox launch preparation", () => {
     )
     expect(Result.isFailure(result)).toBe(true)
     if (Result.isFailure(result)) {
-      expect(result.failure.reason._tag).toBe("BadResource")
-      expect(result.failure.message).toContain("proxy network mode and allowedHosts are not supported")
+      expect(result.failure.message).toContain("allowedHosts require proxy network mode")
     }
   })
 
@@ -211,7 +306,7 @@ describe("sandbox launch preparation", () => {
     expect(Result.isFailure(result)).toBe(true)
     if (Result.isFailure(result)) {
       expect(result.failure.reason._tag).toBe("BadResource")
-      expect(result.failure.message).toContain("proxy network mode and allowedHosts are not supported")
+      expect(result.failure.message).toContain("allowedHosts require proxy network mode")
     }
   })
 
@@ -234,8 +329,10 @@ describe("sandbox launch preparation", () => {
   })
 
   test("reports backend support with a reason when unavailable", () => {
-    const support = backendSupport()
-    expect(typeof support.available).toBe("boolean")
-    if (!support.available) expect(support.reason?.length).toBeGreaterThan(0)
+    for (const network of [undefined, makeProfile("deny").network]) {
+      const support = backendSupport(network)
+      expect(typeof support.available).toBe("boolean")
+      if (!support.available) expect(support.reason?.length).toBeGreaterThan(0)
+    }
   })
 })

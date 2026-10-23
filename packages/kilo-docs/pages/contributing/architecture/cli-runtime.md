@@ -25,12 +25,16 @@ These terms describe local execution. They are separate from hosted Cloud Agent 
 | Local routing workspace | Optional routing context that can resolve to a local directory or remote target |
 | Worktree directory | Alternate git worktree path used as directory context for isolated concurrent work |
 | Process-shared state | Runtime service state shared by every directory context in one Kilo CLI process |
-| Modes | Configurable agent presets for tools, prompts, restrictions, and behavior |
+| Agents | Configurable presets for tools, prompts, restrictions, and behavior |
 | MCP | Protocol for extending agent tools |
 
 One `kilo serve` process can host several local runtime instances. Directory-keyed state stays isolated. Process-shared service state does not.
 
 ## Command entry points
+
+{% callout type="warning" title="Kilo Console is deprecated" %}
+The `kilo console` command and the browser interface described on this page are deprecated and will be removed in an upcoming release.
+{% /callout %}
 
 | Entry point | Command or caller | Runtime model |
 |---|---|---|
@@ -262,7 +266,7 @@ Later sources override earlier values during instance config load:
 | 11 | macOS managed preferences |
 | 12 | Runtime flag-derived permission, tool, compaction, and plugin behavior |
 
-Global config files load from `${Global.Path.config}`. Project updates prefer existing config files found in ancestor `.kilo`, `.kilocode`, or `.opencode` directories, then existing project root config files, then create `.kilo/kilo.json`. Global indexing settings can carry provider and storage defaults, but global `indexing.enabled` is stripped so project enablement remains local in effective instance config.
+Global config files load from `${Global.Path.config}`. Project updates prefer existing config files found in ancestor `.kilo` or legacy `.kilocode` directories, then existing project root config files, then create `.kilo/kilo.json`. Global indexing settings can carry provider and storage defaults, but global `indexing.enabled` is stripped so project enablement remains local in effective instance config.
 
 Signed-in organization modes become normal agent configuration during load. They override migrated legacy modes and remain overridable by later config sources in table.
 
@@ -278,6 +282,8 @@ Runtime config loading is separate from editor-facing JSON Schema publication. C
 Both streams send initial `server.connected` event and heartbeat every 10 seconds. VS Code and JetBrains consume `/global/event` so one server connection can route events for multiple directories.
 
 ## Kilo Console
+
+**Deprecated.** The Kilo Console browser interface and its `kilo console` launcher will be removed in a future release.
 
 `kilo console` starts or reuses daemon, opens `/console`, and prints Console launch URL. Browser launch URL embeds daemon Basic credentials so initial request authenticates.
 

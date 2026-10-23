@@ -1,10 +1,20 @@
 import { Effect } from "effect"
+import type { Argv } from "yargs"
 import { UI } from "../ui"
+import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Git } from "@/git"
 import { InstanceRef } from "@/effect/instance-ref"
 import { Process } from "@/util/process"
 import { existsSync } from "node:fs" // kilocode_change
+import {
+  clearSessionLink,
+  linkMatchesWorktree,
+  parsePrUrl,
+  readSessionPrLink,
+  recordSessionLink,
+} from "@/kilo-sessions/pr-link" // kilocode_change
+import { refreshPrLink } from "@/kilo-sessions/pr-link-poller" // kilocode_change
 
 const subcommand = "pr" // kilocode_change
 
@@ -26,8 +36,21 @@ export function cliCommand(
 }
 // kilocode_change end
 
-export const PrCommand = effectCmd({
-  command: `${subcommand} <number>`, // kilocode_change
+export const PrCommand = cmd({
+  command: subcommand,
+  describe: "manage pull requests", // kilocode_change
+  builder: (yargs: Argv) =>
+    yargs
+      .command(PrCheckoutCommand)
+      .command(PrLinkCommand)
+      .command(PrUnlinkCommand)
+      .command(PrStatusCommand)
+      .demandCommand(),
+  async handler() {},
+})
+
+export const PrCheckoutCommand = effectCmd({
+  command: "checkout <number>",
   describe: "fetch and checkout a GitHub PR branch, then run kilo", // kilocode_change
   builder: (yargs) =>
     yargs.positional("number", {
@@ -35,7 +58,7 @@ export const PrCommand = effectCmd({
       describe: "PR number to checkout",
       demandOption: true,
     }),
-  handler: Effect.fn("Cli.pr")(function* (args) {
+  handler: Effect.fn("Cli.pr.checkout")(function* (args) {
     const ctx = yield* InstanceRef
     if (!ctx) return yield* fail("Could not load instance context")
     if (ctx.project.vcs !== "git") {
@@ -137,3 +160,125 @@ export const PrCommand = effectCmd({
     if (code !== 0) return yield* Effect.die(new Error(`kilo exited with code ${code}`)) // kilocode_change
   }),
 })
+
+// kilocode_change start - link/unlink/status act on one explicit session
+//
+// A PR belongs to a session, never to a worktree or a branch name, so these
+// commands require a session id: `--session <id>`, else the KILO_SESSION_ID /
+// KILO_SESSION the surrounding process exported. There is deliberately no
+// worktree or branch fallback: guessing the session recreates the fan-out that
+// linked random pull requests to sessions.
+import { enabled as prEnabled } from "@/kilo-sessions/pr-link"
+
+const NO_SESSION = "No session specified. Pass --session <id> or set KILO_SESSION_ID."
+
+function resolveSessionId(explicit?: string): string | undefined {
+  return explicit?.trim() || process.env.KILO_SESSION_ID?.trim() || process.env.KILO_SESSION?.trim() || undefined
+}
+
+export const prLinkHandler = Effect.fn("Cli.pr.link")(function* (args: { url: string; session?: string }) {
+  if (!prEnabled()) return yield* fail("PR links are unsupported for this client")
+  const ctx = yield* InstanceRef
+  if (!ctx) return yield* fail("Could not load instance context")
+
+  const link = parsePrUrl(args.url)
+  if (!link) return yield* fail(`Invalid PR URL: ${args.url}`)
+
+  const sessionId = resolveSessionId(args.session)
+  if (!sessionId) return yield* fail(NO_SESSION)
+
+  // The user's explicit link still requires the same repository; a fork or
+  // another repo with the same branch name is refused. recordSessionLink
+  // repeats the check, so a worktree whose repository cannot be resolved does
+  // not get a link either.
+  const own = yield* Effect.promise(() => linkMatchesWorktree(link, ctx.worktree))
+  if (!own) return yield* fail(`${args.url} is not a pull request for this repository.`)
+
+  const record = yield* Effect.promise(() => recordSessionLink(sessionId, { link, evidence: "user" }, ctx.worktree))
+  if (!record) return yield* fail(`${args.url} is not a pull request for this repository.`)
+
+  UI.println(`Linked PR #${link.prNumber} (${link.platform})`)
+  UI.println(link.prUrl)
+})
+
+export const PrLinkCommand = effectCmd({
+  command: "link <url>",
+  describe: "link a session to a pull request",
+  instance: () => prEnabled(),
+  builder: (yargs) =>
+    yargs
+      .positional("url", {
+        type: "string",
+        describe: "PR URL to link",
+        demandOption: true,
+      })
+      .option("session", {
+        alias: ["s"],
+        type: "string",
+        describe: "session id to apply the PR link to",
+      }),
+  handler: prLinkHandler,
+})
+
+export const prUnlinkHandler = Effect.fn("Cli.pr.unlink")(function* (args: { session?: string }) {
+  if (!prEnabled()) return yield* fail("PR links are unsupported for this client")
+  const sessionId = resolveSessionId(args.session)
+  if (!sessionId) return yield* fail(NO_SESSION)
+
+  yield* Effect.promise(() => clearSessionLink(sessionId))
+  UI.println("PR link cleared")
+})
+
+export const PrUnlinkCommand = effectCmd({
+  command: "unlink",
+  describe: "clear a session's linked pull request",
+  instance: false,
+  builder: (yargs) =>
+    yargs.option("session", {
+      alias: ["s"],
+      type: "string",
+      describe: "session id to apply the PR link to",
+    }),
+  handler: prUnlinkHandler,
+})
+
+export const prStatusHandler = Effect.fn("Cli.pr.status")(function* (args: { session?: string }) {
+  if (!prEnabled()) return yield* fail("PR links are unsupported for this client")
+  const sessionId = resolveSessionId(args.session)
+  if (!sessionId) return yield* fail(NO_SESSION)
+
+  const initial = yield* Effect.promise(() => readSessionPrLink(sessionId))
+  if (!initial) {
+    UI.println("no PR linked")
+    return
+  }
+
+  // Refresh the state of the link this session already owns, and only that
+  // session's link: one host call, never one per unrelated session's PR. The
+  // poller never discovers a link by branch name; it only asks the host whether
+  // this session's pull request is still open, so it can withdraw a closed one.
+  yield* Effect.promise(() => refreshPrLink({ sessionId }))
+
+  const record = yield* Effect.promise(() => readSessionPrLink(sessionId))
+  if (!record) {
+    UI.println("no PR linked")
+    return
+  }
+
+  UI.println(`Linked PR #${record.link.prNumber} (${record.link.platform})`)
+  UI.println(record.link.prUrl)
+})
+
+export const PrStatusCommand = effectCmd({
+  command: "status",
+  describe: "show a session's linked pull request",
+  instance: false,
+  builder: (yargs) =>
+    yargs.option("session", {
+      alias: ["s"],
+      type: "string",
+      describe: "session id to apply the PR link to",
+    }),
+  handler: prStatusHandler,
+})
+// kilocode_change end

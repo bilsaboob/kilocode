@@ -1,7 +1,7 @@
 import { Schema } from "effect"
 import DESCRIPTION from "./shell.txt"
 import { PositiveInt } from "@opencode-ai/core/schema"
-import { Global } from "@opencode-ai/core/global"
+import { sessionTmp } from "@/kilocode/tool/shell-tmp" // kilocode_change
 import { ShellID } from "./id"
 
 const PS = new Set(["powershell", "pwsh"])
@@ -15,7 +15,6 @@ const descriptions = {
   cmd: 'Recommended: a clear, concise description of what this command does in 5-10 words. Examples:\nInput: dir\nOutput: Lists current directory\n\nInput: if exist "package.json" type "package.json"\nOutput: Prints package.json when it exists\n\nInput: mkdir tmp\nOutput: Creates directory tmp',
 }
 // kilocode_change end
-
 export type Limits = {
   maxLines: number
   maxBytes: number
@@ -297,7 +296,7 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits, 
       intro: selected.intro,
       os: platform,
       shell: name,
-      tmp: Global.Path.tmp,
+      tmp: sessionTmp(), // kilocode_change - session-scoped temp dir in cloud sessions
       workdirSection: selected.workdirSection,
       commandSection: selected.commandSection,
       gitCommands: selected.gitCommands,

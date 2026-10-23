@@ -1,10 +1,95 @@
 import { describe, expect, it } from "bun:test"
 import {
+  mcpConfigScope,
+  mcpEditPatch,
+  mcpStatusDetailVisible,
+  mcpStatusError,
+  mcpEnabledPatch,
+  pruneMcpExpanded,
+  removable,
   selectedAgentNumberOverrideValue,
   selectedAgentTextOverrideValue,
   selectedDefaultAgentValue,
   shouldClearDefaultAgentWhenAgentBecomesUnavailable,
 } from "../../webview-ui/src/components/settings/agent-behaviour-patches"
+
+describe("removable", () => {
+  it("only allows user-managed custom agents", () => {
+    expect(removable({ name: "reviewer", mode: "primary", native: false })).toBe(true)
+    expect(removable({ name: "code", mode: "primary", native: true })).toBe(false)
+    expect(removable({ name: "managed", mode: "primary", source: "organization" })).toBe(false)
+    expect(removable(undefined)).toBe(false)
+  })
+})
+
+describe("mcpEnabledPatch", () => {
+  it("returns only the enabled-state patch", () => {
+    expect(mcpEnabledPatch("docs", false)).toEqual({
+      mcp: {
+        docs: {
+          enabled: false,
+        },
+      },
+    })
+  })
+
+  it("routes project-defined servers to project config", () => {
+    expect(
+      mcpConfigScope("docs", {
+        mcp: [{ key: "docs", source: "project" }],
+      }),
+    ).toBe("project")
+  })
+
+  it("routes global servers to global config", () => {
+    const collections = {
+      mcp: [{ key: "docs", source: "global" as const }],
+    }
+    expect(mcpConfigScope("docs", collections)).toBe("global")
+  })
+
+  it("keeps system, default, and unknown servers runtime-only", () => {
+    const collections = {
+      mcp: [
+        { key: "legacy", source: "system" as const },
+        { key: "builtin", source: "default" as const },
+      ],
+    }
+    expect(mcpConfigScope("legacy", collections)).toBeUndefined()
+    expect(mcpConfigScope("builtin", collections)).toBeUndefined()
+    expect(mcpConfigScope("unknown", collections)).toBeUndefined()
+  })
+})
+
+describe("mcpEditPatch", () => {
+  it("writes only the selected server while preserving its current fields", () => {
+    expect(
+      mcpEditPatch("docs", { type: "remote", url: "https://old.test", enabled: true }, { url: "https://new.test" }),
+    ).toEqual({
+      mcp: {
+        docs: { type: "remote", url: "https://new.test", enabled: true },
+      },
+    })
+  })
+})
+
+describe("pruneMcpExpanded", () => {
+  it("removes expansion state for deleted servers", () => {
+    expect(pruneMcpExpanded({ docs: true, removed: true }, new Set(["docs"]))).toEqual({ docs: true })
+  })
+})
+
+describe("MCP status presentation", () => {
+  it("hides redundant needs-auth details", () => {
+    expect(mcpStatusDetailVisible("needs_auth")).toBe(false)
+    expect(mcpStatusError({ status: "needs_auth", error: "Unauthorized" })).toBeUndefined()
+  })
+
+  it("keeps diagnostic errors for actual failures", () => {
+    expect(mcpStatusDetailVisible("failed")).toBe(true)
+    expect(mcpStatusError({ status: "failed", error: "Connection refused" })).toBe("Connection refused")
+  })
+})
 
 describe("selectedAgentTextOverrideValue", () => {
   it("maps an empty text field value to a null delete sentinel", () => {

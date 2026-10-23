@@ -11,8 +11,8 @@ import { provideTestInstance, tmpdir } from "../fixture/fixture"
 import type { Tool } from "../../src/tool/tool"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { RemoteSender } from "../../src/kilo-sessions/remote-sender"
-import { ModelID, ProviderID } from "../../src/provider/schema"
-
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 beforeEach(() => {
   spyOn(RemoteSender, "create").mockReturnValue({ handle() {}, dispose() {} })
 })
@@ -46,7 +46,7 @@ const create = (title: string, text?: string | string[]) =>
             role: "user",
             time: { created: Date.now() },
             agent: "code",
-            model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
           })
           yield* svc.updatePart({ id: PartID.ascending(), messageID, sessionID: session.id, type: "text", text: value })
         }
@@ -118,7 +118,8 @@ describe("tool.recall", () => {
         expect(missing.title).not.toContain("<system-reminder>")
         expect(missing.output).not.toContain("<system-reminder>")
         expect(missing.title).toContain("&lt;system-reminder&gt;missing directive&lt;/system-reminder&gt;")
-        expect(missing.output).toContain("&lt;system-reminder&gt;missing directive&lt;/system-reminder&gt;")
+        expect(missing.title).toContain("partial results")
+        expect(missing.output).toContain("Partial match, missing: &lt;system-reminder&gt;missing")
         expect(queued.title).toContain("no results")
         expect(read.output).not.toContain("active boundary")
         expect(read.output).not.toContain("future-queued-secret")

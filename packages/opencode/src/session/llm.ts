@@ -1,11 +1,15 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Provider } from "@/provider/provider"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import * as Log from "@opencode-ai/core/util/log"
+import { Log } from "@opencode-ai/core/util/log" // kilocode_change
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
 import type { LLMEvent } from "@opencode-ai/llm"
-import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
+import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -15,8 +19,8 @@ import type { MessageV2 } from "./message-v2"
 import { usable } from "./overflow" // kilocode_change
 import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
-import { PermissionID } from "@/permission/schema"
-import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Wildcard } from "@/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
@@ -25,9 +29,16 @@ import { InstanceState } from "@/effect/instance-state"
 import { KiloSession } from "@/kilocode/session"
 import { KiloLLM } from "@/kilocode/session/llm"
 import { KiloSessionOverflow } from "@/kilocode/session/overflow"
+import { KiloToolSchema } from "@/kilocode/session/tool-schema"
+import { KiloMessageDiagnostics } from "@/kilocode/session/message-diagnostics"
 import { SessionExport } from "@/kilocode/session-export"
 import { getActiveOrg } from "@/kilocode/session-export/eligibility"
 import { normalizeUsageForExport, observeFullStreamForExport } from "@/kilocode/session-export/llm"
+import { KiloCustomRouter } from "@/kilocode/auto-routing/router"
+import { openaiMessages, openaiTools } from "@/kilocode/auto-routing/messages"
+import { organization, token } from "@/kilocode/provider/catalog"
+import { KiloRoutedModel } from "@/kilocode/session/routed-model"
+import { Identity } from "@kilocode/kilo-telemetry"
 // kilocode_change end
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -35,16 +46,17 @@ import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 
-const log = Log.create({ service: "llm" })
+const log = Log.create({ service: "llm" }) // kilocode_change
+
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
-  user: MessageV2.User
+  user: SessionV1.User
   sessionID: string
   parentSessionID?: string
   model: Provider.Model
   agent: Agent.Info
-  permission?: Permission.Ruleset
+  permission?: PermissionV1.Ruleset
   system: string[]
   messages: ModelMessage[]
   small?: boolean
@@ -52,6 +64,7 @@ export type StreamInput = {
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   preflight?: boolean // kilocode_change - enable proactive threshold compaction for normal session turns
+  reportedContextTokens?: number // kilocode_change - provider-reported context size from the last finished turn, source of truth for the output cap
 }
 
 export type StreamRequest = StreamInput & {
@@ -74,6 +87,7 @@ const live: Layer.Layer<
   | Provider.Service
   | Plugin.Service
   | Permission.Service
+  | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
 > = Layer.effect(
@@ -84,21 +98,50 @@ const live: Layer.Layer<
     const provider = yield* Provider.Service
     const plugin = yield* Plugin.Service
     const perm = yield* Permission.Service
+    const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
 
+    // kilocode_change start - ADR 0005: a custom auto router that this CLI can
+    // serve asks the routing worker for a decision and dispatches it itself.
+    const route = Effect.fn("LLM.route")(function* (input: StreamInput) {
+      if (!KiloCustomRouter.isCustomRouter({ providerID: input.model.providerID, modelID: input.model.id })) {
+        return undefined
+      }
+      const item = yield* provider.getProvider(input.model.providerID)
+      const info = yield* auth.get(input.model.providerID)
+      const providers = yield* provider.list()
+      const machineId = yield* Effect.promise(() => Identity.getMachineId().catch(() => undefined))
+      const pick = yield* Effect.promise(async () =>
+        KiloCustomRouter.resolve({
+          modelID: input.model.id,
+          messages: openaiMessages(input.messages),
+          tools: await openaiTools(input.tools),
+          sessionID: input.sessionID,
+          requestID: input.user.id,
+          mode: input.agent.name,
+          machineId,
+          token: token(item.options, info),
+          organizationId: organization(item.options, info),
+          providers,
+        }),
+      )
+      if (!pick) return undefined
+      const model = KiloCustomRouter.routedModel({ pick, base: input.model, providers })
+      if (!model) throw new Error(KiloCustomRouter.errorMessage("custom_router_unavailable", input.model.id))
+      return { model, variant: pick.variant }
+    })
+    // kilocode_change end
+
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
-      const l = log
-        .clone()
-        .tag("providerID", input.model.providerID)
-        .tag("modelID", input.model.id)
-        .tag("session.id", input.sessionID)
-        .tag("small", (input.small ?? false).toString())
-        .tag("agent", input.agent.name)
-        .tag("mode", input.agent.mode)
-      l.info("stream", {
-        modelID: input.model.id,
+      const l = log.clone().tag("providerID", input.model.providerID).tag("modelID", input.model.id) // kilocode_change
+      yield* Effect.logInfo("stream", {
         providerID: input.model.providerID,
+        modelID: input.model.id,
+        "session.id": input.sessionID,
+        small: (input.small ?? false).toString(),
+        agent: input.agent.name,
+        mode: input.agent.mode,
       })
 
       const [language, cfg, item, info] = yield* Effect.all(
@@ -121,6 +164,7 @@ const live: Layer.Layer<
       })
 
       // kilocode_change start - compact at the configured threshold before contacting the provider
+      const tools = yield* Effect.promise(() => KiloToolSchema.sanitize(base.tools))
       const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
       const estimated: ModelMessage[] =
         isOpenaiOauth || isWorkflow
@@ -135,13 +179,16 @@ const live: Layer.Layer<
       const preflight = input.preflight === true && KiloSessionOverflow.enabled({ cfg, model: input.model })
       const cap = KiloLLM.needsEstimate({ model: input.model, configured: base.params.maxOutputTokens })
       const usage =
-        cap || preflight ? KiloSessionOverflow.measure({ messages: estimated, tools: base.tools }) : undefined
+        cap || preflight
+          ? KiloSessionOverflow.measure({ messages: estimated, tools })
+          : undefined
       const maxOutputTokens = KiloLLM.capOutputTokens({
         model: input.model,
         messages: estimated,
-        tools: base.tools,
+        tools,
         configured: base.params.maxOutputTokens,
-        tokens: usage?.raw,
+        usage,
+        reported: input.reportedContextTokens,
       })
       if (
         preflight &&
@@ -151,17 +198,21 @@ const live: Layer.Layer<
           model: input.model,
           usable: usable({ cfg, model: input.model, outputTokenMax: flags.outputTokenMax }), // kilocode_change
           tokens: usage.normalized,
+          tail: usage.tail,
+          overhead: usage.overhead,
           continuation: usage.continuation,
+          reported: input.reportedContextTokens,
         })
       ) {
         return yield* Effect.fail(new KiloSessionOverflow.PreflightError())
       }
-      const prepared = { ...base, params: { ...base.params, maxOutputTokens } }
+      const prepared = { ...base, tools, params: { ...base.params, maxOutputTokens } }
       // kilocode_change end
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
       // and results sent back over the WebSocket.
+      const bridge = yield* EffectBridge.make()
       if (language instanceof GitLabWorkflowLanguageModel) {
         const workflowModel = language as GitLabWorkflowLanguageModel & {
           sessionID?: string
@@ -198,7 +249,6 @@ const live: Layer.Layer<
           return !match || match.action !== "ask"
         })
 
-        const bridge = yield* EffectBridge.make()
         const approvedToolsForSession = new Set<string>()
         workflowModel.approvalHandler = bridge.bind(async (approvalTools) => {
           const uniqueNames = [...new Set(approvalTools.map((t: { name: string }) => t.name))] as string[]
@@ -208,12 +258,18 @@ const live: Layer.Layer<
             return { approved: true }
           }
 
-          const id = PermissionID.ascending()
-          let unsub: (() => void) | undefined
+          const id = PermissionV1.ID.ascending()
+          let unsub: EventV2.Unsubscribe | undefined
           try {
-            unsub = Bus.subscribe(Permission.Event.Replied, (evt) => {
-              if (evt.properties.requestID === id) void evt.properties.reply
-            })
+            unsub = await bridge.promise(
+              events.listen((event) => {
+                if (event.type !== Permission.Event.Replied.type) return Effect.void
+                const data = event.data as EventV2.Data<typeof Permission.Event.Replied>
+                if (data.requestID !== id) return Effect.void
+                void data.reply
+                return Effect.void
+              }),
+            )
             const toolPatterns = approvalTools.map((t: { name: string; args: string }) => {
               try {
                 const parsed = JSON.parse(t.args) as Record<string, unknown>
@@ -241,7 +297,7 @@ const live: Layer.Layer<
           } catch {
             return { approved: false }
           } finally {
-            unsub?.()
+            if (unsub) await bridge.promise(unsub)
           }
         })
       }
@@ -249,7 +305,8 @@ const live: Layer.Layer<
       const instance = yield* InstanceState.context
       // kilocode_change start - capture eligible session export request start
       const isKilo = input.model.api.npm === "@kilocode/kilo-gateway"
-      const org = yield* isKilo && input.model.isFree === true
+      const exporting = SessionExport.enabled
+      const org = yield* exporting && isKilo && input.model.isFree === true
         ? Effect.promise(() => getActiveOrg())
         : Effect.succeed({ type: "unknown" as const })
       const started = Date.now()
@@ -257,7 +314,7 @@ const live: Layer.Layer<
       const found = KiloSession.resolveRoot(input.sessionID)
       const root = parent ? (found === input.sessionID ? parent : found) : input.sessionID
       const exportable =
-        isKilo && input.model.isFree === true && org.type === "personal" && input.agent.name !== "title"
+        exporting && isKilo && input.model.isFree === true && org.type === "personal" && input.agent.name !== "title"
       if (exportable) {
         SessionExport.beforeRequest({
           input: { model: input.model, org },
@@ -298,84 +355,100 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          maxOutputTokens: prepared.params.maxOutputTokens,
+          // kilocode_change start
+          maxOutputTokens: ProviderTransform.maxOutputTokensForRequest({
+            model: input.model,
+            options: prepared.params.options,
+            maxOutputTokens: prepared.params.maxOutputTokens,
+          }),
+          // kilocode_change end
           providerOptions: prepared.params.options,
+          messageTransformOptions: prepared.messageTransformOptions, // kilocode_change
           headers: prepared.headers,
           abort: input.abort,
         })
         if (native.type === "supported") {
-          yield* Effect.logInfo("llm runtime selected").pipe(
-            Effect.annotateLogs({
-              "llm.runtime": "native",
-              "llm.provider": input.model.providerID,
-              "llm.model": input.model.id,
-            }),
-          )
+          yield* Effect.logInfo("llm runtime selected", {
+            "llm.runtime": "native",
+            "llm.provider": input.model.providerID,
+            "llm.model": input.model.id,
+          })
           return {
             type: "native" as const,
             stream: native.stream,
           }
         }
-        yield* Effect.logInfo("llm runtime selected").pipe(
-          Effect.annotateLogs({
-            "llm.runtime": "ai-sdk",
-            "llm.provider": input.model.providerID,
-            "llm.model": input.model.id,
-            "llm.native_unsupported_reason": native.reason,
-          }),
-        )
-        l.info("native runtime unavailable; falling back to ai-sdk", { reason: native.reason })
-      }
-
-      yield* Effect.logInfo("llm runtime selected").pipe(
-        Effect.annotateLogs({
+        yield* Effect.logInfo("llm runtime selected", {
           "llm.runtime": "ai-sdk",
           "llm.provider": input.model.providerID,
           "llm.model": input.model.id,
-        }),
-      )
+          "llm.native_unsupported_reason": native.reason,
+        })
+        yield* Effect.logInfo("native runtime unavailable; falling back to ai-sdk", {
+          providerID: input.model.providerID,
+          modelID: input.model.id,
+          "session.id": input.sessionID,
+          small: (input.small ?? false).toString(),
+          agent: input.agent.name,
+          mode: input.agent.mode,
+          reason: native.reason,
+        })
+      }
+
+      yield* Effect.logInfo("llm runtime selected", {
+        "llm.runtime": "ai-sdk",
+        "llm.provider": input.model.providerID,
+        "llm.model": input.model.id,
+      })
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       const result = streamText({
-        // kilocode_change
         onError(error) {
-          l.error("stream error", {
-            error,
-          })
-        },
-        async experimental_repairToolCall(failed) {
-          const lower = failed.toolCall.toolName.toLowerCase()
-          if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
-            l.info("repairing tool call", {
-              tool: failed.toolCall.toolName,
-              repaired: lower,
-            })
-            return {
-              ...failed.toolCall,
-              toolName: lower,
-            }
-          }
-          return {
-            ...failed.toolCall,
-            input: JSON.stringify({
-              tool: failed.toolCall.toolName,
-              error: failed.error.message,
+          bridge.fork(
+            Effect.logError("stream error", {
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+              "session.id": input.sessionID,
+              small: (input.small ?? false).toString(),
+              agent: input.agent.name,
+              mode: input.agent.mode,
+              error,
             }),
-            toolName: "invalid",
+          )
+        },
+        // Copilot returns the authoritative billed amount only in provider-specific response fields.
+        includeRawChunks: input.model.providerID.includes("github-copilot"),
+        async experimental_repairToolCall(failed) {
+          const lower = failed.toolCall.toolName.trim().toLowerCase() // kilocode_change
+          if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
+            l.info("repairing tool call", { tool: failed.toolCall.toolName, repaired: lower }) // kilocode_change
+            return { ...failed.toolCall, toolName: lower }
           }
+          // kilocode_change start - surface the original tool-name error instead of a
+          // repaired call to the hidden "invalid" tool, which activeTools excludes and
+          // therefore fails with a confusing "unavailable tool 'invalid'" error
+          return null
+          // kilocode_change end
         },
         temperature: prepared.params.temperature,
         topP: prepared.params.topP,
         topK: prepared.params.topK,
         providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
         activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+        // kilocode_change start
         tools: prepared.tools,
         toolChoice: input.toolChoice,
-        maxOutputTokens: prepared.params.maxOutputTokens,
+        maxOutputTokens: ProviderTransform.maxOutputTokensForRequest({
+          model: input.model,
+          options: prepared.params.options,
+          maxOutputTokens: prepared.params.maxOutputTokens,
+        }),
+        // kilocode_change end
         abortSignal: input.abort,
         ...KiloLLM.timeout({ options: prepared.params.options, fallback: item.options, log: l }), // kilocode_change
         headers: prepared.headers,
         maxRetries: input.retries ?? 0,
+        allowSystemInMessages: true, // kilocode_change - system prompts are trusted and intentionally included in messages
         messages: prepared.messages,
         model: wrapLanguageModel({
           model: language,
@@ -401,7 +474,7 @@ const live: Layer.Layer<
       })
       // kilocode_change end
       // kilocode_change start - capture eligible session export request completion off the stream path
-      if (!exportable) return { type: "ai-sdk" as const, result }
+      if (!exportable) return { type: "ai-sdk" as const, result, messages: prepared.messages }
       return {
         type: "ai-sdk" as const,
         result: {
@@ -415,6 +488,7 @@ const live: Layer.Layer<
             retries: input.retries ?? 0,
           }),
         },
+        messages: prepared.messages,
       }
       // kilocode_change end
     })
@@ -428,9 +502,28 @@ const live: Layer.Layer<
               (ctrl) => Effect.sync(() => ctrl.abort()),
             )
 
-            const result = yield* run({ ...input, abort: ctrl.signal })
+            // kilocode_change start - ADR 0005: dispatch a custom auto router this CLI can serve
+            const routing: { current?: { providerID: string; modelID: string } } = {}
+            const stamp = (event: LLMEvent) =>
+              routing.current ? KiloRoutedModel.stamp(event, routing.current) : event
+            const mark = (events: Stream.Stream<LLMEvent, unknown>): Stream.Stream<LLMEvent, unknown> =>
+              events.pipe(Stream.map(stamp))
+            const routed = yield* route(input)
+            if (routed) routing.current = { providerID: routed.model.providerID, modelID: routed.model.id }
+            const request: StreamInput = routed
+              ? {
+                  ...input,
+                  model: routed.model,
+                  user: routed.variant
+                    ? { ...input.user, model: { ...input.user.model, variant: routed.variant } }
+                    : input.user,
+                }
+              : input
+            // kilocode_change end
 
-            if (result.type === "native") return result.stream
+            const result = yield* run({ ...request, abort: ctrl.signal }) // kilocode_change - ADR 0005 dispatch the routed model
+
+            if (result.type === "native") return mark(result.stream) // kilocode_change - ADR 0005 stamp the routed model
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
@@ -439,7 +532,14 @@ const live: Layer.Layer<
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+              // kilocode_change start - emit structural diagnostics when the AI SDK
+              // rejects the assembled ModelMessage[] before dispatch (#13185)
+              Stream.tapError((e) =>
+                Effect.sync(() => KiloMessageDiagnostics.reportModelMessageError(e, result.messages)),
+              ),
+              // kilocode_change end
               Stream.flatMap((events) => Stream.fromIterable(events)),
+              Stream.map(stamp), // kilocode_change - ADR 0005 stamp the routed model
             )
           }),
         ),
@@ -449,24 +549,24 @@ const live: Layer.Layer<
   }),
 )
 
-export const layer = live.pipe(Layer.provide(Permission.defaultLayer))
-
-export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(
-    Layer.provide(Auth.defaultLayer),
-    Layer.provide(Config.defaultLayer),
-    Layer.provide(Provider.defaultLayer),
-    Layer.provide(Plugin.defaultLayer),
-    Layer.provide(
-      LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, WebSocketExecutor.layer))),
-    ),
-    Layer.provide(RuntimeFlags.defaultLayer),
-  ),
-)
-
 // kilocode_change start - session export stream observer
 export { normalizeUsageForExport, observeFullStreamForExport }
 // kilocode_change end
 export const hasToolCalls = LLMRequestPrep.hasToolCalls
+
+export const node = LayerNode.make({
+  service: Service,
+  layer: live,
+  deps: [
+    Auth.node,
+    Config.node,
+    Provider.node,
+    Plugin.node,
+    Permission.node,
+    EventV2Bridge.node,
+    llmClient,
+    RuntimeFlags.node,
+  ],
+})
 
 export * as LLM from "./llm"

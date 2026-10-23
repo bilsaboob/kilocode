@@ -1,5 +1,5 @@
 import type { GlobalEvent } from "@kilocode/sdk/v2"
-import type { EventSource } from "../../src/cli/cmd/tui/context/sdk"
+import type { EventSource } from "@opencode-ai/tui/context/sdk"
 
 export const worktree = "/tmp/opencode"
 export const directory = `${worktree}/packages/opencode`
@@ -69,7 +69,7 @@ export function createFetch(override?: FetchHandler) {
       case "/path":
         return json({ home: "", state: "", config: "", worktree, directory })
       case "/project/current":
-        return json({ id: "proj_test" })
+        return json({ id: "proj_test", worktree: "/tmp/project-root" }) // kilocode_change
       case "/provider":
         return json({ all: [], default: {}, connected: [] })
       // kilocode_change start

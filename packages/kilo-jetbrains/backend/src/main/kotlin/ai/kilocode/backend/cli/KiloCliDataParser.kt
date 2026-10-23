@@ -1,54 +1,94 @@
 package ai.kilocode.backend.cli
 
 import ai.kilocode.backend.workspace.CommandInfo
+import ai.kilocode.backend.workspace.ModelAutoRoutingInfo
+import ai.kilocode.backend.workspace.ModelCacheCostInfo
+import ai.kilocode.backend.workspace.ModelCapabilitiesInfo
+import ai.kilocode.backend.workspace.ModelCostInfo
 import ai.kilocode.backend.workspace.ModelInfo
+import ai.kilocode.backend.workspace.ModelInputCapabilitiesInfo
 import ai.kilocode.backend.workspace.ModelLimitInfo
+import ai.kilocode.backend.workspace.ModelOptionsInfo
+import ai.kilocode.backend.workspace.ModelTerminalBenchInfo
 import ai.kilocode.backend.workspace.ProviderData
 import ai.kilocode.backend.workspace.ProviderInfo
+import ai.kilocode.rpc.dto.AgentConfigDto
+import ai.kilocode.rpc.dto.BackgroundJobDto
+import ai.kilocode.rpc.dto.BoardMessageDto
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.CloudSessionDto
 import ai.kilocode.rpc.dto.CloudSessionListDto
+import ai.kilocode.rpc.dto.CommandDto
+import ai.kilocode.rpc.dto.CommandFileDto
+import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
-import ai.kilocode.rpc.dto.ConfigUpdateDto
+import ai.kilocode.rpc.dto.CompactionConfigDto
 import ai.kilocode.rpc.dto.CustomModelDto
 import ai.kilocode.rpc.dto.CustomProviderConfigDto
 import ai.kilocode.rpc.dto.CustomProviderSaveDto
 import ai.kilocode.rpc.dto.DiffFileDto
+import ai.kilocode.rpc.dto.EditorContextDto
 import ai.kilocode.rpc.dto.MessageDto
 import ai.kilocode.rpc.dto.MessageErrorDto
+import ai.kilocode.rpc.dto.MessageSummaryDto
 import ai.kilocode.rpc.dto.MessageTimeDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
+import ai.kilocode.rpc.dto.McpAuthEventDto
+import ai.kilocode.rpc.dto.McpAuthResultDto
+import ai.kilocode.rpc.dto.McpConfigDto
+import ai.kilocode.rpc.dto.McpOAuthDto
+import ai.kilocode.rpc.dto.McpStatusDto
+import ai.kilocode.rpc.dto.ModelAutoRoutingDto
+import ai.kilocode.rpc.dto.ModelCacheCostDto
+import ai.kilocode.rpc.dto.ModelCapabilitiesDto
+import ai.kilocode.rpc.dto.ModelCostDto
 import ai.kilocode.rpc.dto.ModelDto
+import ai.kilocode.rpc.dto.ModelInputCapabilitiesDto
 import ai.kilocode.rpc.dto.ModelLimitDto
+import ai.kilocode.rpc.dto.ModelOptionsDto
 import ai.kilocode.rpc.dto.ModelSelectionDto
 import ai.kilocode.rpc.dto.ModelStateDto
+import ai.kilocode.rpc.dto.ModelTerminalBenchDto
 import ai.kilocode.rpc.dto.PartDto
 import ai.kilocode.rpc.dto.PartSourceDto
 import ai.kilocode.rpc.dto.PartSourceTextDto
+import ai.kilocode.rpc.dto.ToolApprovalDto
 import ai.kilocode.rpc.dto.PermissionAlwaysRulesDto
 import ai.kilocode.rpc.dto.PermissionFileDiffDto
 import ai.kilocode.rpc.dto.PermissionReplyDto
 import ai.kilocode.rpc.dto.PermissionRequestDto
+import ai.kilocode.rpc.dto.PermissionConfigDto
 import ai.kilocode.rpc.dto.ProviderAuthMethodDto
 import ai.kilocode.rpc.dto.ProviderAuthOptionDto
 import ai.kilocode.rpc.dto.ProviderAuthPromptDto
 import ai.kilocode.rpc.dto.ProviderMetadataDto
 import ai.kilocode.rpc.dto.ProviderSettingsProviderDto
 import ai.kilocode.rpc.dto.PartTimeDto
+import ai.kilocode.rpc.dto.PermissionRuleDto
+import ai.kilocode.rpc.dto.PermissionRuleDecisionDto
 import ai.kilocode.rpc.dto.PromptDto
 import ai.kilocode.rpc.dto.PromptPartDto
 import ai.kilocode.rpc.dto.QuestionInfoDto
 import ai.kilocode.rpc.dto.QuestionOptionDto
 import ai.kilocode.rpc.dto.QuestionReplyDto
 import ai.kilocode.rpc.dto.QuestionRequestDto
+import ai.kilocode.rpc.dto.RetentionConfigDto
+import ai.kilocode.rpc.dto.SessionChangeDto
+import ai.kilocode.rpc.dto.SessionChangeKindDto
+import ai.kilocode.rpc.dto.SessionBoardDto
 import ai.kilocode.rpc.dto.SessionDto
+import ai.kilocode.rpc.dto.SessionRevertDto
+import ai.kilocode.rpc.dto.SessionShareDto
 import ai.kilocode.rpc.dto.SessionStatusDto
 import ai.kilocode.rpc.dto.SessionSummaryDto
 import ai.kilocode.rpc.dto.SessionTimeDto
+import ai.kilocode.rpc.dto.SkillDto
+import ai.kilocode.rpc.dto.SkillsConfigDto
 import ai.kilocode.rpc.dto.TodoDto
 import ai.kilocode.rpc.dto.TodoViewDto
 import ai.kilocode.rpc.dto.TokensDto
 import ai.kilocode.rpc.dto.ToolRefDto
+import ai.kilocode.rpc.dto.WatcherConfigDto
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -87,6 +127,7 @@ object KiloCliDataParser {
     private val READ_TOOL_LINE = Regex("^\\s*Called\\s+the\\s+Read\\s+tool\\s+with\\s+the\\s+following\\s+input:", RegexOption.IGNORE_CASE)
     private val READ_TOOL_PATH = Regex("\"(?:filePath|path)\"\\s*:")
     private val FIELD_RE = ConcurrentHashMap<String, Regex>()
+    private val APPROVAL_SOURCES = setOf("agent", "global", "project", "yolo", "session", "manual", "default")
 
     // ================================================================
     // SSE event parsing
@@ -221,6 +262,12 @@ object KiloCliDataParser {
                 ChatEventDto.SessionIdle(sid)
             }
 
+            "session.queue.changed" -> {
+                val sid = props.str("sessionID") ?: return null
+                val queued = props["queued"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+                ChatEventDto.SessionQueueChanged(sid, queued)
+            }
+
             "session.compacted" -> {
                 val sid = props.str("sessionID") ?: return null
                 ChatEventDto.SessionCompacted(sid)
@@ -228,16 +275,7 @@ object KiloCliDataParser {
 
             "session.diff" -> {
                 val sid = props.str("sessionID") ?: return null
-                val diffs = props["diff"]?.jsonArray?.mapNotNull { elem ->
-                    val d = elem.jsonObject
-                    val file = d.str("file") ?: return@mapNotNull null
-                    DiffFileDto(
-                        file = file,
-                        additions = d.long("additions")?.safeInt() ?: 0,
-                        deletions = d.long("deletions")?.safeInt() ?: 0,
-                        patch = d.str("patch"),
-                    )
-                } ?: emptyList()
+                val diffs = parseDiffs(props["diff"])
                 ChatEventDto.SessionDiffChanged(sid, diffs)
             }
 
@@ -346,6 +384,29 @@ object KiloCliDataParser {
         return id to parseStatus(st)
     }
 
+    /**
+     * Parse an SSE `session.created` / `session.updated` / `session.deleted` event into a
+     * [SessionChangeDto]. All three carry the full session `info`, which is where the directory
+     * comes from. Returns null for any other type, or when there is no id or directory to act on.
+     */
+    fun parseSessionChange(type: String, data: String): SessionChangeDto? {
+        val kind = when (type) {
+            "session.created" -> SessionChangeKindDto.CREATED
+            "session.updated" -> SessionChangeKindDto.UPDATED
+            "session.deleted" -> SessionChangeKindDto.DELETED
+            else -> return null
+        }
+        val obj = tryParseObject(data) ?: return null
+        val payload = obj["payload"]?.jsonObject ?: obj
+        val props = payload["properties"]?.jsonObject ?: obj
+        val info = props["info"]?.jsonObject
+        val id = props.str("sessionID")?.takeIf { it.isNotBlank() }
+            ?: info?.str("id")?.takeIf { it.isNotBlank() }
+            ?: return null
+        val dir = info?.str("directory")?.takeIf { it.isNotBlank() } ?: return null
+        return SessionChangeDto(id, dir, kind)
+    }
+
     // ================================================================
     // HTTP response parsing
     // ================================================================
@@ -356,6 +417,76 @@ object KiloCliDataParser {
     fun parseSession(raw: String): SessionDto {
         val obj = json.parseToJsonElement(raw).jsonObject
         return parseSessionObject(obj)
+    }
+
+    /**
+     * Parse a shared agent board response
+     * (`GET`/`POST /kilocode/session/{id}/board[/reset]`) into [SessionBoardDto]. A message row
+     * missing `id`/`from`/`to`/`type`/`body` is dropped rather than failing the whole board, so one
+     * malformed row does not hide the rest.
+     */
+    fun parseSessionBoard(raw: String): SessionBoardDto {
+        val obj = json.parseToJsonElement(raw).jsonObject
+        val messages = obj["messages"].arr().orEmpty().mapNotNull { elem ->
+            val row = elem.obj() ?: return@mapNotNull null
+            val id = row.str("id") ?: return@mapNotNull null
+            val from = row.str("from") ?: return@mapNotNull null
+            val to = row.str("to") ?: return@mapNotNull null
+            val type = row.str("type") ?: return@mapNotNull null
+            val body = row.str("body") ?: return@mapNotNull null
+            BoardMessageDto(
+                id = id,
+                timestamp = row.long("timestamp") ?: 0L,
+                from = from,
+                to = to,
+                fromLabel = row.str("fromLabel"),
+                toLabel = row.str("toLabel"),
+                type = type,
+                body = body,
+                reply_to = row.str("reply_to"),
+            )
+        }
+        return SessionBoardDto(
+            ownerSessionID = obj.str("ownerSessionID").orEmpty(),
+            revision = obj.long("revision")?.safeInt() ?: 0,
+            messages = messages,
+            cursor = obj.str("cursor"),
+            hasMore = obj.bool("hasMore"),
+        )
+    }
+
+    /**
+     * Parse a background-jobs list response (`GET /kilocode/background-jobs`) into
+     * [BackgroundJobDto]s, flattening the open `metadata` map's `sessionId`/`parentSessionId`/
+     * `background` keys into typed fields. A row missing `id`/`type`/`status` is dropped rather
+     * than failing the whole list.
+     *
+     * `started_at`/`completed_at` normally arrive as numbers, but the generated SDK types widen them
+     * to `"NaN"`/`"Infinity"`/`"-Infinity"` strings — [JsonObject.num] parses both via
+     * [String.toDoubleOrNull], and a non-finite result falls back to the given default rather than a
+     * garbage [Long].
+     */
+    fun parseBackgroundJobs(raw: String): List<BackgroundJobDto> {
+        val arr = tryParseArray(raw) ?: return emptyList()
+        return arr.mapNotNull { elem ->
+            val row = elem.obj() ?: return@mapNotNull null
+            val id = row.str("id") ?: return@mapNotNull null
+            val type = row.str("type") ?: return@mapNotNull null
+            val status = row.str("status") ?: return@mapNotNull null
+            val metadata = row["metadata"].obj()
+            BackgroundJobDto(
+                id = id,
+                type = type,
+                status = status,
+                title = row.str("title"),
+                startedAt = row.num("started_at")?.takeIf { it.isFinite() }?.toLong() ?: 0L,
+                completedAt = row.num("completed_at")?.takeIf { it.isFinite() }?.toLong(),
+                error = row.str("error"),
+                sessionId = metadata?.str("sessionId"),
+                parentSessionId = metadata?.str("parentSessionId"),
+                background = metadata.bool("background"),
+            )
+        }
     }
 
     /**
@@ -485,6 +616,141 @@ object KiloCliDataParser {
     }
 
     /**
+     * Parse the `/global/config` response body into a [ConfigDto]. Tolerant of
+     * the discriminated MCP union and the `env`/`environment` alias. Never
+     * throws on malformed input so a bad config cannot block startup.
+     */
+    fun parseConfig(raw: String): ConfigDto = runCatching {
+        val obj = tryParseObject(raw) ?: return ConfigDto()
+        ConfigDto(
+            model = obj.str("model"),
+            smallModel = obj.str("small_model"),
+            subagentModel = obj.str("subagent_model"),
+            subagentVariant = obj.str("subagent_variant"),
+            defaultAgent = obj.str("default_agent"),
+            watcher = parseWatcherConfig(obj["watcher"].obj()),
+            compaction = parseCompactionConfig(obj["compaction"].obj()),
+            instructions = obj["instructions"].arr()
+                ?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+                ?: emptyList(),
+            skills = parseSkillsConfig(obj["skills"].obj()),
+            mcp = parseMcpConfig(obj["mcp"].obj()),
+            agent = parseAgentConfig(obj["agent"].obj()),
+            permission = parsePermissionConfig(obj["permission"].obj()),
+            shared_agent_board = runCatching { obj.flagOrNull("shared_agent_board") }.getOrNull(),
+            snapshot = runCatching { obj.flagOrNull("snapshot") }.getOrNull(),
+            retention = obj["retention"].obj()?.let { retention ->
+                RetentionConfigDto(
+                    enabled = runCatching { retention.flagOrNull("enabled") }.getOrNull(),
+                    maxAgeDays = runCatching { retention.long("maxAgeDays") }.getOrNull()
+                        ?.takeIf { it in 1..Int.MAX_VALUE }
+                        ?.toInt(),
+                )
+            },
+        )
+    }.getOrDefault(ConfigDto())
+
+    private fun parseWatcherConfig(obj: JsonObject?): WatcherConfigDto? {
+        if (obj == null) return null
+        return WatcherConfigDto(
+            ignore = obj["ignore"].arr()
+                ?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+                ?: emptyList(),
+        )
+    }
+
+    private fun parseCompactionConfig(obj: JsonObject?): CompactionConfigDto? {
+        if (obj == null) return null
+        return CompactionConfigDto(
+            auto = runCatching { obj.flagOrNull("auto") }.getOrNull(),
+            threshold_percent = runCatching { obj.num("threshold_percent") }.getOrNull(),
+            prune = runCatching { obj.flagOrNull("prune") }.getOrNull(),
+        )
+    }
+
+    private fun parseSkillsConfig(obj: JsonObject?): SkillsConfigDto? {
+        if (obj == null) return null
+        return SkillsConfigDto(
+            paths = obj["paths"].arr()
+                ?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+                ?: emptyList(),
+            urls = obj["urls"].arr()
+                ?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+                ?: emptyList(),
+        )
+    }
+
+    private fun parseMcpConfig(obj: JsonObject?): Map<String, McpConfigDto> {
+        if (obj == null) return emptyMap()
+        return obj.entries.mapNotNull { (name, elem) ->
+            val item = elem.obj() ?: return@mapNotNull null
+            name to McpConfigDto(
+                type = item.str("type"),
+                command = item["command"].arr()
+                    ?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+                    ?.takeIf { it.isNotEmpty() },
+                url = item.str("url"),
+                environment = item.map("environment").takeIf { it.isNotEmpty() }
+                    ?: item.map("env").takeIf { it.isNotEmpty() },
+                headers = item.map("headers").takeIf { it.isNotEmpty() },
+                enabled = item.flagOrNull("enabled"),
+                timeout = item.long("timeout"),
+                oauth = parseMcpOAuth(item["oauth"]),
+            )
+        }.toMap()
+    }
+
+    private fun parseMcpOAuth(elem: JsonElement?): McpOAuthDto? {
+        if (elem == null || elem is JsonNull) return null
+        runCatching { elem.jsonPrimitive.booleanOrNull }.getOrNull()?.let { return McpOAuthDto(enabled = it) }
+        val obj = elem.obj() ?: return null
+        return McpOAuthDto(
+            enabled = true,
+            clientId = obj.str("clientId"),
+            clientSecret = obj.str("clientSecret"),
+            scope = obj.str("scope"),
+            callbackPort = obj.long("callbackPort")?.toInt(),
+            redirectUri = obj.str("redirectUri"),
+        )
+    }
+
+    private fun parseAgentConfig(obj: JsonObject?): Map<String, AgentConfigDto> {
+        if (obj == null) return emptyMap()
+        return obj.entries.mapNotNull { (name, elem) ->
+            val item = elem.obj() ?: return@mapNotNull null
+            name to AgentConfigDto(
+                model = item.str("model"),
+                variant = item.str("variant"),
+                prompt = item.str("prompt"),
+                description = item.str("description"),
+                mode = item.str("mode"),
+                hidden = item.flagOrNull("hidden"),
+                disable = item.flagOrNull("disable"),
+                temperature = item.num("temperature"),
+                top_p = item.num("top_p"),
+                steps = item.long("steps"),
+                permission = parsePermissionConfig(item["permission"].obj()),
+            )
+        }.toMap()
+    }
+
+    private fun parsePermissionConfig(obj: JsonObject?): PermissionConfigDto? {
+        if (obj == null) return null
+        return obj.entries.mapNotNull { (tool, rule) ->
+            val value = when (rule) {
+                is JsonNull -> PermissionRuleDto.Level(null)
+                is JsonObject -> PermissionRuleDto.Patterns(
+                    rule.entries.mapNotNull { (pattern, level) ->
+                        pattern to level.scalar()
+                    }.toMap()
+                )
+                else -> PermissionRuleDto.Level(rule.scalar())
+            }
+            tool to value
+        }.toMap().takeIf { it.isNotEmpty() }
+    }
+
+    /**
      * Parse a command list response (`GET /command`) into a list of [CommandInfo].
      * The `template` field is intentionally ignored — CLI commands can return lazy
      * promise objects (`{}`) for that field, which must not crash JetBrains startup.
@@ -495,10 +761,144 @@ object KiloCliDataParser {
             CommandInfo(
                 name = obj.str("name") ?: "",
                 description = obj.str("description"),
+                agent = obj.str("agent"),
+                model = obj.str("model"),
+                variant = obj.str("variant"),
                 source = obj.str("source"),
                 hints = obj["hints"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+                subtask = obj.flagOrNull("subtask"),
             )
         }
+
+    fun parseAgentRemovable(raw: String): Map<String, Boolean> =
+        raw.array().mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            name to removable(obj)
+        }.toMap()
+
+    fun parseAgentBehaviorSkills(raw: String): List<SkillDto> =
+        raw.array().mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            val location = obj.str("location") ?: return@mapNotNull null
+            SkillDto(
+                name = name,
+                description = obj.str("description"),
+                location = location,
+                content = obj.str("content"),
+            )
+        }
+
+    fun parseAgentBehaviorCommands(raw: String): List<CommandDto> =
+        raw.array().mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            CommandDto(
+                name = name,
+                description = obj.str("description"),
+                agent = obj.str("agent"),
+                model = obj.str("model"),
+                variant = obj.str("variant"),
+                source = obj.str("source"),
+                hints = obj["hints"].arr()?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+                template = obj.str("template"),
+                subtask = obj.flagOrNull("subtask"),
+            )
+        }
+
+    fun parseAgentBehaviorCommandFiles(raw: String): List<CommandFileDto> =
+        raw.array().mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            val location = obj.str("location") ?: return@mapNotNull null
+            CommandFileDto(
+                name = name,
+                description = obj.str("description"),
+                agent = obj.str("agent"),
+                model = obj.str("model"),
+                variant = obj.str("variant"),
+                source = obj.str("source"),
+                builtin = obj.bool("builtin"),
+                location = location,
+                editable = obj.bool("editable"),
+                content = obj.str("content"),
+                subtask = obj.flagOrNull("subtask"),
+                hints = obj["hints"].arr()?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+            )
+        }
+
+    fun parseMcpStatus(raw: String): List<McpStatusDto> {
+        val root = runCatching { json.parseToJsonElement(raw) }.getOrNull() ?: return emptyList()
+        return when (root) {
+            is JsonArray -> root.mapNotNull { mcpStatus(it) }
+            is JsonObject -> root.mapNotNull { (name, item) -> mcpStatus(item, name) }
+            else -> emptyList()
+        }
+    }
+
+    fun parseMcpAuthResult(code: Int, raw: String): McpAuthResultDto {
+        val obj = tryParseObject(raw)
+        if (code in 200..299) {
+            return McpAuthResultDto(status = obj?.str("status") ?: "failed", error = obj?.str("error"))
+        }
+        val status = when (code) {
+            400 -> "unsupported"
+            404 -> "not_found"
+            else -> "failed"
+        }
+        return McpAuthResultDto(status = status, error = obj?.str("error") ?: obj?.str("message") ?: "HTTP $code")
+    }
+
+    /**
+     * Parses the `{ mcpName, url }` payload shared by `mcp.auth.url` and `mcp.browser.open.failed`.
+     *
+     * [external] marks the `mcp.auth.url` variant, where opening the URL is the client's job.
+     */
+    fun parseMcpAuthEvent(raw: String, external: Boolean = false): McpAuthEventDto? {
+        val obj = tryParseObject(raw) ?: return null
+        val payload = obj["payload"]?.jsonObject ?: obj
+        val props = payload["properties"]?.jsonObject ?: obj
+        val name = props.str("mcpName") ?: return null
+        val url = props.str("url") ?: return null
+        return McpAuthEventDto(name = name, url = url, external = external)
+    }
+
+    private fun String.array(): JsonArray {
+        val root = runCatching { json.parseToJsonElement(this) }.getOrNull()
+        return when (root) {
+            is JsonArray -> root
+            is JsonObject -> root["data"] as? JsonArray ?: JsonArray(emptyList())
+            else -> JsonArray(emptyList())
+        }
+    }
+
+    /**
+     * The status is taken verbatim from the CLI.
+     *
+     * Classifying a transport failure as "sign-in required" belongs to the CLI, which does it once
+     * in `packages/opencode/src/kilocode/mcp/auth-failure.ts` and reports `needs_auth` directly —
+     * including for a rejected browser flow, a failed token exchange, and HTTP 401/403 rejections.
+     * Re-deriving that here from the human-readable `error` text would duplicate the rules and drift
+     * from them, so the plugin only reads the structured field.
+     */
+    private fun mcpStatus(item: JsonElement, fallback: String? = null): McpStatusDto? {
+        val obj = item.obj() ?: return null
+        val name = obj.str("name") ?: fallback ?: return null
+        return McpStatusDto(
+            name = name,
+            status = obj.str("status") ?: obj.str("state") ?: "unknown",
+            error = obj.str("error"),
+        )
+    }
+
+    private fun removable(obj: JsonObject): Boolean {
+        if (obj.flagOrNull("native") == true) return false
+        val opts = obj["options"].obj()
+        if (obj.str("source") == "organization" || opts?.str("source") == "organization") return false
+        if (opts?.containsKey("reference") == true || opts?.containsKey("resolved") == true) return false
+        return true
+    }
 
     /**
      * Extract the `state` directory path from a `/path` response.
@@ -506,6 +906,16 @@ object KiloCliDataParser {
      */
     fun parsePathState(raw: String): String? {
         val prim = runCatching { tryParseObject(raw)?.get("state")?.jsonPrimitive }.getOrNull() ?: return null
+        return if (prim.isString) prim.content else null
+    }
+
+    fun parsePathConfig(raw: String): String? {
+        val prim = runCatching { tryParseObject(raw)?.get("config")?.jsonPrimitive }.getOrNull() ?: return null
+        return if (prim.isString) prim.content else null
+    }
+
+    fun parsePathHome(raw: String): String? {
+        val prim = runCatching { tryParseObject(raw)?.get("home")?.jsonPrimitive }.getOrNull() ?: return null
         return if (prim.isString) prim.content else null
     }
 
@@ -578,9 +988,26 @@ object KiloCliDataParser {
         if (variant != null) {
             sb.append(""","variant":${escape(variant)}""")
         }
+        val editor = prompt.editorContext
+        if (editor != null) {
+            sb.append(""","editorContext":${editorContextJson(editor)}""")
+        }
         sb.append("}")
         return sb.toString()
     }
+
+    private fun editorContextJson(ctx: EditorContextDto): String {
+        val fields = mutableListOf<String>()
+        ctx.directory?.let { fields += "\"directory\":${escape(it)}" }
+        ctx.worktree?.let { fields += "\"worktree\":${escape(it)}" }
+        ctx.visibleFiles?.takeIf { it.isNotEmpty() }?.let { fields += "\"visibleFiles\":${array(it)}" }
+        ctx.openTabs?.takeIf { it.isNotEmpty() }?.let { fields += "\"openTabs\":${array(it)}" }
+        ctx.activeFile?.let { fields += "\"activeFile\":${escape(it)}" }
+        ctx.shell?.let { fields += "\"shell\":${escape(it)}" }
+        return "{${fields.joinToString(",")}}"
+    }
+
+    private fun array(values: List<String>): String = values.joinToString(",", "[", "]") { escape(it) }
 
     private fun buildPromptPartJson(part: PromptPartDto): String {
         val fields = mutableListOf("\"type\":${escape(part.type)}")
@@ -592,14 +1019,27 @@ object KiloCliDataParser {
             return "{${fields.joinToString(",")}}"
         }
         fields += "\"text\":${escape(part.text.orEmpty())}"
+        if (part.synthetic == true) fields += "\"synthetic\":true"
         return "{${fields.joinToString(",")}}"
     }
+
+    /** Body for `POST /session/{id}/fork`. A whole-session fork sends no body at all; see the caller. */
+    fun buildForkJson(messageId: String): String = """{"messageID":${escape(messageId)}}"""
+
+    /** Body for `POST /kilocode/session/{id}/board/reset`. */
+    fun buildResetSessionBoardJson(revision: Int): String = """{"revision":$revision}"""
 
     /**
      * Build the JSON body for `POST /session/{id}/summarize`.
      */
     fun buildSummarizeJson(model: ModelSelectionDto): String =
         """{"providerID":${escape(model.providerID)},"modelID":${escape(model.modelID)}}"""
+
+    fun buildRevertJson(messageID: String, partID: String?): String {
+        val fields = mutableListOf("\"messageID\":${escape(messageID)}")
+        partID?.let { fields += "\"partID\":${escape(it)}" }
+        return "{${fields.joinToString(",")}}"
+    }
 
     fun buildCommandJson(command: String, args: String, prompt: PromptDto): String {
         val fields = mutableListOf(
@@ -619,54 +1059,132 @@ object KiloCliDataParser {
         return "{${fields.joinToString(",")}}"
     }
 
-    /**
-     * Build the partial JSON body for `PATCH /global/config`.
-     */
-    fun buildConfigPartial(update: ConfigUpdateDto): String {
-        val sb = StringBuilder("{")
-        var first = true
-        fun sep() { if (!first) sb.append(","); first = false }
+    fun buildConfigPatch(patch: ConfigPatchDto): String {
+        val allowed = setOf("model", "small_model", "subagent_model", "subagent_variant", "default_agent")
+        val obj = buildJsonObject {
+            for ((key, value) in patch.values) {
+                if (key !in allowed) continue
+                put(key, value?.let(::JsonPrimitive) ?: JsonNull)
+            }
 
-        val model = update.model
-        if (model != null) {
-            sep(); sb.append(""""model":${escape(model)}""")
+            val instructions = patch.instructions
+            if (instructions != null) put("instructions", JsonArray(instructions.map(::JsonPrimitive)))
+
+            val watcher = patch.watcher
+            if (watcher != null) {
+                put("watcher", buildJsonObject {
+                    val ignore = watcher.ignore
+                    if (ignore != null) put("ignore", JsonArray(ignore.map(::JsonPrimitive)))
+                })
+            }
+
+            val compaction = patch.compaction
+            if (compaction != null) {
+                put("compaction", buildJsonObject {
+                    for (field in compaction.clear) put(field, JsonNull)
+                    if (compaction.auto != null) put("auto", compaction.auto)
+                    if (compaction.threshold_percent != null) put("threshold_percent", compaction.threshold_percent)
+                    if (compaction.prune != null) put("prune", compaction.prune)
+                })
+            }
+
+            val skills = patch.skills
+            if (skills != null) {
+                put("skills", buildJsonObject {
+                    val paths = skills.paths
+                    if (paths != null) put("paths", JsonArray(paths.map(::JsonPrimitive)))
+                    val urls = skills.urls
+                    if (urls != null) put("urls", JsonArray(urls.map(::JsonPrimitive)))
+                })
+            }
+
+            val mcp = patch.mcp
+            if (mcp != null) {
+                put("mcp", buildJsonObject {
+                    for ((name, cfg) in mcp) put(name, cfg?.let {
+                        buildJsonObject {
+                            if (it.type != null) put("type", it.type)
+                            val command = it.command
+                            if (command != null) put("command", JsonArray(command.map(::JsonPrimitive)))
+                            if (it.url != null) put("url", it.url)
+                            if (it.environment != null) {
+                                put("environment", buildJsonObject {
+                                    for ((key, value) in it.environment) put(key, value)
+                                })
+                            }
+                            if (it.headers != null) {
+                                put("headers", buildJsonObject {
+                                    for ((key, value) in it.headers) put(key, value)
+                                })
+                            }
+                            if (it.enabled != null) put("enabled", it.enabled)
+                            if (it.timeout != null) put("timeout", it.timeout)
+                            val oauth = it.oauth
+                            when {
+                                oauth == null -> Unit
+                                oauth.clear -> put("oauth", JsonNull)
+                                oauth.enabled == false -> put("oauth", JsonPrimitive(false))
+                                // The config schema deep-merges on PATCH, so an omitted key keeps
+                                // its old value on disk. A field the user cleared therefore has to
+                                // be written as an explicit null sentinel or the previous client
+                                // id/secret/scope survives and is reused after a restart.
+                                else -> put("oauth", buildJsonObject {
+                                    put("clientId", oauth.clientId?.let(::JsonPrimitive) ?: JsonNull)
+                                    put("clientSecret", oauth.clientSecret?.let(::JsonPrimitive) ?: JsonNull)
+                                    put("scope", oauth.scope?.let(::JsonPrimitive) ?: JsonNull)
+                                    put("callbackPort", oauth.callbackPort?.let(::JsonPrimitive) ?: JsonNull)
+                                    put("redirectUri", oauth.redirectUri?.let(::JsonPrimitive) ?: JsonNull)
+                                })
+                            }
+                        }
+                    } ?: JsonNull)
+                })
+            }
+
+            val permission = patch.permission
+            if (permission != null) put("permission", buildPermission(permission))
+
+            if (patch.shared_agent_board != null) put("shared_agent_board", patch.shared_agent_board)
+            if (patch.snapshot != null) put("snapshot", patch.snapshot)
+            val retention = patch.retention
+            if (retention != null) put("retention", buildJsonObject {
+                if (retention.enabled != null) put("enabled", retention.enabled)
+                if (retention.maxAgeDays != null) put("maxAgeDays", retention.maxAgeDays)
+            })
+
+            if (patch.agents.isNotEmpty()) {
+                put("agent", buildJsonObject {
+                    for ((name, agent) in patch.agents) put(name, buildJsonObject {
+                        for (field in agent.clear) put(field, JsonNull)
+                        if (agent.model != null) put("model", agent.model)
+                        if (agent.variant != null) put("variant", agent.variant)
+                        if (agent.prompt != null) put("prompt", agent.prompt)
+                        if (agent.description != null) put("description", agent.description)
+                        if (agent.mode != null) put("mode", agent.mode)
+                        if (agent.hidden != null) put("hidden", agent.hidden)
+                        if (agent.disable != null) put("disable", agent.disable)
+                        if (agent.temperature != null) put("temperature", agent.temperature)
+                        if (agent.top_p != null) put("top_p", agent.top_p)
+                        if (agent.steps != null) put("steps", agent.steps)
+                        val permission = agent.permission
+                        if (permission != null) put("permission", buildPermission(permission))
+                    })
+                })
+            }
         }
-        val agent = update.agent
-        if (agent != null) {
-            sep(); sb.append(""""default_agent":${escape(agent)}""")
-        }
-        val temp = update.temperature
-        if (temp != null) {
-            val target = agent ?: "ask"
-            sep(); sb.append(""""agent":{"$target":{"temperature":$temp}}""")
-        }
-        sb.append("}")
-        return sb.toString()
+
+        return json.encodeToString(JsonObject.serializer(), obj)
     }
 
-    fun buildConfigPatch(patch: ConfigPatchDto): String {
-        val allowed = setOf("model", "small_model", "subagent_model", "subagent_variant")
-        val sb = StringBuilder("{")
-        var first = true
-        fun sep() { if (!first) sb.append(","); first = false }
-        fun value(value: String?) = value?.let(::escape) ?: "null"
-
-        for ((key, value) in patch.values) {
-            if (key !in allowed) continue
-            sep(); sb.append("\"$key\":${value(value)}")
-        }
-
-        if (patch.agents.isNotEmpty()) {
-            sep(); sb.append("\"agent\":{")
-            patch.agents.entries.forEachIndexed { idx, (name, agent) ->
-                if (idx > 0) sb.append(",")
-                sb.append("${escape(name)}:{\"model\":${value(agent.model)}}")
+    private fun buildPermission(permission: Map<String, PermissionRuleDto>) = buildJsonObject {
+        for ((tool, rule) in permission) {
+            when (rule) {
+                is PermissionRuleDto.Level -> put(tool, rule.value?.let(::JsonPrimitive) ?: JsonNull)
+                is PermissionRuleDto.Patterns -> put(tool, buildJsonObject {
+                    for ((pattern, level) in rule.map) put(pattern, level?.let(::JsonPrimitive) ?: JsonNull)
+                })
             }
-            sb.append("}")
         }
-
-        sb.append("}")
-        return sb.toString()
     }
 
     fun buildProviderAuthJson(key: String, metadata: Map<String, String>): String {
@@ -694,19 +1212,42 @@ object KiloCliDataParser {
         return json.encodeToString(JsonObject.serializer(), obj)
     }
 
+    fun buildMcpOverlayPatch(name: String, scope: String, config: McpConfigDto?): String = buildJsonObject {
+        put("scope", if (scope == "workspace") "project" else "global")
+        if (config == null) {
+            put("unset", buildJsonArray {
+                add(buildJsonArray {
+                    add(JsonPrimitive("mcp"))
+                    add(JsonPrimitive(name))
+                })
+            })
+            return@buildJsonObject
+        }
+        put("set", json.parseToJsonElement(buildConfigPatch(ConfigPatchDto(mcp = mapOf(name to config)))))
+    }.toString()
+
     fun buildDisabledProviderPatch(ids: List<String>): String {
         val arr = JsonArray(ids.distinct().sorted().map { JsonPrimitive(it) })
         return json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("disabled_providers" to arr)))
     }
 
-    fun buildCustomProviderPatch(input: CustomProviderSaveDto): String {
+    /**
+     * [removedModelIds] are previously configured model IDs no longer present in [input.models].
+     * The config schema deep-merges provider objects on PATCH, so a removed model key must be
+     * emitted as an explicit `null` sentinel or it survives on disk under the old id forever
+     * (visible again after a restart).
+     */
+    fun buildCustomProviderPatch(input: CustomProviderSaveDto, removedModelIds: Set<String> = emptySet()): String {
         val id = input.id.trim()
         val env = input.envVar?.trim()?.takeIf { it.isNotBlank() }
-        val models = input.models.associate { model ->
-            model.id to buildJsonObject {
-                put("id", model.id)
-                put("name", model.name.ifBlank { model.id })
-                put("capabilities", buildJsonObject { put("reasoning", model.reasoning) })
+        val models = buildJsonObject {
+            removedModelIds.forEach { removedId -> put(removedId, JsonNull) }
+            input.models.forEach { model ->
+                put(model.id, buildJsonObject {
+                    put("id", model.id)
+                    put("name", model.name.ifBlank { model.id })
+                    put("capabilities", buildJsonObject { put("reasoning", model.reasoning) })
+                })
             }
         }
         val provider = buildJsonObject {
@@ -715,7 +1256,7 @@ object KiloCliDataParser {
             put("options", buildJsonObject { put("baseURL", input.baseUrl.trim()) })
             if (env != null) put("env", buildJsonArray { add(JsonPrimitive(env)) })
             if (input.headers.isNotEmpty()) put("headers", buildJsonObject { input.headers.forEach { (k, v) -> put(k, v) } })
-            if (models.isNotEmpty()) put("models", JsonObject(models))
+            if (models.isNotEmpty()) put("models", models)
         }
         val root = buildJsonObject {
             put("provider", buildJsonObject { put(id, provider) })
@@ -726,6 +1267,23 @@ object KiloCliDataParser {
     fun buildCustomProviderDeletePatch(id: String): String {
         val root = buildJsonObject {
             put("provider", buildJsonObject { put(id, JsonNull) })
+        }
+        return json.encodeToString(JsonObject.serializer(), root)
+    }
+
+    /**
+     * A models-only deletion patch for provider [id]. Used when the same custom provider id has a
+     * separate, independently-authored config entry in another scope (global vs. workspace) that
+     * still lists a model the primary save removed. Only nulls the given model keys; every other
+     * field on that scope's entry is left untouched by the deep-merge PATCH.
+     */
+    fun buildCustomProviderModelRemovalPatch(id: String, modelIds: Set<String>): String {
+        val root = buildJsonObject {
+            put("provider", buildJsonObject {
+                put(id, buildJsonObject {
+                    put("models", buildJsonObject { modelIds.forEach { put(it, JsonNull) } })
+                })
+            })
         }
         return json.encodeToString(JsonObject.serializer(), root)
     }
@@ -751,6 +1309,8 @@ object KiloCliDataParser {
         val time = obj["time"]?.jsonObject
         val tokens = obj["tokens"]?.jsonObject
         val error = obj["error"]?.jsonObject
+        val raw = obj["summary"].obj()?.get("diffs")
+        val summary = if (raw == null) null else MessageSummaryDto(parseDiffs(raw))
 
         return MessageDto(
             id = obj.str("id") ?: "",
@@ -766,8 +1326,25 @@ object KiloCliDataParser {
             parentID = obj.str("parentID"),
             cost = obj.num("cost"),
             tokens = tokens?.let(::parseTokens),
+            finish = obj.str("finish"),
             error = error?.let { parseError(it) },
+            summary = summary,
         )
+    }
+
+    private fun parseDiffs(raw: JsonElement?): List<DiffFileDto> {
+        val arr = raw.arr() ?: return emptyList()
+        return arr.mapNotNull { elem ->
+            val item = elem.obj() ?: return@mapNotNull null
+            val file = item.str("file") ?: return@mapNotNull null
+            DiffFileDto(
+                file = file,
+                additions = item.long("additions")?.safeInt() ?: 0,
+                deletions = item.long("deletions")?.safeInt() ?: 0,
+                patch = item.str("patch"),
+                status = item.str("status"),
+            )
+        }
     }
 
     internal fun parsePart(obj: JsonObject): PartDto {
@@ -783,6 +1360,9 @@ object KiloCliDataParser {
             ?: emptyList()
         val view = sequenceOf(topMeta?.get("view"), stateMeta?.get("view"))
             .mapNotNull(::parseTodoView)
+            .firstOrNull()
+        val approval = sequenceOf(stateMeta?.get("approval"), topMeta?.get("approval"))
+            .mapNotNull(::parseToolApproval)
             .firstOrNull()
         return PartDto(
             id = obj.str("id") ?: "",
@@ -801,6 +1381,7 @@ object KiloCliDataParser {
             title = state?.str("title"),
             input = state.map("input"),
             metadata = meta,
+            approval = approval,
             output = state?.str("output"),
             error = state?.str("error"),
             time = obj.time("time") ?: state.time("time"),
@@ -809,6 +1390,22 @@ object KiloCliDataParser {
             reason = obj.str("reason"),
             cost = obj.num("cost"),
             tokens = tokens?.let(::parseTokens),
+        )
+    }
+
+    private fun parseToolApproval(raw: JsonElement?): ToolApprovalDto? {
+        val obj = raw.obj() ?: return null
+        val source = obj.str("source") ?: return null
+        if (source !in APPROVAL_SOURCES) return null
+        val rule = obj["rule"].obj()
+        return ToolApprovalDto(
+            source = source,
+            agent = obj.str("agent"),
+            rulePermission = rule?.str("permission"),
+            rulePattern = rule?.str("pattern"),
+            ruleAction = rule?.str("action"),
+            outsideWorkspace = obj.flag("outsideWorkspace", false),
+            outsideWorkspacePath = obj.str("outsideWorkspacePath"),
         )
     }
 
@@ -907,6 +1504,8 @@ object KiloCliDataParser {
             msg,
             statusCode = data?.long("statusCode")?.safeInt(),
             responseBody = data?.str("responseBody"),
+            dataKeys = data?.keys?.sorted().orEmpty(),
+            ref = data?.str("ref"),
         )
     }
 
@@ -923,6 +1522,8 @@ object KiloCliDataParser {
         }?.toMap() ?: emptyMap()
         val path = metaObj.path()
         val diffs = metaObj.permissionDiffs(path)
+        val rawRules = metaObj.ruleDecisions()
+        val rules = rawRules.map { it.pattern }
         return PermissionRequestDto(
             id = id,
             sessionID = sid,
@@ -933,9 +1534,11 @@ object KiloCliDataParser {
             tool = toolRef(obj),
             message = obj.str("message") ?: metaObj?.str("message"),
             command = metaObj?.str("command") ?: obj.str("command"),
-            rules = metaObj.rules(),
+            rules = rules,
+            ruleDecisions = rawRules.ifEmpty { always.map { PermissionRuleDecisionDto(it) } },
             filePath = path,
             fileDiffs = diffs,
+            skillCommands = metaObj.skillCommands(),
         )
     }
 
@@ -1037,6 +1640,11 @@ object KiloCliDataParser {
         return ModelDto(
             id = model.id,
             name = model.name,
+            inputPrice = model.inputPrice,
+            outputPrice = model.outputPrice,
+            contextLength = model.contextLength,
+            releaseDate = model.releaseDate,
+            latest = model.latest,
             attachment = model.attachment,
             reasoning = model.reasoning,
             temperature = model.temperature,
@@ -1047,16 +1655,38 @@ object KiloCliDataParser {
             recommendedIndex = model.recommendedIndex,
             variants = model.variants,
             limit = model.limit?.let { ModelLimitDto(it.context, it.input, it.output) },
+            cost = model.cost?.let { cost ->
+                ModelCostDto(
+                    input = cost.input,
+                    output = cost.output,
+                    cache = cost.cache?.let { ModelCacheCostDto(it.read, it.write) },
+                )
+            },
+            capabilities = model.capabilities?.let { cap ->
+                ModelCapabilitiesDto(
+                    reasoning = cap.reasoning,
+                    input = cap.input?.let { ModelInputCapabilitiesDto(it.text, it.image, it.audio, it.video, it.pdf) },
+                )
+            },
+            options = model.options?.let { ModelOptionsDto(it.description) },
+            autoRouting = model.autoRouting?.let { ModelAutoRoutingDto(it.models) },
+            terminalBench = model.terminalBench?.let { ModelTerminalBenchDto(it.overallScore, it.avgAttemptCostUsd) },
             mayTrainOnYourPrompts = model.mayTrainOnYourPrompts,
         )
     }
 
     private fun parseModel(id: String, obj: JsonObject): ModelInfo {
-        val cap = obj["capabilities"]?.jsonObject
-        val limit = obj["limit"]?.jsonObject
+        val cap = obj["capabilities"].obj()
+        val limit = obj["limit"].obj()
+        val input = cap?.get("input").obj()
         return ModelInfo(
             id = obj.str("id") ?: id,
             name = obj.str("name") ?: id,
+            inputPrice = obj.num("inputPrice"),
+            outputPrice = obj.num("outputPrice"),
+            contextLength = obj.long("contextLength"),
+            releaseDate = obj.str("release_date"),
+            latest = null,
             attachment = cap.bool("attachment"),
             reasoning = cap.bool("reasoning"),
             temperature = cap.bool("temperature"),
@@ -1073,8 +1703,45 @@ object KiloCliDataParser {
                     output = it.long("output") ?: 0,
                 )
             },
+            cost = parseModelCost(obj["cost"]),
+            capabilities = ModelCapabilitiesInfo(
+                reasoning = cap.bool("reasoning"),
+                input = input?.let {
+                    ModelInputCapabilitiesInfo(
+                        text = it.bool("text"),
+                        image = it.bool("image"),
+                        audio = it.bool("audio"),
+                        video = it.bool("video"),
+                        pdf = it.bool("pdf"),
+                    )
+                },
+            ).takeUnless { !it.reasoning && it.input == null },
+            options = obj["options"].obj()?.str("description")?.let { ModelOptionsInfo(it) },
+            autoRouting = obj["autoRouting"].obj()?.get("models")?.arr()?.mapNotNull { it.jsonPrimitive.contentOrNull }?.let {
+                ModelAutoRoutingInfo(it)
+            },
+            terminalBench = parseTerminalBench(obj["terminalBench"]),
             mayTrainOnYourPrompts = obj.bool("mayTrainOnYourPrompts"),
         )
+    }
+
+    private fun parseModelCost(raw: JsonElement?): ModelCostInfo? {
+        val obj = raw.obj() ?: return null
+        val input = obj.num("input") ?: return null
+        val output = obj.num("output") ?: return null
+        val cache = obj["cache"].obj()?.let { cache ->
+            val read = cache.num("read") ?: return@let null
+            val write = cache.num("write") ?: return@let null
+            ModelCacheCostInfo(read, write)
+        }
+        return ModelCostInfo(input, output, cache)
+    }
+
+    private fun parseTerminalBench(raw: JsonElement?): ModelTerminalBenchInfo? {
+        val obj = raw.obj() ?: return null
+        val score = obj.num("overallScore") ?: return null
+        val cost = obj.num("avgAttemptCostUsd") ?: return null
+        return ModelTerminalBenchInfo(score, cost)
     }
 
     private fun parseVariants(obj: JsonObject): List<String> {
@@ -1133,7 +1800,78 @@ object KiloCliDataParser {
                     files = it.long("files")?.safeInt() ?: 0,
                 )
             },
+            revert = parseRevert(obj["revert"].obj()),
+            share = obj["share"].obj()?.str("url")?.takeIf { it.isNotBlank() }?.let(::SessionShareDto),
         )
+    }
+
+    private fun parseRevert(obj: JsonObject?): SessionRevertDto? {
+        if (obj == null) return null
+        val message = obj.str("messageID") ?: return null
+        val diff = obj.str("diff")
+        return SessionRevertDto(
+            messageID = message,
+            partID = obj.str("partID"),
+            snapshot = obj.str("snapshot"),
+            diff = diff,
+            diffs = parseUnifiedDiff(diff),
+            workspace = obj.str("workspace"),
+        )
+    }
+
+    private fun parseUnifiedDiff(diff: String?): List<DiffFileDto> {
+        if (diff.isNullOrBlank()) return emptyList()
+        val lines = diff.lines()
+        val starts = lines.mapIndexedNotNull { index, line -> if (line.startsWith("diff --git ")) index else null }
+        if (starts.isEmpty()) return emptyList()
+        return starts.mapIndexedNotNull { index, start ->
+            val end = starts.getOrNull(index + 1) ?: lines.size
+            parseUnifiedBlock(lines.subList(start, end).joinToString("\n"))
+        }
+    }
+
+    private fun parseUnifiedBlock(block: String): DiffFileDto? {
+        val lines = block.lines()
+        val file = unifiedFile(lines) ?: return null
+        return DiffFileDto(
+            file = file,
+            additions = lines.count { it.startsWith("+") && !it.startsWith("+++") },
+            deletions = lines.count { it.startsWith("-") && !it.startsWith("---") },
+            patch = block,
+            status = unifiedStatus(lines),
+        )
+    }
+
+    private fun unifiedFile(lines: List<String>): String? {
+        val next = lines.firstOrNull { it.startsWith("+++ ") }?.removePrefix("+++ ")
+        val prev = lines.firstOrNull { it.startsWith("--- ") }?.removePrefix("--- ")
+        val path = sequenceOf(next, prev)
+            .filterNotNull()
+            .firstOrNull { it != "/dev/null" }
+            ?: lines.firstOrNull()?.let(::gitDiffTarget)
+        return path?.let(::cleanDiffPath)
+    }
+
+    private fun unifiedStatus(lines: List<String>): String = when {
+        lines.any { it == "new file mode" || it.startsWith("new file mode ") } -> "added"
+        lines.any { it == "deleted file mode" || it.startsWith("deleted file mode ") } -> "deleted"
+        lines.any { it.startsWith("--- /dev/null") } -> "added"
+        lines.any { it.startsWith("+++ /dev/null") } -> "deleted"
+        else -> "modified"
+    }
+
+    private fun gitDiffTarget(line: String): String? {
+        val match = Regex("^diff --git a/(.*) b/(.*)$").find(line) ?: return null
+        return match.groupValues.getOrNull(2)
+    }
+
+    private fun cleanDiffPath(path: String): String {
+        val text = path.trim().trim('"')
+        return when {
+            text.startsWith("a/") -> text.removePrefix("a/")
+            text.startsWith("b/") -> text.removePrefix("b/")
+            else -> text
+        }
     }
 
     // ================================================================
@@ -1202,6 +1940,7 @@ object KiloCliDataParser {
         sb.append("""{"reply":${escape(reply.reply)}""")
         val msg = reply.message
         if (msg != null) sb.append(""","message":${escape(msg)}""")
+        if (reply.interactive) sb.append(""","interactive":true""")
         sb.append("}")
         return sb.toString()
     }
@@ -1275,20 +2014,50 @@ private fun JsonObject?.path(): String? {
     return str("filepath") ?: str("filePath") ?: str("file") ?: str("path")
 }
 
-private fun JsonObject?.rules(): List<String> {
+// metadata.commands is the verbatim skill-shell command list; the flat meta map loses the
+// array, so read it as a list for the prompt to display.
+private fun JsonObject?.skillCommands(): List<String> {
+    if (this == null) return emptyList()
+    return this["commands"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+}
+
+private fun JsonObject?.ruleDecisions(): List<PermissionRuleDecisionDto> {
     if (this == null) return emptyList()
     val raw = this["rules"] ?: return emptyList()
     val arr = raw.arr()
     if (arr != null) {
-        return arr.mapNotNull { it.jsonPrimitive.contentOrNull }
+        return arr.mapNotNull { elem ->
+            val obj = elem.obj()
+            if (obj != null) {
+                val pattern = obj.str("pattern") ?: obj.str("rule") ?: obj.str("text") ?: return@mapNotNull null
+                val next = obj.decision()
+                return@mapNotNull PermissionRuleDecisionDto(pattern, next, obj.defaultDecision() ?: next)
+            }
+            val pattern = runCatching { elem.jsonPrimitive.contentOrNull }.getOrNull() ?: return@mapNotNull null
+            PermissionRuleDecisionDto(pattern)
+        }
     }
     val text = runCatching { raw.jsonPrimitive.contentOrNull }.getOrNull() ?: return emptyList()
-    if (text.startsWith("[")) {
-        return runCatching {
-            KiloCliDataParser.parseRulesJson(text)
-        }.getOrElse { listOf(text) }
+    if (text.startsWith("[")) return KiloCliDataParser.parseRulesJson(text).map { PermissionRuleDecisionDto(it) }
+    return listOf(PermissionRuleDecisionDto(text))
+}
+
+private fun JsonObject.decision(): String {
+    val value = str("decision") ?: str("state") ?: str("action") ?: return "pending"
+    return permissionDecision(value)
+}
+
+private fun JsonObject.defaultDecision(): String? {
+    val value = str("defaultDecision") ?: str("default") ?: str("defaultAction") ?: str("fallback") ?: return null
+    return permissionDecision(value)
+}
+
+private fun permissionDecision(value: String): String {
+    return when (value.lowercase()) {
+        "approved", "allow" -> "approved"
+        "denied", "deny" -> "denied"
+        else -> "pending"
     }
-    return listOf(text)
 }
 
 private fun JsonObject?.permissionDiffs(path: String?): List<PermissionFileDiffDto> {

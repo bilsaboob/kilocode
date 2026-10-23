@@ -1,6 +1,5 @@
-// Todo item
+// Todo item. The backend sends no ID, so items are identified by their text.
 export interface TodoItem {
-  id: string
   content: string
   status: "pending" | "in_progress" | "completed" | "cancelled"
 }
@@ -21,6 +20,7 @@ export interface QuestionInfo {
   header: string
   options: QuestionOption[]
   multiple?: boolean
+  default?: string
   custom?: boolean
   // Optional i18n keys for question text and header (see QuestionOption for details).
   questionKey?: string
@@ -32,6 +32,10 @@ export interface QuestionRequest {
   sessionID: string
   questions: QuestionInfo[]
   blocking?: boolean
+  autoSubmit?: boolean
+  dismissResponse?: "continue"
+  rejectLabel?: string
+  tone?: "warning"
   tool?: {
     messageID: string
     callID: string

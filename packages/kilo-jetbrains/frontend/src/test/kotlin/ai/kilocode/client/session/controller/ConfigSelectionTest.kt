@@ -1,5 +1,6 @@
 package ai.kilocode.client.session.controller
 
+import ai.kilocode.client.plugin.KiloPluginSettings
 import ai.kilocode.rpc.dto.AgentDto
 import ai.kilocode.rpc.dto.AgentConfigDto
 import ai.kilocode.rpc.dto.ConfigDto
@@ -12,29 +13,58 @@ import ai.kilocode.rpc.dto.ProviderDto
 
 class ConfigSelectionTest : SessionControllerTestBase() {
 
-    fun `test selectModel updates SessionModel and persists model state`() {
-        projectRpc.state.value = workspaceReady()
-        val m = controller()
-        collect(m)
+    fun `test selectModel stays in its session`() {
+        projectRpc.state.value = workspaceReady(
+            providers = listOf(
+                ProviderDto(
+                    id = "kilo",
+                    name = "Kilo",
+                    models = mapOf(
+                        "gpt-5" to ModelDto(id = "gpt-5", name = "GPT-5"),
+                        "opus" to ModelDto(id = "opus", name = "Opus"),
+                    ),
+                ),
+            ),
+        )
+        val first = controller()
+        val second = controller()
+        collect(first)
+        collect(second)
         flush()
 
-        edt { m.selectModel("kilo", "gpt-5") }
+        edt { first.selectModel("kilo", "opus") }
         flush()
 
-        assertTrue(rpc.configs.isEmpty())
-        assertEquals("code", appRpc.selections.single().agent)
-        assertEquals("kilo", appRpc.selections.single().providerID)
-        assertEquals("gpt-5", appRpc.selections.single().modelID)
+        assertTrue(appRpc.selections.isEmpty())
+        assertSession(
+            """
+            [code] [kilo/opus] [app: DISCONNECTED] [workspace: READY]
+            """,
+            first,
+            show = false,
+        )
         assertSession(
             """
             [code] [kilo/gpt-5] [app: DISCONNECTED] [workspace: READY]
             """,
-            m,
+            second,
             show = false,
         )
+        assertTrue(first.model.modelOverride)
+
+        app.toggleModelFavorite("kilo", "opus")
+        flush()
+
+        assertEquals("kilo/opus", first.model.model)
+        assertTrue(first.model.modelOverride)
+        assertEquals("kilo/gpt-5", second.model.model)
     }
 
-    fun `test selectAgent updates SessionModel and calls updateConfig`() {
+    /**
+     * A mode switch must stay client-side. Writing it to the CLI's global config made the CLI dispose
+     * every instance it held, cancelling every running turn in every worktree.
+     */
+    fun `test selectAgent stays local and never patches CLI config`() {
         val m = controller()
         collect(m)
         flush()
@@ -42,8 +72,7 @@ class ConfigSelectionTest : SessionControllerTestBase() {
         edt { m.selectAgent("plan") }
         flush()
 
-        assertEquals(1, rpc.configs.size)
-        assertEquals("plan", rpc.configs[0].second.agent)
+        assertEquals("plan", KiloPluginSettings.getAgent())
         assertSession(
             """
             [plan] [app: DISCONNECTED] [workspace: PENDING]
@@ -51,6 +80,32 @@ class ConfigSelectionTest : SessionControllerTestBase() {
             m,
             show = false,
         )
+    }
+
+    fun `test remembered mode seeds a new session ahead of the CLI default`() {
+        edt { KiloPluginSettings.setAgent("plan") }
+        projectRpc.state.value = workspaceReady(
+            agents = listOf(
+                AgentDto(name = "code", displayName = "Code", mode = "code"),
+                AgentDto(name = "plan", displayName = "Plan", mode = "code"),
+            ),
+            default = "code",
+        )
+        val m = controller()
+        collect(m)
+        flush()
+
+        assertEquals("plan", m.model.agent)
+    }
+
+    fun `test CLI default wins when the remembered mode no longer exists`() {
+        edt { KiloPluginSettings.setAgent("removed-mode") }
+        projectRpc.state.value = workspaceReady(default = "code")
+        val m = controller()
+        collect(m)
+        flush()
+
+        assertEquals("code", m.model.agent)
     }
 
     fun `test selectModel fires WorkspaceReady event`() {
@@ -106,6 +161,92 @@ class ConfigSelectionTest : SessionControllerTestBase() {
         assertEquals("anthropic/claude", m.model.model)
         assertFalse(m.model.modelOverride)
         assertEquals(listOf("code"), appRpc.cleared)
+        assertFalse("code" in app.models.value.model)
+    }
+
+    /**
+     * The reported bug: the persisted pick outranks every config default, so a reset that left it on
+     * disk looked like it worked until the next mode switch resurrected it.
+     */
+    fun `test clearModelOverride survives a mode switch`() {
+        appRpc.models = ModelStateDto(model = mapOf("plan" to ModelSelectionDto("openai", "gpt")))
+        appRpc.state.value = KiloAppStateDto(
+            KiloAppStatusDto.READY,
+            config = ConfigDto(model = "anthropic/claude"),
+        )
+        projectRpc.state.value = workspaceReady(
+            agents = listOf(
+                AgentDto(name = "code", displayName = "Code", mode = "code"),
+                AgentDto(name = "plan", displayName = "Plan", mode = "code"),
+            ),
+            providers = listOf(
+                ProviderDto(
+                    id = "anthropic",
+                    name = "Anthropic",
+                    models = mapOf("claude" to ModelDto(id = "claude", name = "Claude")),
+                ),
+                ProviderDto(
+                    id = "openai",
+                    name = "OpenAI",
+                    models = mapOf("gpt" to ModelDto(id = "gpt", name = "GPT")),
+                ),
+            ),
+            connected = listOf("anthropic", "openai"),
+            defaults = emptyMap(),
+        )
+        val m = controller()
+        collect(m)
+        flush()
+
+        edt { m.selectAgent("plan") }
+        flush()
+        assertEquals("openai/gpt", m.model.model)
+        assertTrue(m.model.modelOverride)
+
+        edt { m.clearModelOverride() }
+        flush()
+        assertEquals("anthropic/claude", m.model.model)
+
+        edt { m.selectAgent("code") }
+        flush()
+        edt { m.selectAgent("plan") }
+        flush()
+
+        assertEquals("anthropic/claude", m.model.model)
+        assertFalse(m.model.modelOverride)
+    }
+
+    fun `test clearModelOverride without a saved pick skips the RPC`() {
+        appRpc.state.value = KiloAppStateDto(
+            KiloAppStatusDto.READY,
+            config = ConfigDto(model = "kilo/gpt-5"),
+        )
+        projectRpc.state.value = workspaceReady(
+            providers = listOf(
+                ProviderDto(
+                    id = "kilo",
+                    name = "Kilo",
+                    models = mapOf(
+                        "gpt-5" to ModelDto(id = "gpt-5", name = "GPT-5"),
+                        "opus" to ModelDto(id = "opus", name = "Opus"),
+                    ),
+                ),
+            ),
+        )
+        val m = controller()
+        collect(m)
+        flush()
+
+        edt { m.selectModel("kilo", "opus") }
+        flush()
+        assertTrue(m.model.modelOverride)
+
+        edt { m.clearModelOverride() }
+        flush()
+
+        assertEquals("kilo/gpt-5", m.model.model)
+        assertFalse(m.model.modelOverride)
+        assertTrue(appRpc.cleared.isEmpty())
     }
 
     fun `test global config supplies computed default`() {
@@ -306,7 +447,7 @@ class ConfigSelectionTest : SessionControllerTestBase() {
         assertTrue(m.model.modelOverride)
     }
 
-    fun `test selectVariant persists current model variant`() {
+    fun `test selectVariant stays in its session`() {
         projectRpc.state.value = workspaceReady(
             providers = listOf(
                 ProviderDto(
@@ -318,15 +459,17 @@ class ConfigSelectionTest : SessionControllerTestBase() {
                 ),
             ),
         )
-        val m = controller()
-        collect(m)
+        val first = controller()
+        val second = controller()
+        collect(first)
+        collect(second)
         flush()
 
-        edt { m.selectVariant("high") }
+        edt { first.selectVariant("high") }
         flush()
 
-        assertEquals("high", m.model.variant)
-        assertEquals("kilo/gpt-5", appRpc.variants.single().key)
-        assertEquals("high", appRpc.variants.single().value)
+        assertEquals("high", first.model.variant)
+        assertEquals("low", second.model.variant)
+        assertTrue(appRpc.variants.isEmpty())
     }
 }

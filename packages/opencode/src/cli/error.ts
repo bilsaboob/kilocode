@@ -1,6 +1,7 @@
 import { NamedError } from "@opencode-ai/core/util/error"
 import { errorFormat } from "@/util/error"
 import { isRecord } from "@/util/record"
+import { unavailable } from "@/kilocode/provider/catalog-recovery" // kilocode_change
 
 type ConfigIssue = { message: string; path: string[] }
 
@@ -64,7 +65,7 @@ export function FormatError(input: unknown): string | undefined {
     return [
       `Model not found: ${stringField(providerModelNotFound, "providerID")}/${stringField(providerModelNotFound, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      ...(providerModelNotFound.modelsEmpty === true ? ["No models are currently available."] : []), // kilocode_change
+      ...(unavailable(providerModelNotFound) ? [unavailable(providerModelNotFound)] : []), // kilocode_change
       `Try: \`kilo models\` to list available models`, // kilocode_change
       `Or check your kilo.json provider/model names`, // kilocode_change
     ].join("\n")
@@ -93,6 +94,18 @@ export function FormatError(input: unknown): string | undefined {
   const configFrontmatter = configData(input, "ConfigFrontmatterError")
   if (configFrontmatter) {
     return stringField(configFrontmatter, "message") ?? ""
+  }
+
+  // ConfigRemoteAuthError: { url: string, remote: string }
+  const remoteAuth = configData(input, "ConfigRemoteAuthError")
+  if (remoteAuth) {
+    const url = stringField(remoteAuth, "url")
+    const remote = stringField(remoteAuth, "remote")
+    return [
+      `Failed to load remote config${remote ? ` from ${remote}` : ""}: the server returned a login page instead of JSON.`,
+      `Authentication is missing or has expired (the endpoint is likely behind an SSO or identity-aware proxy).`,
+      ...(url ? [`Run \`kilo auth login ${url}\` to re-authenticate.`] : []), // kilocode_change
+    ].join("\n")
   }
 
   // ConfigInvalidError: { path?: string, message?: string, issues?: Array<{ message: string, path: string[] }> }

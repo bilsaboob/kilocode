@@ -1,8 +1,9 @@
 import { fetchBalance, fetchProfile } from "../api/profile.js"
+import { fetchKiloPassState } from "../api/kilo-pass.js"
 import { fetchKilocodeNotifications } from "../api/notifications.js"
 import { clearModesCache } from "../api/modes.js"
-import { HEADER_ORGANIZATIONID, KILO_API_BASE, KILO_CHAT_URL, KILO_EVENT_SERVICE_URL } from "../api/constants.js"
-import type { KilocodeBalance, KilocodeProfile } from "../types.js"
+import { KILO_API_BASE } from "../api/constants.js"
+import type { KilocodeBalance, KilocodeProfile, KiloPassState } from "../types.js"
 import { buildKiloHeaders } from "../headers.js"
 
 export type KiloAuth =
@@ -13,14 +14,8 @@ export type KiloAuth =
 export interface KiloProfileResult {
   profile: KilocodeProfile
   balance: KilocodeBalance | null
+  kiloPass: KiloPassState | null
   currentOrgId: string | null
-}
-
-export interface ClawChatCredentials {
-  token: string
-  expiresAt: string
-  kiloChatUrl: string
-  eventServiceUrl: string
 }
 
 export interface AuthStore {
@@ -67,11 +62,12 @@ export async function getProfile(auth: AuthStore): Promise<KiloProfileResult> {
   if (!info || info.type !== "oauth") throw new UnauthorizedError("Not authenticated with Kilo Gateway")
 
   const currentOrgId = info.accountId ?? null
-  const [profile, balance] = await Promise.all([
+  const [profile, balance, kiloPass] = await Promise.all([
     fetchProfile(info.access),
     fetchBalance(info.access, currentOrgId ?? undefined),
+    fetchKiloPassState(info.access),
   ])
-  return { profile, balance, currentOrgId }
+  return { profile, balance, kiloPass, currentOrgId }
 }
 
 export async function getNotifications(auth: AuthStore) {
@@ -101,37 +97,6 @@ export async function setOrganization(deps: OrganizationDeps, organizationId: st
   clearModesCache()
   await deps.dispose()
   return true
-}
-
-export async function getClawStatus(auth: AuthStore) {
-  const info = await auth.get("kilo")
-  const token = getToken(info)
-  if (!token) throw new UnauthorizedError("No valid token found")
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  }
-  const org = getOrganizationId(info)
-  if (org) headers[HEADER_ORGANIZATIONID] = org
-
-  const response = await fetch(`${KILO_API_BASE}/api/kiloclaw/status`, { headers })
-  if (!response.ok) throw new GatewayError(await response.text(), response.status)
-  return response.json()
-}
-
-export async function getClawChatCredentials(auth: AuthStore): Promise<ClawChatCredentials> {
-  const info = await auth.get("kilo")
-  const token = getToken(info)
-  if (!token) throw new UnauthorizedError("No valid token found")
-
-  const expires = info?.type === "oauth" ? info.expires : Date.now() + 365 * 24 * 60 * 60 * 1000
-  return {
-    token,
-    expiresAt: new Date(expires).toISOString(),
-    kiloChatUrl: KILO_CHAT_URL,
-    eventServiceUrl: KILO_EVENT_SERVICE_URL,
-  }
 }
 
 export async function getCloudSessions(token: string, input: CloudSessionsInput) {

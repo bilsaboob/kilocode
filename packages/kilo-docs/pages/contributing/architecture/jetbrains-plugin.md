@@ -124,19 +124,23 @@ Split mode changes path and UI assumptions:
 
 ## Development checks
 
-JetBrains Kotlin toolchain is Java 21. Check `java -version` before Gradle verification.
+JetBrains Kotlin toolchain is Java 21. Gradle commands report missing or incompatible Java clearly; check Java only when diagnosing that failure mode.
 
 | Check | Command from `packages/kilo-jetbrains/` |
 |---|---|
 | Typecheck | `./gradlew typecheck` |
 | Tests | `./gradlew test` |
 | Full plugin build | `bun run build` |
-| Gradle plugin assembly with prepared CLI binaries | `./gradlew buildPlugin` |
-| Sandbox IDE | `./gradlew runIde` |
-| Split backend sandbox | `./gradlew runIdeBackend` |
-| Split-mode run configs | `./gradlew generateSplitModeRunConfigurations` |
+| Gradle plugin assembly with pinned CLI download | `./gradlew buildPlugin` |
+| Split-mode sandbox | `./gradlew --no-configuration-cache runIdeSplitMode` |
+| Split backend sandbox | `./gradlew --no-configuration-cache runIdeBackend` |
+| Monolithic sandbox IDE | `./gradlew runIde` |
 
 Run `Plugin DevKit | Code | Frontend and Backend API Usage` inspection when moving code across split boundary.
+
+## Icon skill
+
+For plugin icon creation, modification, or review, use the `icon-jetbrains` skill at `.kilo/skills/icon-jetbrains/SKILL.md` together with `packages/kilo-jetbrains/AGENTS.md`. The skill covers IntelliJ New UI SVG roles, sizing, palette, dark variants, and icon validation guidance.
 
 ## Source map
 
@@ -145,7 +149,7 @@ Paths below are relative to [`Kilo-Org/kilocode`](https://github.com/Kilo-Org/ki
 | Concern | Source path |
 |---|---|
 | Split modules | `packages/kilo-jetbrains/settings.gradle.kts` and module XML descriptors |
-| Contributor constraints | `packages/kilo-jetbrains/AGENTS.md` |
+| Contributor constraints | `packages/kilo-jetbrains/AGENTS.md` and the `jetbrains-ui`/`jetbrains-session`/`jetbrains-arch`/`jetbrains-dev` skills under `.kilo/skills/` |
 | CLI lifecycle | `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/cli/KiloBackendCliManager.kt` |
 | Connection recovery | `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendConnectionService.kt` |
 | Workspace cache | `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/workspace/KiloBackendWorkspaceManager.kt` |

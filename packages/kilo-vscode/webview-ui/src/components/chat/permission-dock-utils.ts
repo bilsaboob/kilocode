@@ -2,6 +2,22 @@ import type { PermissionRule } from "../../types/messages"
 
 export type RuleDecision = "approved" | "denied" | "pending"
 
+// Escape control and bidi/format characters when displaying a skill-shell command, so a
+// command can't repaint the prompt or use Trojan-Source reordering to make the visible text
+// differ from what executes. The webview can't import from @kilocode/cli, so this mirrors
+// displayCommand in packages/opencode/src/kilocode/skills/display.ts; keep them in sync.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g
+
+export function displaySkillCommand(command: string) {
+  return command.replace(CONTROL, (ch) => {
+    if (ch === "\n") return "\\n"
+    if (ch === "\r") return "\\r"
+    if (ch === "\t") return "\\t"
+    const code = ch.charCodeAt(0)
+    return code <= 0xff ? "\\x" + code.toString(16).padStart(2, "0") : "\\u" + code.toString(16).padStart(4, "0")
+  })
+}
+
 /**
  * Check which rules are already saved in the user's config and return
  * their initial toggle states (approved/denied). Rules not found in
@@ -37,6 +53,7 @@ export const TOOL_LABEL_KEYS: Record<string, string> = {
   webfetch: "ui.permission.toolLabel.webFetch",
   websearch: "ui.permission.toolLabel.webSearch",
   codesearch: "ui.permission.toolLabel.codeSearch",
+  browser_open: "ui.permission.toolLabel.browserOpen",
   todoread: "ui.permission.toolLabel.todoRead",
   todowrite: "ui.permission.toolLabel.todoWrite",
   task: "ui.permission.toolLabel.task",
@@ -60,7 +77,15 @@ export function describeRule(
   if (tool === "doom_loop") {
     return t("ui.permission.doomLoop.rule", { tool: resolveLabel(rule, t) })
   }
-  return rule === "*" ? resolveLabel(tool, t) : `${resolveLabel(tool, t)} ${rule}`
+  const label = resolveLabel(tool, t)
+  return rule === "*" ? label : `${label} ${displayPattern(tool, rule)}`
+}
+
+// Browser navigation patterns carry a "navigate:" prefix so the rule matches the
+// origin. Hide the prefix in the prompt; the saved rule keeps it.
+function displayPattern(tool: string, rule: string) {
+  if (tool !== "browser_open") return rule
+  return rule.startsWith("navigate:") ? rule.slice("navigate:".length) : rule
 }
 
 /**
@@ -87,6 +112,6 @@ export function describePatterns(
   }
 
   const label = resolveLabel(tool, t)
-  if (filtered.length === 1) return { kind: "single", text: `${label} ${filtered[0]}` }
-  return { kind: "multi", title: `${label}:`, paths: filtered }
+  if (filtered.length === 1) return { kind: "single", text: `${label} ${displayPattern(tool, filtered[0])}` }
+  return { kind: "multi", title: `${label}:`, paths: filtered.map((pattern) => displayPattern(tool, pattern)) }
 }

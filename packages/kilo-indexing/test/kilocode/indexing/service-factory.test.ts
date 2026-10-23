@@ -1,6 +1,11 @@
 import { describe, expect, test, mock, beforeEach } from "bun:test"
 import path from "path"
 import { mockEmbeddingsCreate, openAIMockFactory, setOpenAIConstructorHook } from "./embedders/__helpers__/openai-mock"
+import {
+  OLLAMA_EMBEDDER_REQUEST_TIMEOUT_MS,
+  REMOTE_EMBEDDER_VALIDATION_TIMEOUT_MS,
+} from "../../../src/indexing/constants"
+import type { AvailableEmbedders, IEmbedder } from "../../../src/indexing/interfaces/embedder"
 
 mock.module("openai", openAIMockFactory)
 import { CodeIndexServiceFactory } from "../../../src/indexing/service-factory"
@@ -23,6 +28,20 @@ function createFactory(input?: Partial<ConstructorParameters<typeof CodeIndexCon
   return new CodeIndexServiceFactory(cfg, workspacePath, cache, cacheDirectory)
 }
 
+function createEmbedder(name: AvailableEmbedders): IEmbedder {
+  return {
+    async createEmbeddings() {
+      return { embeddings: [] }
+    },
+    async validateConfiguration() {
+      return { valid: true }
+    },
+    get embedderInfo() {
+      return { name }
+    },
+  }
+}
+
 describe("CodeIndexServiceFactory", () => {
   beforeEach(() => {
     mockEmbeddingsCreate.mockReset()
@@ -39,6 +58,111 @@ describe("CodeIndexServiceFactory", () => {
     expect(factory.createEmbedder().embedderInfo).toEqual({ name: "openai-compatible" })
   })
 
+  test("passes configured dimension to OpenAI-compatible embed requests", async () => {
+    const factory = createFactory({
+      embedderProvider: "openai-compatible",
+      openAiKey: undefined,
+      openAiCompatibleBaseUrl: "http://localhost:1234/v1",
+      openAiCompatibleApiKey: "compat-test",
+      modelId: "custom-embed",
+      modelDimension: 4096,
+    })
+
+    const testEmbedding = new Float32Array(4096).fill(0.25)
+    const base64String = Buffer.from(testEmbedding.buffer).toString("base64")
+
+    mockEmbeddingsCreate.mockResolvedValue({
+      data: [{ embedding: base64String }],
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    })
+
+    const embedder = factory.createEmbedder()
+    await embedder.createEmbeddings(["hello"])
+
+    expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
+      input: ["hello"],
+      model: "custom-embed",
+      encoding_format: "base64",
+      dimensions: 4096,
+    })
+  })
+
+  test("leaves OpenAI-compatible dimensions unset when no override is configured", async () => {
+    const factory = createFactory({
+      embedderProvider: "openai-compatible",
+      openAiKey: undefined,
+      openAiCompatibleBaseUrl: "http://localhost:1234/v1",
+      openAiCompatibleApiKey: "compat-test",
+      modelId: "custom-embed",
+    })
+
+    const testEmbedding = new Float32Array([0.25, 0.5])
+    const base64String = Buffer.from(testEmbedding.buffer).toString("base64")
+
+    mockEmbeddingsCreate.mockResolvedValue({
+      data: [{ embedding: base64String }],
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    })
+
+    const embedder = factory.createEmbedder()
+    await embedder.createEmbeddings(["hello"])
+
+    expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
+      input: ["hello"],
+      model: "custom-embed",
+      encoding_format: "base64",
+    })
+  })
+
+  test("lets SDK-backed embedders own validation timeouts", async () => {
+    const original = globalThis.setTimeout
+    const timer = mock((...args: Parameters<typeof setTimeout>) => original(...args))
+    globalThis.setTimeout = timer
+
+    try {
+      const factory = createFactory()
+      const providers = [
+        "openai",
+        "openrouter",
+        "openai-compatible",
+        "kilo",
+        "gemini",
+        "mistral",
+        "vercel-ai-gateway",
+      ] satisfies AvailableEmbedders[]
+
+      for (const provider of providers) {
+        await expect(factory.validateEmbedder(createEmbedder(provider))).resolves.toEqual({ valid: true })
+      }
+
+      expect(timer).not.toHaveBeenCalled()
+    } finally {
+      globalThis.setTimeout = original
+    }
+  })
+
+  test("retains factory deadlines for non-SDK embedders", async () => {
+    const original = globalThis.setTimeout
+    const timer = mock((...args: Parameters<typeof setTimeout>) => original(...args))
+    globalThis.setTimeout = timer
+
+    try {
+      const factory = createFactory()
+
+      await factory.validateEmbedder(createEmbedder("voyage"))
+      await factory.validateEmbedder(createEmbedder("bedrock"))
+      await factory.validateEmbedder(createEmbedder("ollama"))
+
+      expect(timer.mock.calls.map((call) => call[1])).toEqual([
+        REMOTE_EMBEDDER_VALIDATION_TIMEOUT_MS,
+        REMOTE_EMBEDDER_VALIDATION_TIMEOUT_MS,
+        OLLAMA_EMBEDDER_REQUEST_TIMEOUT_MS,
+      ])
+    } finally {
+      globalThis.setTimeout = original
+    }
+  })
+
   test("uses default LanceDB directory when config is unset", () => {
     const factory = createFactory({ vectorStoreProvider: "lancedb", lancedbVectorStoreDirectory: undefined })
 
@@ -49,7 +173,7 @@ describe("CodeIndexServiceFactory", () => {
   })
 
   test("uses explicit LanceDB directory when configured", () => {
-    const dir = "/tmp/custom-lancedb"
+    const dir = path.join(process.cwd(), "tmp", "custom-lancedb")
     const factory = createFactory({ vectorStoreProvider: "lancedb", lancedbVectorStoreDirectory: dir })
 
     const store = factory.createVectorStore() as unknown as { dbPath: string }
@@ -206,7 +330,7 @@ describe("CodeIndexServiceFactory", () => {
     })
 
     mockEmbeddingsCreate.mockResolvedValue({
-      data: [{ embedding: [0.1, 0.2] }],
+      data: [{ embedding: Array.from({ length: 1024 }, () => 0.25) }],
       usage: { prompt_tokens: 1, total_tokens: 1 },
     })
 

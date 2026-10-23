@@ -5,18 +5,28 @@ import ai.kilocode.client.session.model.Message
 import ai.kilocode.client.session.model.Text
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionUiStyle
+import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.rpc.dto.MessageDto
 import ai.kilocode.rpc.dto.MessageTimeDto
 import ai.kilocode.rpc.dto.PartSourceDto
 import ai.kilocode.rpc.dto.PartSourceTextDto
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
+import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.ide.CopyPasteManager
+import ai.kilocode.client.plugin.KiloBundle
+import com.intellij.openapi.util.Disposer
+import com.intellij.ui.EditorTextField
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import java.awt.BorderLayout
+import java.awt.Component
+import java.awt.Container
 import java.awt.datatransfer.DataFlavor
 import java.awt.event.MouseEvent
 import javax.swing.JComponent
+import javax.swing.JPanel
 import javax.swing.RepaintManager
 
 /**
@@ -33,6 +43,17 @@ class TextViewTest : BasePlatformTestCase() {
     fun `test empty Text creates view with empty markdown`() {
         val view = TextView(Text("p1"))
         assertEquals("", view.markdown())
+    }
+
+    fun `test empty text view does not reserve transcript height`() {
+        val view = TextView(Text("p1"))
+        view.setSize(260, 1)
+
+        assertEquals(0, view.preferredSize.height)
+
+        view.appendDelta("hello")
+
+        assertTrue(view.preferredSize.height > 0)
     }
 
     fun `test Text with content sets initial markdown`() {
@@ -117,10 +138,29 @@ class TextViewTest : BasePlatformTestCase() {
 
         val layout = view.layout as BorderLayout
         assertSame(view.md.component, layout.getLayoutComponent(BorderLayout.CENTER))
-        val bar = layout.getLayoutComponent(BorderLayout.SOUTH) as MessageToolbar
-        val buttons = bar.layout as BorderLayout
-        assertSame(view.copyButton(), buttons.getLayoutComponent(BorderLayout.LINE_START))
+        val bar = view.copyToolbar as MessageToolbar
+        val placeholder = layout.getLayoutComponent(BorderLayout.SOUTH)
+        assertTrue(components(bar).contains(view.copyButton()))
+        assertEquals(view.copyButton().preferredSize.width, bar.preferredSize.width)
+        assertSame(view.copyAnchor, placeholder)
+        assertNull(bar.parent)
+        assertEquals(bar.preferredSize.width, placeholder.preferredSize.width)
+        assertEquals(bar.preferredSize.height + UiStyle.Gap.xs(), placeholder.preferredSize.height)
         assertTrue(view.hasCopyToolbar())
+    }
+
+    fun `test copy placeholder joins the tree only while the toolbar is on`() {
+        val view = TextView(Text("p1").also { it.content.append("hello") })
+        val layout = view.layout as BorderLayout
+        assertNull(layout.getLayoutComponent(BorderLayout.SOUTH))
+        assertEquals(1, view.componentCount)
+
+        view.setCopyToolbar(true)
+        assertSame(view.copyAnchor, layout.getLayoutComponent(BorderLayout.SOUTH))
+
+        view.setCopyToolbar(false)
+        assertNull(layout.getLayoutComponent(BorderLayout.SOUTH))
+        assertNull(view.copyAnchor.parent)
     }
 
     fun `test assistant copy button copies current trimmed markdown`() {
@@ -155,14 +195,14 @@ class TextViewTest : BasePlatformTestCase() {
         val view = TextView(Text("p1").also { it.content.append(" first ") })
         view.setCopyToolbar(true)
         val comp = view.md.component
-        val bar = (view.layout as BorderLayout).getLayoutComponent(BorderLayout.SOUTH)
+        val bar = view.copyToolbar
 
         view.update(Text("p1").also { it.content.append(" second ") })
         view.appendDelta(" third ")
         view.copyButton().doClick()
 
         assertSame(comp, view.md.component)
-        assertSame(bar, (view.layout as BorderLayout).getLayoutComponent(BorderLayout.SOUTH))
+        assertSame(bar, view.copyToolbar)
         assertEquals("second  third", clipboard())
     }
 
@@ -210,14 +250,14 @@ class TextViewTest : BasePlatformTestCase() {
         assertEquals(style.editorForeground, view.md.foreground)
     }
 
-    fun `test prompt view uses editor font and background`() {
+    fun `test prompt view uses transcript font and prompt background`() {
         val style = SessionEditorStyle.create(family = "Courier New", size = 23)
         val view = PromptView(Text("p1"))
 
         view.applyStyle(style)
 
-        assertEquals(style.editorFont, view.md.font)
-        assertEquals(style.editorBackground, view.md.background)
+        assertEquals(style.transcriptFont, view.md.font)
+        assertEquals(SessionUiStyle.View.Prompt.bgColor(style), view.md.background)
         assertFalse(view.contentOpaque())
     }
 
@@ -253,6 +293,15 @@ class TextViewTest : BasePlatformTestCase() {
         view.simulateLink("https://kilocode.ai/docs")
 
         assertEquals(listOf("https://kilocode.ai/docs"), urls)
+    }
+
+    fun `test file link opens file callback`() {
+        val files = mutableListOf<String>()
+        val view = TextView(Text("p1"), openFile = { href, _ -> files.add(href) })
+
+        view.simulateLink("src/Foo.kt:12")
+
+        assertEquals(listOf("src/Foo.kt:12"), files)
     }
 
     fun `test linkifyMentions rewrites tracked token`() {
@@ -341,7 +390,7 @@ class TextViewTest : BasePlatformTestCase() {
         val text = Text("p1").also { it.content.append("read @src/a file.kt") }
         val view = PromptView(
             text,
-            openFile = { files.add(it) },
+            openFile = { href, _ -> files.add(href) },
             openUrl = { urls.add(it) },
             mentions = listOf(PromptMention("@src/a file.kt", "src/a file.kt", 5, 19)),
         )
@@ -362,7 +411,7 @@ class TextViewTest : BasePlatformTestCase() {
         val text = Text("p1").also { it.content.append("review @git-changes") }
         val view = PromptView(
             text,
-            openFile = { error("should not open file") },
+            openFile = { _, _ -> error("should not open file") },
             openAttachment = { opened.add(it) },
             mentions = listOf(PromptMention("@git-changes", "git-changes", 7, 19, item)),
         )
@@ -383,7 +432,7 @@ class TextViewTest : BasePlatformTestCase() {
 
     fun `test message view syncs prompt mentions from hidden part`() {
         val msg = Message(MessageDto("m1", "ses", "user", MessageTimeDto(0.0)))
-        val view = MessageView(msg, openFile = {})
+        val view = MessageView(msg, openFile = { _, _ -> })
         val text = Text("p1").also { it.content.append("read @src/a.kt") }
         msg.parts["p1"] = text
         view.upsertPart(text)
@@ -409,6 +458,176 @@ class TextViewTest : BasePlatformTestCase() {
         assertEquals(color ?: before, view.md.linkColor)
     }
 
+    // ---- folded pasted blocks in the transcript bubble ------
+
+    fun `test a large block in the prompt bubble renders folded behind a placeholder`() {
+        val view = realizedPrompt(fence(60))
+
+        try {
+            val ed = codeEditor(codePane(view)).getEditor(true)!!
+            val region = ed.foldingModel.allFoldRegions.single()
+            assertFalse(region.isExpanded)
+            assertEquals(KiloBundle.message("prompt.paste.collapsed", 60), region.placeholderText)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test a small block in the prompt bubble is not folded`() {
+        val view = realizedPrompt(fence(2))
+
+        try {
+            val ed = codeEditor(codePane(view)).getEditor(true)!!
+            assertEquals(0, ed.foldingModel.allFoldRegions.size)
+            assertFalse(ed.settings.isFoldingOutlineShown)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test a folded prompt block shows the gutter handle`() {
+        val view = realizedPrompt(fence(60))
+
+        try {
+            val ed = codeEditor(codePane(view)).getEditor(true)!!
+            assertTrue(ed.settings.isFoldingOutlineShown)
+            val y = ed.visualLineToY(0) + ed.lineHeight / 2
+            val hit = (0..ed.gutterComponentEx.preferredSize.width)
+                .firstNotNullOfOrNull { ed.gutterComponentEx.findFoldingAnchorAt(it, y) }
+            assertSame(ed.foldingModel.allFoldRegions.single(), hit)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test a folded prompt block takes one line and grows when unfolded`() {
+        val view = realizedPrompt(fence(60))
+
+        try {
+            val pane = codePane(view)
+            val ed = codeEditor(pane).getEditor(true)!!
+            val folded = pane.preferredSize.height
+
+            ed.foldingModel.runBatchFoldingOperation { ed.foldingModel.allFoldRegions.single().setExpanded(true) }
+            UIUtil.dispatchAllInvocationEvents()
+
+            assertTrue(pane.preferredSize.height > folded)
+            // Still capped, so a long block does not take over the transcript once unfolded.
+            assertTrue(pane.preferredSize.height < ed.lineHeight * 60)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test unfolding a prompt block grows the bubble`() {
+        val view = realizedPrompt(fence(60))
+
+        try {
+            val ed = codeEditor(codePane(view)).getEditor(true)!!
+            val folded = view.preferredSize.height
+
+            ed.foldingModel.runBatchFoldingOperation { ed.foldingModel.allFoldRegions.single().setExpanded(true) }
+            UIUtil.dispatchAllInvocationEvents()
+
+            // The bubble itself has to grow, not just the pane that reports a new preferred size.
+            assertTrue(view.preferredSize.height > folded)
+            assertFalse(view.md.component.isValid)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test unfolding then folding a prompt block returns to one line`() {
+        val view = realizedPrompt(fence(60))
+
+        try {
+            val pane = codePane(view)
+            val ed = codeEditor(pane).getEditor(true)!!
+            val folded = pane.preferredSize.height
+            val region = ed.foldingModel.allFoldRegions.single()
+
+            ed.foldingModel.runBatchFoldingOperation { region.setExpanded(true) }
+            UIUtil.dispatchAllInvocationEvents()
+            ed.foldingModel.runBatchFoldingOperation { region.setExpanded(false) }
+            UIUtil.dispatchAllInvocationEvents()
+
+            assertEquals(folded, pane.preferredSize.height)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    // ---- pasted block height cap (Step 2) ------
+
+    fun `test prompt view caps a large pasted block to the same height as a small one`() {
+        val big = PromptView(Text("p1").also { it.content.append(fence(200)) })
+        val small = PromptView(Text("p2").also { it.content.append(fence(20)) })
+
+        try {
+            assertEquals(codePane(small).preferredSize.height, codePane(big).preferredSize.height)
+        } finally {
+            Disposer.dispose(big)
+            Disposer.dispose(small)
+        }
+    }
+
+    fun `test prompt view pasted block has no extra left inset`() {
+        val view = PromptView(Text("p1").also { it.content.append(fence(20)) })
+
+        try {
+            assertEquals(0, codePane(view).viewportBorder.getBorderInsets(codePane(view)).left)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    fun `test prompt view code block reuses editor and releases it after clear`() {
+        val view = PromptView(Text("p1"))
+        val base = EditorFactory.getInstance().allEditors.size
+
+        try {
+            view.md.set(fence(20))
+            val pane = codePane(view)
+            val editor = codeEditor(pane)
+            editor.getEditor(true)
+
+            repeat(50) { i -> view.md.set(fence(20, i)) }
+
+            assertSame(pane, codePane(view))
+            assertSame(editor, codeEditor(codePane(view)))
+            assertFalse(editor.getEditor(true)!!.isDisposed)
+
+            view.md.clear()
+            UIUtil.dispatchAllInvocationEvents()
+
+            assertEquals(base, EditorFactory.getInstance().allEditors.size)
+        } finally {
+            Disposer.dispose(view)
+        }
+    }
+
+    private fun realizedPrompt(markdown: String): PromptView {
+        val view = PromptView(Text("p1").also { it.content.append(markdown) })
+        val host = JPanel(BorderLayout())
+        host.add(view, BorderLayout.CENTER)
+        host.setSize(600, 4000)
+        host.doLayout()
+        view.doLayout()
+        UIUtil.dispatchAllInvocationEvents()
+        return view
+    }
+
+    private fun fence(lines: Int, seed: Int = 0): String = buildString {
+        append("```text\n")
+        repeat(lines) { i -> append("line ${i + seed}\n") }
+        append("```")
+    }
+
+    private fun codePane(view: TextView): JBScrollPane =
+        (view.md.component as JPanel).components.filterIsInstance<JBScrollPane>().single()
+
+    private fun codeEditor(pane: JBScrollPane): EditorTextField = pane.viewport.view as EditorTextField
+
     private fun file(id: String, mime: String, token: String, path: String, start: Int, end: Int) = FileAttachment(id).also {
         it.mime = mime
         it.source = PartSourceDto("file", PartSourceTextDto(token, start.toDouble(), end.toDouble()), path = path)
@@ -432,4 +651,14 @@ class TextViewTest : BasePlatformTestCase() {
     private fun clipboard() = CopyPasteManager.getInstance()
         .contents
         ?.getTransferData(DataFlavor.stringFlavor) as String
+
+    private fun components(root: Component): List<Component> {
+        val out = mutableListOf<Component>()
+        fun visit(node: Component) {
+            out.add(node)
+            if (node is Container) node.components.forEach(::visit)
+        }
+        visit(root)
+        return out
+    }
 }

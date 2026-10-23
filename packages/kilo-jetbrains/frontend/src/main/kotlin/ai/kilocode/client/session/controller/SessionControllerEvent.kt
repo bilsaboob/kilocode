@@ -4,7 +4,6 @@ import ai.kilocode.client.session.model.SessionModel
 import ai.kilocode.client.session.model.SessionModelEvent
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.ProfileDto
-import ai.kilocode.rpc.dto.SessionDto
 
 /**
  * Lifecycle events fired by [SessionController] on the EDT.
@@ -22,13 +21,17 @@ sealed class SessionControllerEvent {
     // Workspace ready (pickers populated)
     data object WorkspaceReady : SessionControllerEvent()
 
+    // Recent sessions for the empty view were (re)loaded, including a load that failed and left an
+    // empty snapshot. Lets the already-visible empty panel refresh in place after a CLI reconnect.
+    data object RecentsChanged : SessionControllerEvent()
+
     sealed class ViewChanged : SessionControllerEvent() {
         data object ShowProgress : ViewChanged() {
             override fun toString() = "ViewChanged progress"
         }
 
-        data class ShowRecents(val recents: List<SessionDto>) : ViewChanged() {
-            override fun toString() = "ViewChanged recents=${recents.size}"
+        data object ShowEmpty : ViewChanged() {
+            override fun toString() = "ViewChanged empty"
         }
 
         data object ShowSession : ViewChanged() {
@@ -61,6 +64,10 @@ sealed class SessionControllerEvent {
 
         data object ShowConnecting : ConnectionChanged() {
             override fun toString() = "ConnectionChanged connecting"
+        }
+
+        data class ShowDownloading(val percent: Int, val version: String? = null, val platform: String? = null) : ConnectionChanged() {
+            override fun toString() = "ConnectionChanged downloading $percent"
         }
 
         data class ShowError(val summary: String, val detail: String?, val source: String = "app") : ConnectionChanged() {

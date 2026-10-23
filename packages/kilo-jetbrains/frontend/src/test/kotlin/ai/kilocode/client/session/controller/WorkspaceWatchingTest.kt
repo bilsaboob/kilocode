@@ -37,7 +37,8 @@ class WorkspaceWatchingTest : SessionControllerTestBase() {
         assertFalse(m.model.isReady())
         assertControllerEvents("""
             AccountOverlayChanged show loggedIn=false
-            ViewChanged recents=0
+            RecentsChanged
+            ViewChanged empty
             WorkspaceChanged
             WorkspaceReady
         """, events)

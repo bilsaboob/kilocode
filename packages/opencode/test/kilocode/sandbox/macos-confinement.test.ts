@@ -1,6 +1,7 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { afterEach, describe, expect } from "bun:test"
 import * as CrossSpawnSpawner from "@opencode-ai/core/cross-spawn-spawner"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as AppProcess from "@opencode-ai/core/process"
 import {
   mutate,
@@ -18,6 +19,7 @@ import path from "node:path"
 import iconv from "iconv-lite"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { Format } from "@/format"
 import { BackgroundProcess } from "@/kilocode/background-process"
 import { BackgroundProcessTool } from "@/kilocode/tool/background-process"
@@ -43,15 +45,16 @@ const runner: MutationRunner = (profile, request) =>
   })
 const it = testEffect(
   Layer.mergeAll(
-    Agent.defaultLayer,
-    AppFileSystem.defaultLayer,
-    AppProcess.defaultLayer,
-    CrossSpawnSpawner.defaultLayer,
-    Instruction.defaultLayer,
-    LSP.defaultLayer,
+    AppNodeBuilder.build(Agent.node),
+    AppNodeBuilder.build(FSUtil.node),
+    AppNodeBuilder.build(AppProcess.node),
+    AppNodeBuilder.build(CrossSpawnSpawner.node),
+    AppNodeBuilder.build(Instruction.node),
+    AppNodeBuilder.build(LSP.node),
     Bus.layer,
-    Format.defaultLayer,
-    Truncate.defaultLayer,
+    AppNodeBuilder.build(Format.node),
+    AppNodeBuilder.build(Truncate.node),
+    AppNodeBuilder.build(EventV2Bridge.node),
   ),
 )
 
@@ -226,6 +229,38 @@ describe.skipIf(process.platform !== "darwin").serial("real macOS sandbox confin
     ),
   )
 
+  it.live("protects denied policy state while sibling state remains writable", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const proc = yield* AppProcess.Service
+        const state = path.join(dir, "state")
+        const store = path.join(dir, "policy")
+        const moved = path.join(state, "moved")
+        const sibling = path.join(state, "sibling.txt")
+        yield* Effect.promise(() => Promise.all([fs.mkdir(state), fs.mkdir(store)]))
+        const base = profile(dir)
+        const policy: Profile = {
+          ...base,
+          filesystem: {
+            ...base.filesystem,
+            allowWrite: [{ path: state, kind: "subtree" }],
+            denyWrite: [{ path: store, kind: "subtree" }],
+          },
+        }
+        const write = yield* sandbox(
+          policy,
+          proc.run(ChildProcess.make("/bin/sh", ["-c", `printf allowed > ${JSON.stringify(sibling)}`])),
+        )
+        const rename = yield* sandbox(policy, proc.run(ChildProcess.make("/bin/mv", [store, moved])))
+
+        expect(write.exitCode).toBe(0)
+        expect(rename.exitCode).not.toBe(0)
+        expect(yield* Effect.promise(() => fs.readFile(sibling, "utf8"))).toBe("allowed")
+        expect(yield* Effect.promise(() => fs.stat(store).then((entry) => entry.isDirectory()))).toBe(true)
+      }),
+    ),
+  )
+
   it.live("keeps permission approval and denial independent from confinement", () =>
     provideTmpdirInstance((dir) =>
       Effect.acquireUseRelease(
@@ -350,7 +385,7 @@ describe.skipIf(process.platform !== "darwin").serial("real macOS sandbox confin
           profile(dir),
           runPatch("*** Begin Patch\n*** Update File: bom.txt\n@@\n-before\n+after\n*** End Patch"),
         )
-        const afs = yield* AppFileSystem.Service
+        const afs = yield* FSUtil.Service
         const synced = [
           { path: path.join(dir, "formatted-utf16.txt"), encoding: "utf-16le", bom: false },
           { path: path.join(dir, "formatted-windows1251.txt"), encoding: "windows-1251", bom: false },

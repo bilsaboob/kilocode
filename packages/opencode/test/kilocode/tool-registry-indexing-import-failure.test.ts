@@ -35,10 +35,21 @@ describe("kilocode tool registry indexing import failure", () => {
 
 function infos() {
   return {
-    codebase: info("codebase_search"),
     recall: info("recall"),
+    managerModels: info("agent_manager_models"),
+    memory: info("kilo_memory_recall"),
+    save: info("kilo_memory_save"),
     manager: info("agent_manager"),
     process: info("background_process"),
+    browser: info("browser_open"),
+    chart: info("chart"),
+    image: info("generate_image"),
+    notify: info("notify_user"),
+    send: info("send_file"),
+    linkPr: info("link_pr"),
+    notebookRead: info("notebook_read"),
+    notebookEdit: info("notebook_edit"),
+    notebookExecute: info("notebook_execute"),
   }
 }
 

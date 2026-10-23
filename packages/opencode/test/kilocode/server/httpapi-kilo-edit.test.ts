@@ -30,7 +30,16 @@ const edit = {
 
 function app() {
   const handler = HttpRouter.toWebHandler(
-    HttpApiServer.routes.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({})))),
+    // kilocode_change - keep the filewatcher-disable flag visible (see httpapi-instance-route-auth.test.ts)
+    HttpApiServer.routes.pipe(
+      Layer.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromUnknown({
+            KILO_EXPERIMENTAL_DISABLE_FILEWATCHER: process.env.KILO_EXPERIMENTAL_DISABLE_FILEWATCHER ?? "true",
+          }),
+        ),
+      ),
+    ),
     { disableLogger: true },
   ).handler
 
@@ -127,7 +136,7 @@ describe("HttpApi Kilo next edit", () => {
       expect(calls).toHaveLength(1)
       const call = calls[0]
       if (!call) throw new Error("missing edit request")
-      expect(url(call.input)).toEndWith("/api/edit/completions")
+      expect(url(call.input)).toBe("https://ai-gateway.kilo.ai/api/v1/edit/completions")
       const headers = new Headers(call.init?.headers)
       expect(headers.get("authorization")).toBe("Bearer gateway-token")
       expect(headers.get(HEADER_ORGANIZATIONID)).toBe("org-1")

@@ -40,19 +40,30 @@ const mockVscode = {
     language: "en",
     machineId: "test-machine",
     isTelemetryEnabled: false,
+    onDidChangeTelemetryEnabled: () => ({ dispose: noop }),
     shell: "/bin/bash",
     openExternal: noop,
   },
   version: "1.90.0",
   workspace: {
     workspaceFolders: [{ uri: { fsPath: "/repo" } }],
+    /** Overridden per test to stand in for the editor's own file index. */
+    findFiles: async (_include: unknown, _exclude?: unknown, _max?: number): Promise<Array<{ fsPath: string }>> => [],
     textDocuments: [] as Array<unknown>,
     notebookDocuments: [] as Array<unknown>,
     onDidOpenTextDocument: () => ({ dispose: noop }),
     onDidChangeTextDocument: () => ({ dispose: noop }),
+    onDidSaveTextDocument: () => ({ dispose: noop }),
     onDidCloseTextDocument: () => ({ dispose: noop }),
+    onDidChangeConfiguration: () => ({ dispose: noop }),
+    onDidChangeWorkspaceFolders: () => ({ dispose: noop }),
+    openTextDocument: async (input: { content?: string; language?: string }) => ({
+      getText: () => input.content ?? "",
+      languageId: input.language ?? "plaintext",
+    }),
     getConfiguration: () => ({
       get: <T>(_key: string, value?: T) => value,
+      inspect: () => ({}),
       update: async () => {},
     }),
     asRelativePath: (pathOrUri: string | { fsPath?: string }) => {
@@ -72,13 +83,26 @@ const mockVscode = {
   ThemeColor: class {
     constructor(public id: string) {}
   },
+  RelativePattern: class {
+    constructor(
+      public base: { uri?: { fsPath: string } } | string,
+      public pattern: string,
+    ) {}
+  },
   window: {
     activeTextEditor: undefined,
+    state: { focused: true },
+    onDidChangeWindowState: () => ({ dispose: noop }),
+    onDidChangeTextEditorSelection: () => ({ dispose: noop }),
+    onDidChangeActiveTextEditor: () => ({ dispose: noop }),
     activeNotebookEditor: undefined,
     visibleTextEditors: [],
     visibleNotebookEditors: [],
     tabGroups: { all: [] },
     showTextDocument: async () => {},
+    showInformationMessage: async () => undefined,
+    showQuickPick: async () => undefined,
+    showErrorMessage: async () => undefined,
     showWarningMessage: async () => undefined,
     createTerminal: () => ({ show: noop, sendText: noop, dispose: noop }),
     createOutputChannel: () => ({
@@ -160,6 +184,9 @@ const mockVscode = {
   },
   Disposable: class {
     constructor(private callback: () => void = noop) {}
+    static from(...items: { dispose: () => void }[]) {
+      return { dispose: () => items.forEach((item) => item.dispose()) }
+    }
     dispose() {
       this.callback()
     }

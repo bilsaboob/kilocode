@@ -1,20 +1,20 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Config } from "@/config/config"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { MessageV2 } from "@/session/message-v2"
-import * as Log from "@opencode-ai/core/util/log"
 import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" }
 import { Context, Effect, Layer, Schema } from "effect"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { sniffAttachmentMime } from "@/util/media" // kilocode_change - decode by content, like Photon does
 
 export const MAX_BASE64_BYTES = 5 * 1024 * 1024 // kilocode_change - share user file pre-read limit
 const MAX_WIDTH = 2000
 const MAX_HEIGHT = 2000
 const AUTO_RESIZE = true
 const JPEG_QUALITIES = [80, 85, 70, 55, 40]
-const log = Log.create({ service: "image" })
-
-// kilocode_change start - preserve valid in-limit images when Photon is unavailable
-function dimensions(mime: string, data: Buffer) {
+// kilocode_change start - preserve valid in-limit images when Photon is unavailable; exported for the HTTP-boundary precheck in kilocode/session/attachment.ts
+export function dimensions(mime: string, data: Buffer) {
   if (
     mime === "image/png" &&
     data.length >= 24 &&
@@ -66,6 +66,17 @@ function dimensions(mime: string, data: Buffer) {
   }
 }
 
+/**
+ * Whether these bytes are a raster our decoder can actually open, judged by content rather than
+ * by the declared mime -- Photon's `new_from_byteslice` sniffs the format itself, so an image
+ * labelled with the wrong raster mime still loads. Shared with the HTTP-boundary precheck in
+ * `kilocode/session/attachment.ts` so the boundary and `fallback` below cannot drift apart and
+ * start disagreeing about what is acceptable.
+ */
+export function decodable(mime: string, data: Buffer) {
+  return dimensions(sniffAttachmentMime(data, mime), data)
+}
+
 export function fallback(
   input: MessageV2.FilePart,
   base64: string,
@@ -82,8 +93,11 @@ export function fallback(
       max_height: max.height,
     })
   const data = Buffer.from(base64, "base64")
-  const canonical = data.toString("base64").replace(/=+$/, "") === base64.replace(/=+$/, "")
-  const size = canonical ? dimensions(input.mime, data) : undefined
+  // No canonical base64 round-trip requirement: Buffer.from tolerates line-wrapped payloads that
+  // Photon decodes fine, and `decodable` already validates the magic bytes, which is the stronger
+  // guard. Rejecting here for a non-canonical body would make this path disagree with the
+  // boundary precheck and turn an acceptable attachment into a defect that loses the message.
+  const size = decodable(input.mime, data)
   if (!base64 || !size) return new DecodeError()
   if (size.width > max.width || size.height > max.height)
     return new SizeError({
@@ -97,7 +111,6 @@ export function fallback(
   return input
 }
 // kilocode_change end
-
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
   "ImageResizerUnavailableError",
   {},
@@ -137,12 +150,12 @@ export class SizeError extends Schema.TaggedErrorClass<SizeError>()("ImageSizeEr
 export type Error = ResizerUnavailableError | InvalidDataUrlError | DecodeError | SizeError
 
 export interface Interface {
-  readonly normalize: (input: MessageV2.FilePart) => Effect.Effect<MessageV2.FilePart, Error>
+  readonly normalize: (input: SessionV1.FilePart) => Effect.Effect<SessionV1.FilePart, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -153,12 +166,12 @@ export const layer = Layer.effect(
         ;(globalThis as typeof globalThis & { __KILOCODE_PHOTON_WASM_PATH?: string }).__KILOCODE_PHOTON_WASM_PATH = wasm
       }).pipe(
         Effect.andThen(() => Effect.tryPromise(() => import("@silvia-odwyer/photon-node"))),
-        Effect.tapError((error) => Effect.sync(() => log.warn("failed to load photon", { error }))),
+        Effect.tapError((error) => Effect.logWarning("failed to load photon", { error })),
         Effect.mapError(() => new ResizerUnavailableError()),
       ),
     )
 
-    const normalize = Effect.fn("Image.normalize")(function* (input: MessageV2.FilePart) {
+    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart) {
       const image = (yield* config.get()).attachment?.image
       const info = {
         autoResize: image?.auto_resize ?? AUTO_RESIZE,
@@ -185,11 +198,8 @@ export const layer = Layer.effect(
 
       const decoded = yield* Effect.try({
         try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
-        catch: (error) => {
-          log.warn("failed to decode image", { error })
-          return new DecodeError()
-        },
-      })
+        catch: () => new DecodeError(),
+      }).pipe(Effect.tapError((error) => Effect.logWarning("failed to decode image", { error })))
 
       try {
         const originalWidth = decoded.get_width()
@@ -234,7 +244,7 @@ export const layer = Layer.effect(
           resized.free()
 
           if (candidate) {
-            log.info("using resized image", {
+            yield* Effect.logInfo("using resized image", {
               from_mime: input.mime,
               to_mime: candidate.mime,
               from: `${originalWidth}x${originalHeight}`,
@@ -265,6 +275,6 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer))
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node] })
 
 export * as Image from "./image"

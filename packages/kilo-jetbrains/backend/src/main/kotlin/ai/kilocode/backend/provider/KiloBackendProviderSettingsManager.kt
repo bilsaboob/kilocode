@@ -2,6 +2,7 @@ package ai.kilocode.backend.provider
 
 import ai.kilocode.backend.app.KiloBackendAppService
 import ai.kilocode.backend.app.LoadError
+import ai.kilocode.backend.cli.KiloBackendHttpClients
 import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.backend.rpc.KiloWorkspaceDtoMapper
 import ai.kilocode.log.KiloLog
@@ -18,15 +19,14 @@ import ai.kilocode.rpc.dto.ProviderOAuthAuthorizeDto
 import ai.kilocode.rpc.dto.ProviderOAuthCallbackDto
 import ai.kilocode.rpc.dto.ProviderOAuthReadyDto
 import ai.kilocode.rpc.dto.ProviderSettingsDto
+import com.intellij.util.EnvironmentUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.TimeUnit
 
 internal class KiloBackendProviderSettingsManager(
     private val app: KiloBackendAppService,
@@ -34,11 +34,7 @@ internal class KiloBackendProviderSettingsManager(
     companion object {
         private val LOG = KiloLog.create(KiloBackendProviderSettingsManager::class.java)
         private val JSON = "application/json".toMediaType()
-        private val FETCH = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .callTimeout(15, TimeUnit.SECONDS)
-            .build()
+        private val FETCH by lazy { KiloBackendHttpClients.modelFetch() }
         private const val CALL_TIMEOUT_SECONDS = 15L
         private const val OAUTH_CALL_TIMEOUT_SECONDS = 60L
     }
@@ -116,7 +112,7 @@ internal class KiloBackendProviderSettingsManager(
         if (input.providerId == "kilo") {
             return ProviderActionResultDto(current, error = "Kilo Gateway cannot be disconnected from provider settings.")
         }
-        if (provider?.source == "env") {
+        if (provider?.source == "env" && cfg == null) {
             return ProviderActionResultDto(current, error = "Provider is configured by environment variables.")
         }
         val configured = input.providerId in current.connected || provider?.key != null || provider?.source == "config" || cfg != null
@@ -129,7 +125,7 @@ internal class KiloBackendProviderSettingsManager(
             dispose()
             return ProviderActionResultDto(state(input.directory))
         }
-        if (provider?.source == "config") {
+        if (cfg != null || provider?.source == "config") {
             val scope = cfg?.scope ?: "global"
             val ids = disabledFor(current, scope) + input.providerId
             patch(input.directory, scope, KiloCliDataParser.buildDisabledProviderPatch(ids))
@@ -154,7 +150,53 @@ internal class KiloBackendProviderSettingsManager(
     suspend fun saveCustom(input: CustomProviderSaveDto): ProviderActionResultDto {
         val err = validate(input)
         if (err != null) return ProviderActionResultDto(state(input.directory), error = err)
-        patch(KiloCliDataParser.buildCustomProviderPatch(input))
+        // Read the provider's raw entry from both scopes directly, rather than the single merged
+        // "scope" exposed on ProviderSettingsDto, because a provider id can have an independent,
+        // hand-authored entry in both the global and workspace config files at once. The primary
+        // patch below only targets the scope the dialog is effectively editing; a model removed
+        // from it must also be nulled out of any other scope that independently lists it, or that
+        // scope's stale copy resurrects the model in the merged config next time settings load.
+        val globalCfg = parsed(get("/global/config")).config[input.id]
+        val localCfg = parsed(get("/config?directory=${enc(input.directory)}")).config[input.id]
+        val existing = scopedConfig(
+            globalCfg?.let { mapOf(input.id to it) } ?: emptyMap(),
+            localCfg?.let { mapOf(input.id to it) } ?: emptyMap(),
+        )[input.id]
+        val scope = existing?.scope ?: "global"
+        // The config schema only allows nulling a whole provider entry (to delete it), not an
+        // individual field inside one (except for "models", which is deletion-aware — see
+        // buildCustomProviderPatch), so a previously-set env var can only be cleared by deleting
+        // the entry before the patch below recreates it. Only do this when there is an existing env
+        // var to clear: deleting drops any fields the recreate patch doesn't set (e.g. a
+        // hand-authored whitelist/blacklist), and a failure between the two patches would otherwise
+        // leave the entry missing until the next successful save.
+        val stale = existing?.takeIf { input.envVar.isNullOrBlank() && it.env.isNotEmpty() }
+        if (stale != null) patch(input.directory, scope, KiloCliDataParser.buildCustomProviderDeletePatch(input.id))
+        // The dialog never edits headers, so the delete above would otherwise drop hand-authored
+        // ones: carry them into the recreate patch when the save itself doesn't set any.
+        val save = if (stale != null && input.headers.isEmpty()) input.copy(headers = stale.headers) else input
+        // Diff the submitted models against the persisted ones regardless of `stale`: this set
+        // also drives the other-scope cleanup below, which must still run even when the primary
+        // scope took the delete-then-recreate path (that recreate only touches the *edited*
+        // scope; an independent duplicate in the other scope is untouched by it either way).
+        val kept = input.models.mapTo(mutableSetOf()) { it.id }
+        val removedModelIds: Set<String> = (existing?.models?.keys ?: emptySet()) - kept
+        // A delete-then-recreate patch already drops every existing model, so no removal
+        // sentinels are needed on top of it for the primary scope. Otherwise, the sentinels are
+        // what explicitly null the deselected IDs instead of letting them silently survive the
+        // deep-merge PATCH (and reappear after a restart).
+        val primaryRemovedModelIds = if (stale != null) emptySet() else removedModelIds
+        patch(input.directory, scope, KiloCliDataParser.buildCustomProviderPatch(save, primaryRemovedModelIds))
+        // The provider id also has a raw entry in the other scope: null out any of the removed
+        // models it still lists so it can't resurrect them once it's no longer the effective copy.
+        if (removedModelIds.isNotEmpty()) {
+            val otherScope = if (scope == "workspace") "global" else "workspace"
+            val otherCfg = if (scope == "workspace") globalCfg else localCfg
+            val otherRemoved: Set<String> = otherCfg?.models?.keys?.intersect(removedModelIds) ?: emptySet()
+            if (otherRemoved.isNotEmpty()) {
+                patch(input.directory, otherScope, KiloCliDataParser.buildCustomProviderModelRemovalPatch(input.id, otherRemoved))
+            }
+        }
         if (input.envVar.isNullOrBlank()) {
             val key = input.apiKey?.takeIf { it.isNotBlank() }
             if (key != null) put("/auth/${enc(input.id)}", KiloCliDataParser.buildProviderAuthJson(key, emptyMap()))
@@ -165,12 +207,18 @@ internal class KiloBackendProviderSettingsManager(
         return ProviderActionResultDto(state(input.directory))
     }
 
-    suspend fun fetch(input: CustomModelFetchDto): CustomModelFetchResultDto {
+    suspend fun fetch(input: CustomModelFetchDto, env: Map<String, String> = EnvironmentUtil.getEnvironmentMap()): CustomModelFetchResultDto {
+        val name = input.env?.trim()?.takeIf { it.isNotBlank() }
+        val resolved = name?.let { env[it]?.takeIf(String::isNotBlank) }
+        val stored = if (input.apiKey.isNullOrBlank() && resolved == null) storedKey(input) else null
+        val key = input.apiKey?.takeIf { it.isNotBlank() } ?: resolved ?: stored
+        val envMissing = name != null && resolved == null
         val url = input.baseUrl.trim().trimEnd('/') + "/models"
+        LOG.debug { "custom provider model fetch: env=$name resolved=${resolved != null} stored=${stored != null}" }
         return try {
             val request = Request.Builder().url(url).get().apply {
-                input.apiKey?.takeIf { it.isNotBlank() }?.let { header("Authorization", "Bearer $it") }
-                input.headers.forEach { (key, value) -> header(key, value) }
+                key?.let { header("Authorization", "Bearer $it") }
+                input.headers.forEach { (headerKey, value) -> header(headerKey, value) }
             }.build()
             val raw = withContext(Dispatchers.IO) {
                 FETCH.newCall(request).execute().use { response ->
@@ -179,11 +227,16 @@ internal class KiloBackendProviderSettingsManager(
                     body
                 }
             }
-            CustomModelFetchResultDto(KiloCliDataParser.parseModelIds(raw))
+            CustomModelFetchResultDto(KiloCliDataParser.parseModelIds(raw), envMissing = envMissing)
         } catch (e: Exception) {
             LOG.warn("Custom provider model fetch failed: ${e.message}", e)
-            CustomModelFetchResultDto(error = e.message)
+            CustomModelFetchResultDto(error = e.message, envMissing = envMissing)
         }
+    }
+
+    private suspend fun storedKey(input: CustomModelFetchDto): String? {
+        val id = input.providerId?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return state(input.directory).providers.firstOrNull { it.id == id }?.key?.takeIf(String::isNotBlank)
     }
 
     private suspend fun <T> load(resource: String, errors: MutableList<LoadErrorDto>, block: suspend () -> T): T? {
@@ -203,7 +256,6 @@ internal class KiloBackendProviderSettingsManager(
     private suspend fun get(path: String) = request(Request.Builder().url(url(path)).get().build())
     private suspend fun post(path: String, body: String, timeoutSeconds: Long = CALL_TIMEOUT_SECONDS) = request(Request.Builder().url(url(path)).post(body.toRequestBody(JSON)).build(), timeoutSeconds)
     private suspend fun put(path: String, body: String) = request(Request.Builder().url(url(path)).put(body.toRequestBody(JSON)).build())
-    private suspend fun patch(body: String) = request(Request.Builder().url(url("/global/config")).patch(body.toRequestBody(JSON)).build())
     private suspend fun patch(directory: String, scope: String, body: String) {
         val path = if (scope == "workspace") "/config?directory=${enc(directory)}" else "/global/config"
         request(Request.Builder().url(url(path)).patch(body.toRequestBody(JSON)).build())
@@ -253,10 +305,8 @@ internal class KiloBackendProviderSettingsManager(
     private suspend fun request(request: Request, timeoutSeconds: Long = CALL_TIMEOUT_SECONDS): String {
         val start = System.currentTimeMillis()
         LOG.debug { "provider settings http: start ${request.method} ${request.url.encodedPath}" }
-        val http = app.http?.newBuilder()
-            ?.callTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            ?.readTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            ?.build() ?: throw IllegalStateException("Kilo HTTP client is unavailable")
+        val http = app.http?.let { KiloBackendHttpClients.bounded(it, timeoutSeconds) }
+            ?: throw IllegalStateException("Kilo HTTP client is unavailable")
         return withContext(Dispatchers.IO) {
             try {
                 http.newCall(request.newBuilder().header("Accept", "application/json").build()).execute().use { response ->
@@ -282,6 +332,7 @@ internal class KiloBackendProviderSettingsManager(
         if (!input.baseUrl.startsWith("http://") && !input.baseUrl.startsWith("https://")) return "Base URL must start with http:// or https://."
         if (!env.isNullOrBlank() && !Regex("^[A-Za-z_][A-Za-z0-9_]*$").matches(env)) return "Environment variable name is invalid."
         if (input.headers.keys.any { it.isBlank() }) return "Header names cannot be empty."
+        if (input.models.isEmpty()) return "At least one model ID is required."
         if (input.models.any { it.id.isBlank() }) return "Model IDs cannot be empty."
         return null
     }

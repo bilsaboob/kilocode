@@ -1,26 +1,45 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import * as Network from "@/kilocode/sandbox/network"
+import * as SandboxPolicy from "@/kilocode/sandbox/policy"
 import { Plugin } from "@/plugin"
 import { Agent } from "@/agent/agent"
 import { ShellTool } from "@/tool/shell"
 import { Truncate } from "@/tool/truncate"
 import { MessageID, SessionID } from "@/session/schema"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Database } from "@opencode-ai/core/database/database"
 import { run as runSandbox, type Profile } from "@kilocode/sandbox"
-import { provideInstance, tmpdirScoped } from "../../fixture/fixture"
+import { TestConfig } from "../../fixture/config"
+import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../../fixture/fixture"
 
-const layer = Layer.mergeAll(
-  CrossSpawnSpawner.defaultLayer,
-  AppFileSystem.defaultLayer,
-  Plugin.defaultLayer,
-  Truncate.defaultLayer,
-  Config.defaultLayer,
-  Agent.defaultLayer,
-  RuntimeFlags.defaultLayer,
+const base = Layer.mergeAll(
+  AppNodeBuilder.build(CrossSpawnSpawner.node),
+  AppNodeBuilder.build(FSUtil.node),
+  AppNodeBuilder.build(Plugin.node),
+  AppNodeBuilder.build(Truncate.node),
+  AppNodeBuilder.build(Agent.node),
+  AppNodeBuilder.build(RuntimeFlags.node),
+  testInstanceStoreLayer,
+  AppNodeBuilder.build(Database.node),
 )
+const layer = Layer.mergeAll(base, AppNodeBuilder.build(Config.node))
+
+function configured(restrict: boolean) {
+  return Layer.mergeAll(
+    base,
+    TestConfig.layer({
+      get: () =>
+        Effect.succeed({
+          sandbox: { enabled: true, network: restrict ? "deny" : "allow" },
+        }),
+    }),
+  )
+}
 
 const ctx = {
   sessionID: SessionID.make("ses_sandbox_network"),
@@ -72,8 +91,22 @@ const execute = Effect.fn("ShellNetworkTest.execute")(function* (
   return yield* runSandbox(profile(root, mode), shell.execute({ command: `/usr/bin/nc -v 127.0.0.1 ${port}` }, ctx))
 })
 
+const executeConfigured = Effect.fn("ShellNetworkTest.executeConfigured")(function* (
+  port: number,
+  sessionID = ctx.sessionID,
+) {
+  const info = yield* ShellTool
+  const shell = yield* info.init()
+  const tool = Network.builtin({ id: "bash" })
+  return yield* SandboxPolicy.executeTool(
+    sessionID,
+    tool,
+    shell.execute({ command: `/usr/bin/nc -v 127.0.0.1 ${port}` }, ctx),
+  )
+})
+
 describe("model shell network integration", () => {
-  test.skipIf(process.platform !== "darwin")(
+  test.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
     "enforces allow and deny profiles through the actual shell tool and process spawner",
     async () => {
       const effect = Effect.gen(function* () {
@@ -92,12 +125,47 @@ describe("model shell network integration", () => {
         expect(allow.output).toContain("model-shell-network-ok")
         expect(allow.metadata.exit).toBe(0)
         expect(allowed.accepted()).toBe(1)
-        expect(deny.output).toContain("Operation not permitted")
+        if (process.platform === "darwin") expect(deny.output).toContain("Operation not permitted")
+        expect(deny.output).not.toContain("model-shell-network-ok")
         expect(deny.metadata.exit).not.toBe(0)
         expect(denied.accepted()).toBe(0)
       })
 
       await Effect.runPromise(Effect.scoped(effect.pipe(Effect.provide(layer))))
+    },
+  )
+
+  test.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+    "honors configured shell network access without authenticated server control",
+    async () => {
+      const effect = Effect.gen(function* () {
+        const root = yield* tmpdirScoped()
+        const allowed = server()
+        const denied = server()
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            allowed.listener.stop(true)
+            denied.listener.stop(true)
+          }),
+        )
+
+        const allow = yield* executeConfigured(allowed.listener.port, SessionID.make("ses_sandbox_network_allow")).pipe(
+          provideInstance(root),
+          Effect.provide(configured(false)),
+        )
+        const deny = yield* executeConfigured(denied.listener.port, SessionID.make("ses_sandbox_network_deny")).pipe(
+          provideInstance(root),
+          Effect.provide(configured(true)),
+        )
+        expect(allow.output).toContain("model-shell-network-ok")
+        expect(allow.metadata.exit).toBe(0)
+        expect(allowed.accepted()).toBe(1)
+        expect(deny.output).not.toContain("model-shell-network-ok")
+        expect(deny.metadata.exit).not.toBe(0)
+        expect(denied.accepted()).toBe(0)
+      })
+
+      await Effect.runPromise(Effect.scoped(effect.pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)))))
     },
   )
 })

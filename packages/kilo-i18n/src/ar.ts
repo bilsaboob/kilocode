@@ -1,12 +1,5 @@
 export const dict = {
   // Kilo Gateway provider translations
-  "provider.connect.kiloGateway.line1":
-    "يمنحك Kilo Gateway الوصول إلى مجموعة مختارة من النماذج الموثوقة والمحسّنة لوكلاء البرمجة.",
-  "provider.connect.kiloGateway.line2":
-    "بمفتاح API واحد، ستحصل على إمكانية الوصول إلى نماذج مثل Claude وGPT وGemini وGLM والمزيد.",
-  "provider.connect.kiloGateway.visit.prefix": "قم بزيارة ",
-  "provider.connect.kiloGateway.visit.link": "kilo.ai",
-  "provider.connect.kiloGateway.visit.suffix": " للحصول على مفتاح API الخاص بك.",
   "provider.connect.kiloGateway.byok.prefix": "للحصول على المزيد من إحصائيات الاستخدام، استخدم ",
   "provider.connect.kiloGateway.byok.link": "BYOK عبر Kilo's Gateway",
   "provider.connect.kiloGateway.byok.suffix": ".",
@@ -24,14 +17,9 @@ export const dict = {
   "settings.providers.note.vercel": "وصول موحد إلى نماذج الذكاء الاصطناعي مع توجيه ذكي",
 
   // Reasoning block label
-  "ui.permission.run": "تشغيل",
   "ui.reasoning.label": "الاستدلال",
 
   // Marketplace
-  "marketplace.tab.skills": "المهارات",
-  "marketplace.tab.mcpServers": "خوادم MCP",
-  "marketplace.category.all": "الكل",
-  "marketplace.placeholder": "سيتم تنفيذه لاحقاً",
   "marketplace.card.installed": "مثبت",
   "marketplace.card.install": "تثبيت",
   "marketplace.card.remove": "إزالة",
@@ -42,6 +30,25 @@ export const dict = {
   "marketplace.install.scope": "النطاق",
   "marketplace.install.scope.project": "المشروع",
   "marketplace.install.scope.global": "عالمي",
+  "marketplace.install.scope.project.description":
+    "هذا المشروع فقط. يمكن إضافة الملفات المثبتة إلى نظام التحكم في الإصدارات ومشاركتها مع فريقك.",
+  "marketplace.install.scope.global.description": "جميع المشاريع على هذا الجهاز. تُحفظ في إعدادات المستخدم الخاصة بك.",
+  "marketplace.install.destination": "وجهة التثبيت",
+  "marketplace.install.includedSkills": "المهارات المضمنة",
+  "marketplace.install.about.mcp": "يمنح خادم MCP منصة Kilo أدوات إضافية للعمل مع الخدمات الخارجية أو البرامج المحلية.",
+  "marketplace.install.about.agent": "يضيف الوكيل دورًا قابلاً لإعادة الاستخدام بتعليماته وأذوناته الخاصة.",
+  "marketplace.install.about.skill": "تضيف المهارة تعليمات وموارد خاصة بمهام معينة يمكن لـ Kilo تحميلها عند الحاجة.",
+  "marketplace.install.mcp.warning":
+    "يمكن لخوادم MCP تشغيل أوامر محلية أو الاتصال بخدمات خارجية. ستطلب Kilo الإذن قبل استخدام أدواتها ما لم تسمح أذوناتك بذلك تلقائيًا.",
+  "marketplace.install.project.warning":
+    "قد تُضاف ملفات المشروع إلى نظام التحكم في الإصدارات. لا تخزّن الأسرار هنا إلا إذا كان الإعداد يشير إلى متغير بيئة.",
+  "marketplace.install.learnMore": "تعرّف على كيفية عمل عمليات التثبيت من Marketplace",
+  "marketplace.install.learnMcp": "معرفة المزيد عن MCP",
+  "marketplace.install.about.plugin": "تضيف إضافة أدوات وتكاملات مخصصة إلى Kilo. تعمل الإضافات بصلاحيات كاملة.",
+  "marketplace.install.plugin.warning":
+    "تشغّل الإضافات التعليمات البرمجية بصلاحيات كاملة. يمكنها قراءة ملفاتك وتغييرها وتشغيل الأوامر والوصول إلى بيانات اعتمادك وشبكتك. لا تثبّت إلا الإضافات التي تثق بها.",
+  "marketplace.intro": "ثبّت وكلاء ومهارات وأدوات MCP وإضافات قابلة لإعادة الاستخدام لمشروع واحد أو لجميع المشاريع.",
+  "marketplace.intro.learnMore": "حول Marketplace",
   "marketplace.install.prerequisites": "المتطلبات الأساسية",
   "marketplace.install.installing": "جاري التثبيت...",
   "marketplace.install.cancel": "إلغاء",
@@ -49,27 +56,36 @@ export const dict = {
   "marketplace.install.failed": "فشل التثبيت",
   "marketplace.install.done": "تم",
   "marketplace.install.close": "إغلاق",
+  "marketplace.install.mcp.signIn.message": "تم تثبيت {{name}} ولكنه يحتاج إلى تسجيل الدخول قبل أن يمكن استخدام أدواته.",
+  "marketplace.install.mcp.signIn.button": "تسجيل الدخول",
+  "marketplace.install.mcp.signIn.waiting": "في انتظار تسجيل الدخول عبر المتصفح…",
+  "marketplace.install.mcp.signIn.cancel": "إلغاء",
+  "marketplace.install.mcp.signIn.skip": "لاحقًا",
+  "marketplace.install.mcp.signIn.success": "تم تسجيل الدخول إلى {{name}}.",
+  "marketplace.install.mcp.signIn.failed": "فشل تسجيل الدخول إلى {{name}}.",
   "marketplace.remove.title": "إزالة {{name}}؟",
   "marketplace.remove.confirm":
     "هل أنت متأكد أنك تريد إزالة هذا الـ {{type}}؟ سيؤدي هذا إلى إزالته من تكوين {{scope}} الخاص بك.",
   "marketplace.remove.cancel": "إلغاء",
+  "marketplace.remove.mcp.skills":
+    "يؤدي هذا أيضًا إلى إزالة المهارات المرافقة التابعة لهذا التثبيت. يتم الاحتفاظ بالمهارات المثبتة بشكل مستقل.",
   "marketplace.remove.confirm.button": "إزالة",
-  "marketplace.tab.mcp": "MCP",
-  "marketplace.tab.agents": "وكلاء",
   "marketplace.search": "بحث...",
   "marketplace.filter.all": "جميع العناصر",
   "marketplace.filter.notInstalled": "غير مثبت",
+  "marketplace.filter.relevant": "ذات صلة بمساحة العمل الخاصة بي",
   "marketplace.empty": "لم يتم العثور على عناصر",
+  "marketplace.empty.relevant": "لم يتم العثور على عناصر سوق ذات صلة بمساحة العمل هذه.",
   "marketplace.badge.mcpServer": "خادم MCP",
-  "marketplace.badge.mode": "وضع",
+  "marketplace.badge.skills": "يتضمن مهارات",
   "marketplace.card.by": "بواسطة {{author}}",
   "marketplace.install.method": "طريقة التثبيت",
   "marketplace.install.parameters": "المعلمات",
   "marketplace.install.optional": "(اختياري)",
-  "marketplace.install.required": "{{name}} مطلوب",
   "marketplace.scope.project": "مشروع",
   "marketplace.scope.global": "عام",
   "marketplace.remove.type.mcp": "خادم MCP",
+  "marketplace.remove.type.plugin": "إضافة",
   "marketplace.remove.type.skill": "مهارة",
   "marketplace.remove.type.agent": "وكيل",
   "marketplace.remove.failed": "فشلت إزالة {{name}}",
@@ -80,7 +96,7 @@ export const dict = {
   "marketplace.warning.busyMany": "عدة جلسات تعمل وستتوقف",
   "marketplace.warning.installAnyway": "تثبيت على أي حال",
   "marketplace.warning.cancel": "إلغاء",
-  "marketplace.contribute.prompt": "هل تفتقد مهارة أو وكيلاً أو خادم MCP؟",
+  "marketplace.contribute.prompt": "هل تفتقد مهارة أو وكيلاً أو خادم MCP أو إضافة؟",
   "marketplace.contribute.cta": "ساهم على GitHub",
   "marketplace.migration.notice":
     "تم استبدال الأوضاع بالوكلاء. إذا كنت قد قمت بتثبيت أوضاع السوق سابقاً، يرجى إزالتها وإعادة تثبيتها كوكلاء للانتقال إلى التنسيق الجديد.",
@@ -92,6 +108,8 @@ export const dict = {
   "plan.followup.answer.newSession.description": "نفّذ في جلسة جديدة بسياق نظيف",
   "plan.followup.answer.continue": "المتابعة هنا",
   "plan.followup.answer.continue.description": "نفّذ الخطة في هذه الجلسة",
+  "plan.followup.answer.keepRefining": "واصل التحسين",
+  "plan.followup.answer.keepRefining.description": "واصل التخطيط دون التنفيذ الآن",
 
   // Slow-repo snapshot prompt
   "snapshot.slowRepo.header": "اللقطة بطيئة",
@@ -106,8 +124,6 @@ export const dict = {
 
   // Edit-tool header and shell-tool section labels
   "ui.messagePart.openInDiffViewer": "فتح في عارض الفروقات",
-  "ui.messagePart.shell.command": "الأمر",
-  "ui.messagePart.shell.output": "المخرجات",
   "ui.messagePart.openInEditor": "فتح في المحرر",
 
   // Message feedback (thumbs up/down per assistant response)

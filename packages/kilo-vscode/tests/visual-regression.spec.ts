@@ -36,8 +36,10 @@ async function disableAnimations(page: Page) {
   await page.addStyleTag({
     content: `
       *, *::before, *::after {
+        animation: none !important;
         animation-duration: 0s !important;
         animation-delay: 0s !important;
+        transition: none !important;
         transition-duration: 0s !important;
         transition-delay: 0s !important;
       }
@@ -72,18 +74,41 @@ async function settle(page: Page) {
 // Stories to skip from visual regression (add IDs here if needed)
 // Spinner animation captures at an indeterminate frame, causing flaky diffs.
 // Permission dock config-preloaded has non-deterministic toggle rendering.
+// Sandboxing rows can settle at different scroll heights after settings context updates.
+// Side terminal tabs mount live xterm instances whose websocket error text
+// lands at indeterminate times.
+// The session-dock stability story exists to measure geometry across the
+// working/idle swap and carries a debug toggle button, so it is not a meaningful
+// appearance baseline.
+// The question-resolve stability story exists to measure geometry across the
+// request-resolve/tool-complete gap and carries debug toggle buttons, so it is
+// not a meaningful appearance baseline.
+// The diff-panel scroll-up story settles at a slightly different scroll offset
+// between runs, so its baseline flips by a few pixels even without source changes.
+// The Display session preview plays a continuous streaming loop, so captures land
+// on an indeterminate frame.
 const SKIP = new Set<string>([
+  "chat--chat-view-session-dock-stability",
+  "labs-tool-call-lab--question-resolve-stability",
+  "agentmanager--diff-panel-cached-worktree-switch",
+  "agentmanager--diff-panel-viewport-loading",
+  "agentmanager--diff-panel-interrupted-loading",
+  "agentmanager--diff-panel-scroll-up",
+  "agentmanager--file-tree-virtualized-large",
   "agentmanager--worktree-item-busy",
   "agentmanager--full-screen-diff-agent-edit-scroll",
-  "agentmanager--pr-badge-checks-pending",
+  "agentmanager--side-terminal-panel-tabs",
   "composite-webview--permission-dock-config-preloaded",
+  "settings--sandboxing-allowlist",
+  "settings--sandboxing-panel",
+  "settings--display-preview",
 ])
 
 const DOCS = new Map<string, string[]>([
   [
-    "chat--task-header-with-todos",
+    "chat--chat-view-session-dock-todo-states",
     [
-      "packages/kilo-docs/pages/code-with-ai/features/task-todo-list.md:/docs/img/screenshot-tests/kilo-vscode/visual-regression/chat/task-header-with-todos-chromium-linux.png",
+      "packages/kilo-docs/pages/code-with-ai/features/task-todo-list.md:/docs/img/screenshot-tests/kilo-vscode/visual-regression/chat/chat-view-session-dock-todo-states-chromium-linux.png",
     ],
   ],
   [

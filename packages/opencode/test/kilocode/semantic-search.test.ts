@@ -1,3 +1,4 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { describe, expect, test, spyOn } from "bun:test"
 import path from "path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -11,7 +12,18 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { Tool } from "../../src/tool/tool"
 import { Truncate } from "../../src/tool/truncate"
 
-const rt = ManagedRuntime.make(Layer.mergeAll(Truncate.defaultLayer, Agent.defaultLayer))
+const rt = ManagedRuntime.make(Layer.mergeAll(AppNodeBuilder.build(Truncate.node), AppNodeBuilder.build(Agent.node)))
+
+const slash = (value: string) => value.replaceAll("\\", "/")
+
+/** A finished index, so empty-result wording does not depend on real indexing progress. */
+const complete = {
+  state: "Complete",
+  message: "Index up-to-date.",
+  processedFiles: 0,
+  totalFiles: 0,
+  percent: 100,
+} satisfies KiloIndexing.Status
 
 async function initTool() {
   return rt.runPromise(
@@ -53,6 +65,7 @@ describe("tool.semantic_search", () => {
       fn: async () => {
         const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
         const search = spyOn(KiloIndexing, "search").mockResolvedValue([])
+        const status = spyOn(KiloIndexing, "current").mockResolvedValue(complete)
 
         try {
           const tool = await initTool()
@@ -79,9 +92,15 @@ describe("tool.semantic_search", () => {
             path: "./src/../src/tool",
           })
           expect(search).toHaveBeenCalledWith("authentication middleware", path.normalize("src/tool"))
-          expect(result.output).toBe('No relevant code found for "authentication middleware" in src/tool.')
+          // The searched scope is named in full, so a caller can tell what an
+          // empty result actually covered.
+          expect(result.output.split("\n")[0]).toBe(
+            `No results for "authentication middleware" in ${slash(tmp.path)}/src/tool.`,
+          )
+          expect(result.metadata.root).toBe(slash(tmp.path))
         } finally {
           search.mockRestore()
+          status.mockRestore()
         }
       },
     })
@@ -93,16 +112,23 @@ describe("tool.semantic_search", () => {
       directory: tmp.path,
       fn: async () => {
         const search = spyOn(KiloIndexing, "search").mockResolvedValue([])
+        const status = spyOn(KiloIndexing, "current").mockResolvedValue(complete)
 
         try {
           const tool = await initTool()
           const result = await rt.runPromise(tool.execute({ query: "database connection" }, baseCtx))
 
           expect(search).toHaveBeenCalledWith("database connection", undefined)
-          expect(result.output).toBe('No relevant code found for "database connection".')
+          expect(result.output.split("\n")).toEqual([
+            `No results for "database connection" in ${slash(tmp.path)}.`,
+            "The index is up to date, so no semantically similar code exists in this scope.",
+            `Only ${slash(tmp.path)} is indexed. Files in other workspace folders are not searchable here — reach them with Read, Grep or Glob on an absolute path.`,
+          ])
           expect(result.metadata.results).toEqual([])
+          expect(result.metadata.state).toBe("Complete")
         } finally {
           search.mockRestore()
+          status.mockRestore()
         }
       },
     })
@@ -154,7 +180,7 @@ describe("tool.semantic_search", () => {
               codeChunk: "export const verify = () => true",
             },
           ])
-          expect(result.output).toContain('Found 1 result for "verify token".')
+          expect(result.output).toContain(`Found 1 result for "verify token" in ${slash(tmp.path)}.`)
           expect(result.output).toContain("1. src/auth/index.ts:10-18 (score 0.8123)")
           expect(result.output).toContain("export const verify = () => true")
         } finally {

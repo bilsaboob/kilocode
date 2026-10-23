@@ -2,13 +2,6 @@
 // Keys here will override any matching keys from upstream translations
 export const dict = {
   // Kilo Gateway provider translations
-  "provider.connect.kiloGateway.line1":
-    "Kilo Gateway ti offre una selezione curata di modelli affidabili e ottimizzati per agenti di coding.",
-  "provider.connect.kiloGateway.line2":
-    "Con una sola API key puoi accedere a modelli come Claude, GPT, Gemini, GLM e altri.",
-  "provider.connect.kiloGateway.visit.prefix": "Visita ",
-  "provider.connect.kiloGateway.visit.link": "kilo.ai",
-  "provider.connect.kiloGateway.visit.suffix": " per ottenere la tua API key.",
   "provider.connect.kiloGateway.byok.prefix": "Per ulteriori statistiche sull'utilizzo, utilizza ",
   "provider.connect.kiloGateway.byok.link": "BYOK tramite Kilo's Gateway",
   "provider.connect.kiloGateway.byok.suffix": ".",
@@ -26,15 +19,9 @@ export const dict = {
   "settings.providers.note.vercel": "Accesso unificato ai modelli IA con routing intelligente",
 
   // Reasoning block label
-  "ui.permission.run": "Esegui",
   "ui.reasoning.label": "Ragionamento",
 
   // Marketplace
-  "marketplace.tab.skills": "Skill",
-  "marketplace.tab.mcpServers": "Server MCP",
-  "marketplace.tab.agents": "Agenti",
-  "marketplace.category.all": "Tutti",
-  "marketplace.placeholder": "Da implementare",
   "marketplace.card.installed": "Installato",
   "marketplace.card.install": "Installa",
   "marketplace.card.remove": "Rimuovi",
@@ -45,6 +32,30 @@ export const dict = {
   "marketplace.install.scope": "Ambito",
   "marketplace.install.scope.project": "Progetto",
   "marketplace.install.scope.global": "Globale",
+  "marketplace.install.scope.project.description":
+    "Solo questo progetto. I file installati possono essere aggiunti al controllo versione e condivisi con il team.",
+  "marketplace.install.scope.global.description":
+    "Tutti i progetti su questo computer. Viene salvato nella configurazione utente.",
+  "marketplace.install.destination": "Destinazione dell'installazione",
+  "marketplace.install.includedSkills": "Skill incluse",
+  "marketplace.install.about.mcp":
+    "Un server MCP fornisce a Kilo strumenti aggiuntivi per interagire con servizi esterni o programmi locali.",
+  "marketplace.install.about.agent":
+    "Un agente aggiunge un ruolo riutilizzabile con istruzioni e autorizzazioni proprie.",
+  "marketplace.install.about.skill":
+    "Una skill aggiunge istruzioni e risorse specifiche per un'attività che Kilo può caricare quando necessario.",
+  "marketplace.install.mcp.warning":
+    "I server MCP possono eseguire comandi locali o connettersi a servizi esterni. Kilo chiederà l'autorizzazione prima di usare i loro strumenti, a meno che le tue autorizzazioni non lo consentano automaticamente.",
+  "marketplace.install.project.warning":
+    "I file del progetto possono essere aggiunti al controllo versione. Non salvare segreti qui, a meno che la configurazione non faccia riferimento a una variabile di ambiente.",
+  "marketplace.install.learnMore": "Scopri come funzionano le installazioni dal Marketplace",
+  "marketplace.install.learnMcp": "Scopri di più su MCP",
+  "marketplace.install.about.plugin":
+    "Un plugin aggiunge strumenti e integrazioni personalizzati a Kilo. I plugin vengono eseguiti con tutte le autorizzazioni.",
+  "marketplace.install.plugin.warning":
+    "I plugin eseguono codice con tutte le autorizzazioni. Possono leggere e modificare i tuoi file, eseguire comandi e accedere alle tue credenziali e alla tua rete. Installa solo plugin di cui ti fidi.",
+  "marketplace.intro": "Installa agenti, skill, strumenti MCP e plugin riutilizzabili per uno o tutti i progetti.",
+  "marketplace.intro.learnMore": "Informazioni sul Marketplace",
   "marketplace.install.prerequisites": "Prerequisiti",
   "marketplace.install.installing": "Installazione...",
   "marketplace.install.cancel": "Annulla",
@@ -52,25 +63,35 @@ export const dict = {
   "marketplace.install.failed": "Installazione non riuscita",
   "marketplace.install.done": "Fatto",
   "marketplace.install.close": "Chiudi",
+  "marketplace.install.mcp.signIn.message": "{{name}} è installato, ma richiede l'accesso prima che i suoi strumenti possano essere usati.",
+  "marketplace.install.mcp.signIn.button": "Accedi",
+  "marketplace.install.mcp.signIn.waiting": "In attesa dell'accesso tramite browser…",
+  "marketplace.install.mcp.signIn.cancel": "Annulla",
+  "marketplace.install.mcp.signIn.skip": "Più tardi",
+  "marketplace.install.mcp.signIn.success": "Accesso effettuato a {{name}}.",
+  "marketplace.install.mcp.signIn.failed": "Accesso a {{name}} non riuscito.",
   "marketplace.remove.title": "Rimuovere {{name}}?",
   "marketplace.remove.confirm": "Vuoi davvero rimuovere questo {{type}}? Verrà rimosso dalla configurazione {{scope}}.",
   "marketplace.remove.cancel": "Annulla",
+  "marketplace.remove.mcp.skills":
+    "Questa operazione rimuove anche le skill complementari appartenenti a questa installazione. Le skill installate in modo indipendente vengono conservate.",
   "marketplace.remove.confirm.button": "Rimuovi",
-  "marketplace.tab.mcp": "MCP",
   "marketplace.search": "Cerca...",
   "marketplace.filter.all": "Tutti gli elementi",
   "marketplace.filter.notInstalled": "Non installati",
+  "marketplace.filter.relevant": "Rilevanti per il mio spazio di lavoro",
   "marketplace.empty": "Nessun elemento trovato",
+  "marketplace.empty.relevant": "Nessun elemento rilevante del marketplace trovato per questo spazio di lavoro.",
   "marketplace.badge.mcpServer": "Server MCP",
-  "marketplace.badge.mode": "Modalità",
+  "marketplace.badge.skills": "Include skill",
   "marketplace.card.by": "di {{author}}",
   "marketplace.install.method": "Metodo di installazione",
   "marketplace.install.parameters": "Parametri",
   "marketplace.install.optional": "(opzionale)",
-  "marketplace.install.required": "{{name}} è obbligatorio",
   "marketplace.scope.project": "progetto",
   "marketplace.scope.global": "globale",
   "marketplace.remove.type.mcp": "server MCP",
+  "marketplace.remove.type.plugin": "plugin",
   "marketplace.remove.type.skill": "skill",
   "marketplace.remove.type.agent": "agente",
   "marketplace.remove.failed": "Rimozione di {{name}} non riuscita",
@@ -81,7 +102,7 @@ export const dict = {
   "marketplace.warning.busyMany": "Più sessioni sono attive e verranno interrotte",
   "marketplace.warning.installAnyway": "Installa comunque",
   "marketplace.warning.cancel": "Annulla",
-  "marketplace.contribute.prompt": "Manca una skill, una modalità o un server MCP?",
+  "marketplace.contribute.prompt": "Manca una skill, un agente, un server MCP o un plugin?",
   "marketplace.contribute.cta": "Contribuisci su GitHub",
   "marketplace.migration.notice":
     "Le Modalità sono state sostituite dagli agenti. Se in precedenza hai installato Modalità dal marketplace, rimuovile e reinstallale come agenti per migrare al nuovo formato.",
@@ -93,6 +114,8 @@ export const dict = {
   "plan.followup.answer.newSession.description": "Implementa in una nuova sessione con contesto vuoto",
   "plan.followup.answer.continue": "Continua qui",
   "plan.followup.answer.continue.description": "Implementa il piano in questa sessione",
+  "plan.followup.answer.keepRefining": "Continua a rifinire",
+  "plan.followup.answer.keepRefining.description": "Continua a pianificare senza implementare per ora",
 
   "snapshot.slowRepo.header": "Snapshot lento",
   "snapshot.slowRepo.question":
@@ -105,8 +128,6 @@ export const dict = {
     "Disattiva gli snapshot di Kilo per questo progetto. Perderai annulla/ripeti sulle modifiche ai file fatte da Kilo, ma git continuerà a tracciare tutto.",
 
   "ui.messagePart.openInDiffViewer": "Apri nel visualizzatore diff",
-  "ui.messagePart.shell.command": "Comando",
-  "ui.messagePart.shell.output": "Output",
   "ui.messagePart.openInEditor": "Apri nell'editor",
 
   "ui.message.feedback.helpful": "È stato utile",

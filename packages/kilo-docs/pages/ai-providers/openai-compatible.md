@@ -23,29 +23,6 @@ Use Kilo Code's native `azure` provider instead. If your Azure deployment name d
 ## General Configuration
 
 {% tabs %}
-{% tab label="VSCode (Legacy)" %}
-
-The key to using an OpenAI-compatible provider is to configure two main settings:
-
-1.  **Base URL:** This is the API endpoint for the provider. It will _not_ be `https://api.openai.com/v1` (that's for the official OpenAI API). For Azure OpenAI GPT-5, do not enter your Azure endpoint here. Configure the native `azure` provider instead.
-2.  **API Key:** This is the secret key you obtain from the provider.
-3.  **Model ID:** This is the model name of the specific model.
-
-You'll find these settings in the Kilo Code settings panel (click the {% codicon name="gear" /%} icon):
-
-- **API Provider:** Select "OpenAI Compatible".
-- **Base URL:** Enter the base URL provided by your chosen provider. **This is crucial.**
-- **API Key:** Enter your API key.
-- **Model:** Choose a model.
-- **Model Configuration:** This lets you customize advanced configuration for the model
-  - Max Output Tokens
-  - Context Window
-  - Image Support
-  - Computer Use
-  - Input Price
-  - Output Price
-
-{% /tab %}
 {% tab label="VSCode" %}
 
 1. Open **Settings** (gear icon) and go to the **Providers** tab.
@@ -80,6 +57,8 @@ Once you enter a valid **Base URL** and **API Key**, Kilo Code will query the pr
 - **Edit** an existing custom provider to add or remove models later
 
 This eliminates the need to manually look up and type model IDs. If auto-detection fails (for example, if the provider doesn't support the `/v1/models` endpoint), you can still enter model IDs manually.
+
+Click **Fetch models** next to the model list to retry the fetch at any time, for example after fixing the base URL or API key.
 
 {% /tab %}
 {% tab label="CLI" %}
@@ -125,6 +104,7 @@ Then set your default model using the `provider-id/model-id` format:
 - **`models`** — A map of model IDs to model definitions. Each model should include a `name` and `limit` with `context` and `output` token counts. If `limit.context` or `limit.output` is omitted, it defaults to `0`, which limits context management.
 - **`options.baseURL`** — The base URL of your provider's API endpoint. For Azure OpenAI GPT-5, configure `provider.azure` instead.
 - **`options.apiKey`** — Your API key. Use any non-empty string (e.g., `"none"`) if the provider doesn't require authentication.
+- **`options.kiloOpenAICompatibleToolCallContent`** — Set to `"empty-string"` only when this endpoint requires an empty string for assistant messages containing tool calls. The default preserves the SDK's `null` content.
 
 You can also set the API key via an environment variable instead of putting it in the config file. Use the `env` field to specify which variable to read:
 

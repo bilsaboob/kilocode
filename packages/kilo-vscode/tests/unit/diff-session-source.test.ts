@@ -91,6 +91,57 @@ describe("createSessionDiffSource.fetch", () => {
     expect(result.diffs[2]?.summarized).toBe(true)
   })
 
+  it("uses repository generated-file classifications for session diffs", async () => {
+    const { fetch } = recording([
+      { file: "i18n/en.ts", patch: modifiedPatch, additions: 1, deletions: 1, status: "modified" },
+      { file: "i18n/fr.ts", patch: modifiedPatch, additions: 1, deletions: 1, status: "modified" },
+      { file: "dist/bundle.js", patch: modifiedPatch, additions: 1, deletions: 1, status: "modified" },
+    ])
+    const generated = async (files: readonly string[]) =>
+      new Map(files.filter((file) => file === "i18n/fr.ts").map((file) => [file, true]))
+
+    const result = await createSessionDiffSource("s-generated", fetch, "/repo", undefined, generated).fetch()
+
+    expect(result.diffs.map((diff) => [diff.file, diff.generatedLike])).toEqual([
+      ["i18n/en.ts", false],
+      ["i18n/fr.ts", true],
+      ["dist/bundle.js", true],
+    ])
+  })
+
+  it("keeps valid files visible when one persisted patch is malformed", async () => {
+    const malformed = [
+      "diff --git a/broken.ts b/broken.ts",
+      "--- a/broken.ts",
+      "+++ b/broken.ts",
+      "@@ -1,2 +1,2 @@",
+      "-old",
+      "+new",
+      "",
+    ].join("\n")
+    const { fetch } = recording([
+      { file: "broken.ts", patch: malformed, additions: 1, deletions: 1, status: "modified" },
+      { file: "foo.ts", patch: modifiedPatch, additions: 1, deletions: 1, status: "modified" },
+    ])
+
+    const result = await createSessionDiffSource("s-malformed", fetch, "/repo").fetch()
+
+    expect(result.diffs).toHaveLength(2)
+    expect(result.diffs[0]).toMatchObject({
+      file: "broken.ts",
+      before: "",
+      after: "",
+      patch: malformed,
+      summarized: true,
+    })
+    expect(result.diffs[1]).toMatchObject({
+      file: "foo.ts",
+      before: "keep\nold\n",
+      after: "keep\nnew\n",
+      summarized: false,
+    })
+  })
+
   it("rebuilds text-backed SVG snapshot sides without sending them to Pierre", async () => {
     const before = '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="red"/></svg>'
     const after = '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="blue"/></svg>'

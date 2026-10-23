@@ -6,12 +6,25 @@ on:
       - ".github/**"
       - "github/**"
       - "packages/extensions/**"
+      - "packages/kilo-*/**"
+      - "packages/*/src/kilocode/**"
+      - "packages/*/src/kilo-*/**"
+      - "packages/plugin-atomic-chat/**"
       - "packages/opencode/**"
+      - "packages/core/**"
+      - "packages/llm/**"
+      - "packages/schema/**"
+      - "packages/protocol/**"
+      - "packages/server/**"
+      - "packages/tui/**"
       - "packages/script/**"
       - "packages/shared/**"
       - "packages/storybook/**"
       - "packages/ui/**"
       - "script/**"
+      - "package.json"
+      - "bun.lock"
+      - "!packages/kilo-jetbrains/**"
   workflow_dispatch:
 
 jobs:
@@ -25,7 +38,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      # kilocode_change start
+      - uses: ./.github/actions/setup-bun
+        with:
+          install: false
+      # kilocode_change end
 
       - name: Check kilocode_change annotations in shared upstream files
         env:
@@ -40,6 +57,16 @@ jobs:
       # kilocode_change start
       - name: Check Effect Promise facade allowlist
         run: bun run script/check-opencode-promise-facades.ts
+
+      - name: Check domain architecture boundaries and ratchets
+        run: bun run script/check-architecture.ts
+
+      - name: Test the Kilo duplication ratchet
+        working-directory: packages/script
+        run: bun test ./tests/check-kilocode-duplication.test.ts
+
+      - name: Check Kilo-owned code duplication
+        run: bun run check:duplication
 
       - name: Check model tool network boundary
         run: bun run script/check-model-tool-network.ts

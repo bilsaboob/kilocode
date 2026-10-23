@@ -1,7 +1,6 @@
 import * as fs from "fs/promises"
 import * as vscode from "vscode"
 import { GitOps } from "../../agent-manager/GitOps"
-import { generatedLike } from "../../agent-manager/local-diff"
 import { appendOutput, getWorkspaceRoot } from "../../review-utils"
 import { binaryFile } from "../shared/binary"
 import { imageMime, loadImage } from "../shared/image"
@@ -11,6 +10,8 @@ import type { DiffSource, DiffSourceDescriptor, DiffSourceFetch } from "./types"
 import {
   blobOid,
   blobSize,
+  applyGeneratedAttributes,
+  createFileEntry,
   diskStamp,
   fileSize,
   INDEX_REF,
@@ -22,6 +23,7 @@ import {
   readDiskBytes,
   showBlob,
   showBlobBytes,
+  stamp,
   summarize,
   type FileEntry,
 } from "./git-status"
@@ -35,9 +37,21 @@ export const UNSTAGED_DESCRIPTOR: DiffSourceDescriptor = {
   capabilities: { revert: false, comments: true },
 }
 
-function stamp(entry: FileEntry, before: string, after: string): FileEntry {
-  if (!imageMime(entry.file)) return entry
-  return { ...entry, stamp: `${entry.status}:${before}:${after}` }
+export interface UnstagedDiffSourceOptions {
+  /**
+   * Resolve the directory to diff. Defaults to the VS Code workspace root.
+   * Agent Manager passes a worktree path so the source diffs inside the
+   * worktree rather than the main checkout.
+   */
+  dir?: () => string | undefined
+  /**
+   * When true, a `dir` that resolves to undefined yields an empty diff rather
+   * than falling back to the workspace root.
+   */
+  strictDir?: boolean
+  /** Shared GitOps / log so sources don't each spawn their own channel. */
+  git?: GitOps
+  log?: (...args: unknown[]) => void
 }
 
 /**
@@ -45,12 +59,17 @@ function stamp(entry: FileEntry, before: string, after: string): FileEntry {
  * tracked files, plus untracked files (treated as fully-added). Read-only;
  * polls on the standard interval.
  */
-export function createUnstagedDiffSource(): DiffSource {
-  const output = vscode.window.createOutputChannel("Kilo Diff: Unstaged")
-  const log = (...args: unknown[]) => appendOutput(output, "UnstagedDiffSource", ...args)
-  const git = new GitOps({ log })
+export function createUnstagedDiffSource(opts: UnstagedDiffSourceOptions = {}): DiffSource {
+  const output = opts.git ? undefined : vscode.window.createOutputChannel("Kilo Diff: Unstaged")
+  const log = opts.log ?? ((...args: unknown[]) => appendOutput(output!, "UnstagedDiffSource", ...args))
+  const git = opts.git ?? new GitOps({ log })
 
-  const root = (): string | undefined => getWorkspaceRoot()
+  const root = (): string | undefined => {
+    const dir = opts.dir?.()
+    if (dir) return dir
+    if (opts.strictDir) return undefined
+    return getWorkspaceRoot()
+  }
 
   const listTracked = async (dir: string): Promise<FileEntry[]> => {
     const [nameStatus, numstat, raw] = await Promise.all([
@@ -131,8 +150,9 @@ export function createUnstagedDiffSource(): DiffSource {
       // defensive — git can race here when files are added concurrently).
       const seen = new Set(tracked.map((t) => t.file))
       const merged = tracked.concat(untracked.filter((u) => !seen.has(u.file)))
-      log(`Unstaged diff: ${merged.length} file(s) (${tracked.length} tracked, ${untracked.length} untracked)`)
-      return { diffs: merged.map(summarize) }
+      const marked = await applyGeneratedAttributes(git, dir, merged)
+      log(`Unstaged diff: ${marked.length} file(s) (${tracked.length} tracked, ${untracked.length} untracked)`)
+      return { diffs: marked.map(summarize) }
     },
 
     async fetchFile(file: string): Promise<DiffFile | null> {
@@ -181,7 +201,7 @@ export function createUnstagedDiffSource(): DiffSource {
         deletions: entry.deletions,
         status: entry.status,
         tracked: entry.tracked,
-        generatedLike: generatedLike(file),
+        generatedLike: entry.generatedLike,
         summarized,
         // Match the summary stamp so cache invalidation is consistent across
         // summarize → fetchFile transitions. `entry.stamp` is set for
@@ -192,8 +212,10 @@ export function createUnstagedDiffSource(): DiffSource {
     },
 
     dispose(): void {
-      git.dispose()
-      output.dispose()
+      // Only dispose resources we own (created here). Injected git/log are
+      // owned by the caller.
+      if (!opts.git) git.dispose()
+      output?.dispose()
     },
   }
 }
@@ -243,20 +265,15 @@ async function fileEntry(
         dir,
       )
       const stats = parseNumstat(counts.code === 0 ? counts.stdout : "")
-      const entry = {
-        file: item.file,
-        status: item.status,
-        additions: stats.get(item.file)?.additions ?? 0,
-        deletions: stats.get(item.file)?.deletions ?? 0,
-        tracked: true,
-        binary: stats.get(item.file)?.binary ?? false,
-      }
-      if (!imageMime(item.file)) return entry
+      const entry = createFileEntry(item, stats)
+      const marked = (await applyGeneratedAttributes(git, dir, [entry])).at(0)
+      if (!marked) return undefined
+      if (!imageMime(item.file)) return marked
       const [before, after] = await Promise.all([
         item.status === "added" ? "missing" : blobOid(git, dir, INDEX_REF, item.file),
         item.status === "deleted" ? "missing" : diskStamp(dir, item.file),
       ])
-      return stamp(entry, before, after)
+      return stamp(marked, before, after)
     }
   }
 
@@ -276,15 +293,16 @@ async function fileEntry(
     log("Unstaged file not found", { file })
     return undefined
   }
-  return {
+  const entry = {
     file,
-    status: "added",
+    status: "added" as const,
     additions: 0,
     deletions: 0,
     tracked: false,
     binary: await binaryFile(full),
     stamp: `added:untracked:${stat.size}:${stat.mtimeMs}`,
   }
+  return (await applyGeneratedAttributes(git, dir, [entry])).at(0)
 }
 
 function lineCount(text: string): number {

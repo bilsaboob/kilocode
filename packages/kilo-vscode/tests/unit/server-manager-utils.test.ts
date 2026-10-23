@@ -1,9 +1,10 @@
 import { describe, it, expect } from "bun:test"
-import { parseServerPort } from "../../src/services/cli-backend/server-utils"
+import { parseServerPort, scanServerPort } from "../../src/services/cli-backend/server-utils"
 import {
   resolveServerCwd,
   resolveIndexingEnv,
   resolveManagedServerEnv,
+  resolveClaudeMigrationEnv,
   toErrorMessage,
 } from "../../src/services/cli-backend/server-manager"
 import {
@@ -60,6 +61,51 @@ describe("parseServerPort", () => {
   it("matches only first occurrence when multiple ports present", () => {
     const output = "listening on http://127.0.0.1:3000 and http://127.0.0.1:4000"
     expect(parseServerPort(output)).toBe(3000)
+  })
+
+  it("waits for the complete startup line before resolving a split port", () => {
+    const first = "kilo server listening on http://127.0.0.1:43"
+
+    expect(parseServerPort(first, true)).toBeNull()
+    expect(parseServerPort(`${first}123\n`, true)).toBe(43123)
+  })
+
+  it("detects a startup announcement split across stdout chunks", () => {
+    const first = "kilo server listening on http://127.0."
+    const second = "0.1:43123\n"
+
+    expect(parseServerPort(first, true)).toBeNull()
+    expect(parseServerPort(`${first}${second}`, true)).toBe(43123)
+  })
+
+  it("accepts complete Windows startup lines", () => {
+    expect(parseServerPort("kilo server listening on http://127.0.0.1:43123\r\n", true)).toBe(43123)
+  })
+})
+
+describe("scanServerPort", () => {
+  it("detects startup announcements split across stdout chunks", () => {
+    const first = scanServerPort("", "kilo server listening on http://127.0.", 1024)
+    const second = scanServerPort(first.output, "0.1:43123\n", 1024)
+
+    expect(first.port).toBeNull()
+    expect(second.port).toBe(43123)
+  })
+
+  it("waits for split port digits before resolving startup", () => {
+    const first = scanServerPort("", "kilo server listening on http://127.0.0.1:43", 1024)
+    const second = scanServerPort(first.output, "123\n", 1024)
+
+    expect(first.port).toBeNull()
+    expect(second.port).toBe(43123)
+  })
+
+  it("preserves startup announcements followed by oversized stdout chunks", () => {
+    const chunk = `kilo server listening on http://127.0.0.1:43123\n${"x".repeat(1024)}`
+    const state = scanServerPort("", chunk, 1024)
+
+    expect(state.port).toBe(43123)
+    expect(state.output).toHaveLength(1024)
   })
 })
 
@@ -136,14 +182,21 @@ describe("cli tree-sitter resources", () => {
       const helper = path.join(path.dirname(source), "bwrap")
       const license = path.join(path.dirname(source), "licenses", "bubblewrap", "COPYING")
       const notice = path.join(path.dirname(license), "NOTICE")
+      const relay = path.join(path.dirname(source), "kilo-sandbox-network-relay.js")
+      const seccomp = path.join(path.dirname(source), "kilo-sandbox-seccomp")
+      const runtimeLicense = path.join(path.dirname(source), "licenses", "sandbox-runtime", "LICENSE")
 
       await fs.mkdir(path.dirname(license), { recursive: true })
+      await fs.mkdir(path.dirname(runtimeLicense), { recursive: true })
       await fs.mkdir(path.dirname(target), { recursive: true })
       await fs.writeFile(source, "binary")
       await fs.writeFile(target, "binary")
       await fs.writeFile(helper, "helper")
       await fs.writeFile(license, "LGPL")
       await fs.writeFile(notice, "SPDX-License-Identifier: LGPL-2.0-or-later")
+      await fs.writeFile(relay, "relay")
+      await fs.writeFile(seccomp, "seccomp")
+      await fs.writeFile(runtimeLicense, "Apache-2.0")
 
       await copySandboxResources(source, target)
 
@@ -155,6 +208,42 @@ describe("cli tree-sitter resources", () => {
       )
       expect(await fs.readFile(path.join(path.dirname(target), "licenses", "bubblewrap", "NOTICE"), "utf8")).toBe(
         "SPDX-License-Identifier: LGPL-2.0-or-later",
+      )
+      expect(await fs.readFile(path.join(path.dirname(target), "kilo-sandbox-network-relay.js"), "utf8")).toBe("relay")
+      const copiedSeccomp = path.join(path.dirname(target), "kilo-sandbox-seccomp")
+      expect(await fs.readFile(copiedSeccomp, "utf8")).toBe("seccomp")
+      expect((await fs.stat(copiedSeccomp)).mode & 0o111).not.toBe(0)
+      expect(await fs.readFile(path.join(path.dirname(target), "licenses", "sandbox-runtime", "LICENSE"), "utf8")).toBe(
+        "Apache-2.0",
+      )
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("copies seccomp licensing when bundled Bubblewrap is omitted", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "kilo-vscode-seccomp-license-"))
+    try {
+      const source = path.join(root, "dist", "bin", "kilo")
+      const target = path.join(root, "extension", "bin", "kilo")
+      const relay = path.join(path.dirname(source), "kilo-sandbox-network-relay.js")
+      const seccomp = path.join(path.dirname(source), "kilo-sandbox-seccomp")
+      const license = path.join(path.dirname(source), "licenses", "sandbox-runtime", "LICENSE")
+
+      await fs.mkdir(path.dirname(license), { recursive: true })
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      await fs.writeFile(source, "binary")
+      await fs.writeFile(target, "binary")
+      await fs.writeFile(relay, "relay")
+      await fs.writeFile(seccomp, "seccomp")
+      await fs.writeFile(license, "Apache-2.0")
+
+      await copySandboxResources(source, target)
+
+      expect(await fs.readFile(path.join(path.dirname(target), "kilo-sandbox-network-relay.js"), "utf8")).toBe("relay")
+      expect(await fs.readFile(path.join(path.dirname(target), "kilo-sandbox-seccomp"), "utf8")).toBe("seccomp")
+      expect(await fs.readFile(path.join(path.dirname(target), "licenses", "sandbox-runtime", "LICENSE"), "utf8")).toBe(
+        "Apache-2.0",
       )
     } finally {
       await fs.rm(root, { recursive: true, force: true })
@@ -252,6 +341,34 @@ describe("toErrorMessage", () => {
     const result = toErrorMessage("startup failed", ["some output"])
     expect(result.error).toBe("startup failed")
   })
+
+  it("formats structured spawn error details with syscall, errno, and args", () => {
+    const spawnLines = [
+      "Error: spawn UNKNOWN",
+      "Code: UNKNOWN",
+      "Errno: -86",
+      "Syscall: spawn",
+      "Path: /path/to/bin/kilo",
+      'Spawn args: ["serve","--port","0"]',
+    ]
+    const result = toErrorMessage("Failed to spawn CLI binary (UNKNOWN)", spawnLines, "/path/to/bin/kilo")
+    expect(result.userMessage).toBe("spawn UNKNOWN")
+    expect(result.userDetails).toContain("CLI path: /path/to/bin/kilo")
+    expect(result.userDetails).toContain("Failed to spawn CLI binary (UNKNOWN)")
+    expect(result.userDetails).toContain("Syscall: spawn")
+    expect(result.userDetails).toContain("Errno: -86")
+  })
+
+  it("handles signal termination without stderr lines cleanly", () => {
+    const result = toErrorMessage(
+      "CLI process terminated by signal SIGSEGV before server started",
+      [],
+      "/path/to/bin/kilo",
+    )
+    expect(result.userMessage).toBe("CLI process terminated by signal SIGSEGV before server started")
+    expect(result.userDetails).toContain("CLI path: /path/to/bin/kilo")
+    expect(result.userDetails).toContain("CLI process terminated by signal SIGSEGV before server started")
+  })
 })
 
 describe("server workspace helpers", () => {
@@ -272,10 +389,24 @@ describe("server workspace helpers", () => {
     expect(resolveIndexingEnv([{ uri: { fsPath: "/repo" } }])).toEqual({})
   })
 
-  it("uses the shared database for the managed backend while preserving the environment", () => {
-    expect(resolveManagedServerEnv({ PATH: "/usr/bin", KILO_DISABLE_CHANNEL_DB: "false" })).toEqual({
+  it("disables unused managed-backend services while preserving the environment", () => {
+    expect(
+      resolveManagedServerEnv({
+        PATH: "/usr/bin",
+        KILO_DISABLE_CHANNEL_DB: "false",
+        KILO_EXPERIMENTAL_DISABLE_FILEWATCHER: "false",
+      }),
+    ).toEqual({
       PATH: "/usr/bin",
       KILO_DISABLE_CHANNEL_DB: "true",
+      KILO_EXPERIMENTAL_DISABLE_FILEWATCHER: "true",
     })
+  })
+
+  it("uses the explicit migration environment value before the setting", () => {
+    expect(resolveClaudeMigrationEnv({}, false)).toBe("false")
+    expect(resolveClaudeMigrationEnv({}, true)).toBe("true")
+    expect(resolveClaudeMigrationEnv({ KILO_EXPERIMENTAL_CLAUDE_MIGRATION: "false" }, true)).toBe("false")
+    expect(resolveClaudeMigrationEnv({ KILO_EXPERIMENTAL_CLAUDE_MIGRATION: "" }, true)).toBe("")
   })
 })

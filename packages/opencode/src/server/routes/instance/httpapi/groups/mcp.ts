@@ -1,5 +1,5 @@
 import { MCP } from "@/mcp"
-import { ConfigMCP } from "@/config/mcp"
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { McpServerNotFoundError } from "../errors"
@@ -7,10 +7,11 @@ import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { McpApps } from "@/kilocode/mcp/apps" // kilocode_change - MCP Apps schemas live in Kilo-owned code
 
 export const AddPayload = Schema.Struct({
   name: Schema.String,
-  config: ConfigMCP.Info,
+  config: ConfigMCPV1.Info,
 })
 
 export const StatusMap = Schema.Record(Schema.String, MCP.Status)
@@ -21,6 +22,11 @@ export const AuthStartResponse = Schema.Struct({
 export const AuthCallbackPayload = Schema.Struct({
   code: Schema.String,
 })
+// kilocode_change start - client-driven browser option
+export const AuthAuthenticatePayload = Schema.Struct({
+  external: Schema.optional(Schema.Boolean),
+})
+// kilocode_change end
 export const AuthRemoveResponse = Schema.Struct({
   success: Schema.Literal(true),
 })
@@ -34,8 +40,11 @@ export const McpPaths = {
   auth: "/mcp/:name/auth",
   authCallback: "/mcp/:name/auth/callback",
   authAuthenticate: "/mcp/:name/auth/authenticate",
+  authCancel: "/mcp/:name/auth/cancel", // kilocode_change
   connect: "/mcp/:name/connect",
   disconnect: "/mcp/:name/disconnect",
+  readResource: "/experimental/resource/read", // kilocode_change
+  callTool: "/experimental/mcp/call-tool", // kilocode_change
 } as const
 
 export const McpApi = HttpApi.make("mcp")
@@ -93,15 +102,32 @@ export const McpApi = HttpApi.make("mcp")
         HttpApiEndpoint.post("authAuthenticate", McpPaths.authAuthenticate, {
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
+          payload: [AuthAuthenticatePayload, Schema.Null], // kilocode_change - preserve bodyless callers
           success: described(MCP.Status, "OAuth authentication completed"),
           error: [UnsupportedOAuthError, McpServerNotFoundError],
+        // kilocode_change start - describe optional client-driven browser ownership
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.auth.authenticate",
             summary: "Authenticate MCP OAuth",
-            description: "Start OAuth flow and wait for callback (opens browser).",
+            description: "Start OAuth flow and wait for callback, optionally letting the client open the browser.",
           }),
         ),
+        // kilocode_change end
+        // kilocode_change start - cancel an active OAuth flow without deleting credentials
+        HttpApiEndpoint.post("authCancel", McpPaths.authCancel, {
+          params: { name: Schema.String },
+          query: WorkspaceRoutingQuery,
+          success: described(AuthRemoveResponse, "OAuth authentication cancelled"),
+          error: McpServerNotFoundError,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.auth.cancel",
+            summary: "Cancel MCP OAuth",
+            description: "Cancel an active OAuth flow without removing stored credentials.",
+          }),
+        ),
+        // kilocode_change end
         HttpApiEndpoint.delete("authRemove", McpPaths.auth, {
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
@@ -136,6 +162,34 @@ export const McpApi = HttpApi.make("mcp")
             description: "Disconnect an MCP server.",
           }),
         ),
+        // kilocode_change start - MCP Apps experimental endpoints
+        HttpApiEndpoint.post("readResource", McpPaths.readResource, {
+          query: WorkspaceRoutingQuery,
+          payload: McpApps.ReadResourcePayload,
+          success: described(McpApps.ReadResourceContent, "Resource content"),
+          error: [HttpApiError.NotFound, HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.readResource",
+            summary: "Read MCP resource",
+            description:
+              "Read a resource from a connected MCP server by URI. Used by MCP Apps to load UI resources.",
+          }),
+        ),
+        HttpApiEndpoint.post("callTool", McpPaths.callTool, {
+          query: WorkspaceRoutingQuery,
+          payload: McpApps.CallToolPayload,
+          success: described(McpApps.CallToolResponse, "Tool call result"),
+          error: [HttpApiError.NotFound, HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.callTool",
+            summary: "Call MCP tool",
+            description:
+              "Call a tool on a connected MCP server. Used by MCP Apps for widget-initiated tool calls.",
+          }),
+        ),
+        // kilocode_change end
       )
       .annotateMerge(
         OpenApi.annotations({

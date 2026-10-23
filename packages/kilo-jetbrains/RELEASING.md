@@ -4,11 +4,51 @@ JetBrains releases are locked by an immediate `jetbrains/v<version>` tag, then g
 
 The published code comes from `jetbrains/v<version>`. Marketplace and GitHub release notes come from the reviewed changelog merged in the release PR.
 
-## Skill-Assisted Release
+## Command-Assisted Release
 
-Maintainers can use the Kilo `release-jetbrains` skill to drive this process from a version request such as `next rc` or an explicit version. The skill resolves and confirms the version, dispatches and watches the prepare workflow, helps produce a filtered human-readable JetBrains/CLI changelog draft, commits the reviewed changelog to the release PR, and watches publishing after the PR is merged.
+Maintainers can use the Kilo `/release-jetbrains` command to drive this process from a version request such as `next rc` or an explicit version. The command resolves and confirms the version, dispatches and watches the prepare workflow, helps produce a filtered human-readable JetBrains/CLI changelog draft, commits the reviewed changelog to the release PR, and watches publishing after the PR is merged.
 
-The skill lives at `.kilo/skills/release-jetbrains/SKILL.md`. It does not move or recreate release tags, and merge permission is only required if the user explicitly asks the skill to merge the release PR automatically.
+JetBrains plugin builds and runtime downloads use the Kilo Core version pinned in `packages/kilo-jetbrains/package.json`, so verify that pin points at a published `v<version>` release before creating the release tag.
+
+`kilo.cli.pinned=false` in `packages/kilo-jetbrains/gradle.properties` is local development mode only. It generates the client from `packages/opencode/` and bundles a locally built CLI into the plugin; production Gradle builds and release scripts fail until the property is restored to `true`.
+
+The command lives at `.kilo/command/release-jetbrains.md` and reuses helper scripts at `.kilo/skills/release-jetbrains/script/`. It does not move or recreate release tags, and merge permission is only required if the user explicitly asks it to merge the release PR automatically.
+
+## CLI Pin Review
+
+The JetBrains plugin has two independent versions:
+
+| Field | Meaning |
+|---|---|
+| `packages/kilo-jetbrains/package.json` `version` | The pinned Kilo CLI release used for OpenAPI generation and runtime downloads. |
+| `packages/kilo-jetbrains/gradle.properties` `kilo.jetbrains.version` | The JetBrains Marketplace plugin version. |
+
+The prepare workflow tags `origin/main`, so the CLI pin that matters is the one already merged to `main`. Before creating a release tag, run:
+
+```bash
+bun .kilo/skills/release-jetbrains/script/check-pin.ts
+```
+
+The script reports the CLI that `origin/main` will lock, the latest published stable CLI release, the CLI shipped by the latest `jetbrains/v*` tag, whether `kilo.cli.pinned=true`, and whether all runtime assets exist. Stop before tagging if the pin is behind the latest CLI and you want to test the newer CLI first.
+
+To test a different CLI pin locally:
+
+```bash
+bun .kilo/skills/release-jetbrains/script/set-pin.ts --latest
+cd packages/kilo-jetbrains
+./gradlew typecheck
+./gradlew test
+```
+
+To land the tested pin on `main` before releasing:
+
+```bash
+bun .kilo/skills/release-jetbrains/script/set-pin.ts --latest --pr
+```
+
+Merge the generated pin PR first, then re-run `check-pin.ts` and dispatch prepare. Do not dispatch prepare from a local-only pin edit.
+
+CLI releases also try to open this pin bump PR automatically after publishing. The PR is labeled `jetbrains-cli-pin-bump`, and pre-release CLI bump PRs also receive the `pre-release` label, including preview-channel releases with a plain semver version. Release publishing does not fail if creating the PR fails; inspect the publish log for either the PR URL or the warning with manual follow-up instructions.
 
 ## Create Release Tag And PR
 
@@ -92,6 +132,16 @@ Publishing behavior:
 
 The workflow checks out `jetbrains/v<version>` for verification, signing, and Marketplace publishing. It overlays the reviewed `packages/kilo-jetbrains/gradle.properties` and `packages/kilo-jetbrains/CHANGELOG.md` from the merged PR before rendering release notes and before `publishPlugin`, so the Marketplace plugin version, Marketplace notes, and GitHub Release use the reviewed metadata.
 
+After Marketplace publishing succeeds, `publish-jetbrains` dispatches `publish-jetbrains-bundled`. The bundled workflow rebuilds the same `jetbrains/v<version>` tag with `-Pkilo.cli.bundled=true`, signs and verifies the all-platform plugin ZIP, then uploads `kilo-code-<version>-bundled.zip` to the same GitHub Release. Bundled builds keep `kilo.cli.pinned=true`; the build flag only embeds the pinned CLI release assets so runtime extracts the bundled current-platform CLI instead of downloading it.
+
+Stable bundled releases also publish the GitHub Pages custom plugin repository XML:
+
+```text
+https://kilo-org.github.io/kilocode/jetbrains/updatePlugins.xml
+```
+
+RC bundled ZIPs are attached to prereleases for install-from-disk testing, but they do not update the stable custom repository XML.
+
 ## Installing RC Builds
 
 RC builds are published to the `eap` channel. To get them in IntelliJ IDEA:
@@ -134,5 +184,3 @@ git push origin jetbrains/v7.3.13
 | `JETBRAINS_CERTIFICATE_CHAIN` | PEM certificate chain for plugin signing. |
 | `JETBRAINS_PRIVATE_KEY` | PEM private key for plugin signing. |
 | `JETBRAINS_PRIVATE_KEY_PASSWORD` | Password for the private key. |
-
-Before the first publish, complete `RELEASE_TODO.md` to set up these secrets and the Marketplace plugin entry.

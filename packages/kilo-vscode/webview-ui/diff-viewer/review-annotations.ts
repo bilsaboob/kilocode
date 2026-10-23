@@ -1,6 +1,9 @@
 import type { AnnotationSide, DiffLineAnnotation } from "@pierre/diffs"
+import type { UiI18nParams } from "@kilocode/kilo-ui/context"
 import type { WorktreeFileDiff } from "../src/types/messages"
 import { extractLines, type ReviewComment } from "./review-comments"
+import type { ReviewCommentEntry } from "../src/types/messages"
+import { post } from "../src/utils/webview-message"
 
 export interface AnnotationLabels {
   commentOnLine: (line: number) => string
@@ -8,10 +11,42 @@ export interface AnnotationLabels {
   placeholder: string
   cancel: string
   comment: string
+  send: string
   save: string
   sendToChat: string
   edit: string
   delete: string
+}
+
+export interface CommentFormActions {
+  body: string
+  onBodyChange: (body: string) => void
+  onSave: (body: string, selectedText: string) => void
+  onSend: (body: string, selectedText: string) => void
+  onGithubSuccess: () => void
+  onCancel: () => void
+  onDestination: (value: "local" | "github") => void
+}
+
+export type CommentFormMount = (
+  host: HTMLElement,
+  meta: AnnotationMeta,
+  actions: CommentFormActions,
+) => (() => void) | undefined
+
+export function labels(t: (key: string, params?: UiI18nParams) => string): AnnotationLabels {
+  return {
+    commentOnLine: (line) => t("agentManager.review.commentOnLine", { line }),
+    editCommentOnLine: (line) => t("agentManager.review.editCommentOnLine", { line }),
+    placeholder: t("agentManager.review.commentPlaceholder"),
+    cancel: t("common.cancel"),
+    comment: t("agentManager.review.commentAction"),
+    send: t("prompt.action.send"),
+    save: t("common.save"),
+    sendToChat: t("agentManager.review.sendToChat"),
+    edit: t("common.edit"),
+    delete: t("common.delete"),
+  }
 }
 
 // A draft is the active unsaved inline comment composer opened from the gutter.
@@ -25,6 +60,7 @@ export interface AnnotationMeta {
   endLine?: number
   editing?: boolean
   text?: string
+  destination?: "local" | "github"
 }
 
 export type ReviewDraft = Pick<AnnotationMeta, "file" | "side" | "line" | "endLine">
@@ -72,32 +108,46 @@ export function reviewAnnotationSpeechKey(meta: AnnotationMeta): string | undefi
 }
 
 interface AnnotationHandlers {
+  track?: (meta: AnnotationMeta, host: HTMLElement, dispose: () => void) => void
   diffs: WorktreeFileDiff[]
   editing: string | null
   setEditing: (id: string | null) => void
   addComment: (file: string, side: AnnotationSide, line: number, text: string, selectedText: string) => void
+  sendComment: (file: string, side: AnnotationSide, line: number, text: string, selectedText: string) => void
   updateComment: (id: string, text: string) => void
   deleteComment: (id: string) => void
   cancelDraft: () => void
+  completeRemoteDraft?: (meta: AnnotationMeta) => void
+  /** Remember the destination so the next comment keeps the same choice. */
+  onDestination?: (value: "local" | "github") => void
+  mount?: CommentFormMount
   labels: AnnotationLabels
-  activeTerminalId?: string
+  activeTerminalId: () => string | undefined
   speech?: {
     active: () => boolean
     render: (meta: AnnotationMeta, textarea: HTMLTextAreaElement) => HTMLElement | undefined
+    down: (meta: AnnotationMeta, event: KeyboardEvent, submit: () => void) => boolean
+    up: (meta: AnnotationMeta, event: KeyboardEvent) => boolean
   }
 }
 
-function focusWhenConnected(el: HTMLTextAreaElement): void {
+function focusWhenConnected(el: HTMLElement): () => void {
+  if (el.isConnected) {
+    el.focus()
+    return () => {}
+  }
   let attempts = 0
+  let frame = 0
   const tick = () => {
     if (el.isConnected) {
       el.focus()
       return
     }
     attempts += 1
-    if (attempts < 20) requestAnimationFrame(tick)
+    if (attempts < 20) frame = requestAnimationFrame(tick)
   }
-  requestAnimationFrame(tick)
+  frame = requestAnimationFrame(tick)
+  return () => cancelAnimationFrame(frame)
 }
 
 // Keep composer text off the disposable annotation DOM without making each keystroke reactive.
@@ -131,6 +181,15 @@ function makeActionButton(title: string, icon: SVGSVGElement, action: () => void
     action()
   })
   return button
+}
+
+export function sendReviewComments(comments: ReviewCommentEntry[], activeTerminalId?: string): void {
+  post({
+    type: activeTerminalId ? "appendReviewCommentsToTerminal" : "appendReviewComments",
+    comments,
+    autoSend: true,
+    targetTerminalId: activeTerminalId,
+  })
 }
 
 export function buildFileAnnotations(
@@ -214,6 +273,87 @@ export function buildReviewAnnotation(
   if (meta.type === "draft") {
     wrapper.className = "am-annotation am-annotation-draft"
 
+    if (handlers.mount) {
+      wrapper.dataset.mounted = "true"
+      const header = document.createElement("div")
+      header.className = "am-annotation-header"
+      header.textContent = handlers.labels.commentOnLine(meta.line)
+      wrapper.appendChild(header)
+      const host = document.createElement("div")
+      host.className = "am-annotation-form"
+      wrapper.appendChild(host)
+
+      let dispose: (() => void) | undefined
+      let unfocus: (() => void) | undefined
+      let speechField: HTMLTextAreaElement | undefined
+
+      const submit = () => {
+        // Speech-to-text confirms with the local action. GitHub publication stays
+        // on an explicit button click so a voice command cannot post by accident.
+        const kilo = host.querySelector<HTMLButtonElement>('[data-action="send-kilo"], [data-action="send"]')
+        if (kilo && !kilo.disabled) {
+          kilo.click()
+          return
+        }
+        const primary = host.querySelector<HTMLButtonElement>('[data-action="send-primary"]')
+        if (primary && primary.dataset.destination !== "github" && !primary.disabled) {
+          primary.click()
+          return
+        }
+        const fallback = host.querySelector<HTMLButtonElement>('[data-action="submit"]')
+        if (fallback && !fallback.disabled) fallback.click()
+      }
+
+      // Keep focus and speech-to-text attached to the mounted form's editor.
+      const afterMount = () => {
+        const field = host.querySelector<HTMLTextAreaElement>("textarea")
+        if (!field) return
+        unfocus?.()
+        unfocus = focusWhenConnected(field)
+        if (handlers.speech && field !== speechField) {
+          speechField = field
+          field.addEventListener("keydown", (event) => {
+            if (!handlers.speech?.down(meta, event, submit)) return
+            event.preventDefault()
+            event.stopPropagation()
+          })
+          field.addEventListener("keyup", (event) => {
+            if (!handlers.speech?.up(meta, event)) return
+            event.preventDefault()
+            event.stopPropagation()
+          })
+        }
+        if (!handlers.speech) return
+        const row = host.querySelector('[data-slot="comment-actions"]')
+        const speechHost = handlers.speech.render(meta, field)
+        if (speechHost && row) row.prepend(speechHost)
+      }
+
+      dispose = handlers.mount(host, meta, {
+        body: meta.text ?? "",
+        onBodyChange: (body) => {
+          meta.text = body
+        },
+        onSave: (body, selected) => handlers.addComment(meta.file, meta.side, meta.line, body.trim(), selected),
+        onSend: (body, selected) => handlers.sendComment(meta.file, meta.side, meta.line, body.trim(), selected),
+        onGithubSuccess: () => handlers.completeRemoteDraft?.(meta),
+        onCancel: handlers.cancelDraft,
+        onDestination: (value) => {
+          meta.destination = value
+          handlers.onDestination?.(value)
+        },
+      })
+      afterMount()
+
+      handlers.track?.(meta, wrapper, () => {
+        unfocus?.()
+        dispose?.()
+        dispose = undefined
+      })
+      return wrapper
+    }
+
+    // Fallback native composer for surfaces without a mounted form (for example the document panel).
     const header = document.createElement("div")
     header.className = "am-annotation-header"
     header.textContent = handlers.labels.commentOnLine(meta.line)
@@ -235,15 +375,28 @@ export function buildReviewAnnotation(
     submitButton.className = "am-annotation-btn am-annotation-btn-submit"
     submitButton.textContent = handlers.labels.comment
 
+    const sendButton = document.createElement("button")
+    sendButton.className = "am-annotation-btn am-annotation-btn-submit"
+    sendButton.textContent = handlers.labels.send
+    sendButton.title = handlers.labels.sendToChat
+
+    const update = () => {
+      const disabled = textarea.value.trim().length === 0
+      submitButton.disabled = disabled
+      sendButton.disabled = disabled
+    }
+
     const speech = handlers.speech?.render(meta, textarea)
     if (speech) actions.appendChild(speech)
     actions.appendChild(cancelButton)
     actions.appendChild(submitButton)
+    actions.appendChild(sendButton)
     wrapper.appendChild(header)
     wrapper.appendChild(textarea)
     wrapper.appendChild(actions)
 
     focusWhenConnected(textarea)
+    update()
 
     const submit = () => {
       if (handlers.speech?.active()) return
@@ -253,6 +406,16 @@ export function buildReviewAnnotation(
       const content = meta.side === "deletions" ? (diff?.before ?? "") : (diff?.after ?? "")
       const selected = extractLines(content, meta.line, meta.endLine ?? meta.line)
       handlers.addComment(meta.file, meta.side, meta.line, text, selected)
+    }
+
+    const send = () => {
+      if (handlers.speech?.active()) return
+      const text = textarea.value.trim()
+      if (!text) return
+      const diff = handlers.diffs.find((item) => item.file === meta.file)
+      const content = meta.side === "deletions" ? (diff?.before ?? "") : (diff?.after ?? "")
+      const selected = extractLines(content, meta.line, meta.endLine ?? meta.line)
+      handlers.sendComment(meta.file, meta.side, meta.line, text, selected)
     }
 
     cancelButton.addEventListener("click", (event) => {
@@ -265,7 +428,17 @@ export function buildReviewAnnotation(
       submit()
     })
 
+    sendButton.addEventListener("click", (event) => {
+      event.stopPropagation()
+      send()
+    })
+
     textarea.addEventListener("keydown", (event) => {
+      if (handlers.speech?.down(meta, event, send)) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
       if (event.key === "Escape") {
         event.preventDefault()
         handlers.cancelDraft()
@@ -273,13 +446,25 @@ export function buildReviewAnnotation(
       }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
+        event.stopPropagation()
         submit()
       }
     })
+    textarea.addEventListener("keyup", (event) => {
+      if (!handlers.speech?.up(meta, event)) return
+      event.preventDefault()
+      event.stopPropagation()
+    })
+    textarea.addEventListener("input", update)
 
     return wrapper
   }
 
+  return buildSavedAnnotation(meta, handlers)
+}
+
+function buildSavedAnnotation(meta: AnnotationMeta, handlers: AnnotationHandlers): HTMLElement {
+  const wrapper = document.createElement("div")
   const comment = meta.comment!
   if (meta.editing) {
     wrapper.className = "am-annotation am-annotation-draft"
@@ -319,15 +504,24 @@ export function buildReviewAnnotation(
       handlers.setEditing(null)
     })
 
-    saveButton.addEventListener("click", (event) => {
-      event.stopPropagation()
+    const save = () => {
       if (handlers.speech?.active()) return
       const text = textarea.value.trim()
       if (!text) return
       handlers.updateComment(comment.id, text)
+    }
+
+    saveButton.addEventListener("click", (event) => {
+      event.stopPropagation()
+      save()
     })
 
     textarea.addEventListener("keydown", (event) => {
+      if (handlers.speech?.down(meta, event, save)) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
       if (event.key === "Escape") {
         event.preventDefault()
         handlers.setEditing(null)
@@ -335,11 +529,14 @@ export function buildReviewAnnotation(
       }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
-        if (handlers.speech?.active()) return
-        const text = textarea.value.trim()
-        if (!text) return
-        handlers.updateComment(comment.id, text)
+        event.stopPropagation()
+        save()
       }
+    })
+    textarea.addEventListener("keyup", (event) => {
+      if (!handlers.speech?.up(meta, event)) return
+      event.preventDefault()
+      event.stopPropagation()
     })
 
     return wrapper
@@ -360,16 +557,7 @@ export function buildReviewAnnotation(
 
   actions.appendChild(
     makeActionButton(handlers.labels.sendToChat, makeIcon("M1 1l14 7-14 7V9l10-1L1 7z"), () => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          data: {
-            type: handlers.activeTerminalId ? "appendReviewCommentsToTerminal" : "appendReviewComments",
-            comments: [comment],
-            autoSend: true,
-            targetTerminalId: handlers.activeTerminalId,
-          },
-        }),
-      )
+      sendReviewComments([comment], handlers.activeTerminalId())
       handlers.deleteComment(comment.id)
     }),
   )

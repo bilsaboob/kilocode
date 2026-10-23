@@ -5,29 +5,51 @@
  */
 
 import type { Meta, StoryObj } from "storybook-solidjs-vite"
-import { StoryProviders, defaultMockData, mockSessionValue } from "./StoryProviders"
+import { StoryProviders, defaultMockData, mockSessionValue, t } from "./StoryProviders"
 import { FileTree } from "../../diff-viewer/FileTree"
 import { DiffPanel } from "../../agent-manager/DiffPanel"
+import { DiffPanelCache } from "../../agent-manager/DiffPanelCache"
+import { createReviewComposers } from "../../agent-manager/review-composers"
 import { FullScreenDiffView } from "../../diff-viewer/FullScreenDiffView"
 import { WorktreeItem } from "../../agent-manager/WorktreeItem"
+import { createIntro } from "../../agent-manager/intro/AgentManagerIntro"
+import { SessionTab } from "../components/chat/SessionTab"
 import { ChatView } from "../components/chat/ChatView"
 import { registerVscodeToolOverrides } from "../components/chat/VscodeToolOverrides"
-import { SessionContext } from "../context/session"
+import { SessionContext, useSession } from "../context/session"
 import { ServerContext } from "../context/server"
 import { WorktreeModeProvider } from "../context/worktree-mode"
 import { SidebarSearchMenu } from "../../agent-manager/SidebarSearchMenu"
 import { SidebarToggleButton } from "../../agent-manager/SidebarToggleButton"
+import { SideTerminalPanel, createTerminalState } from "../../agent-manager/terminal"
+import { LOCAL } from "../../agent-manager/navigate"
 import type { SidebarSearchItem } from "../../agent-manager/sidebar-search"
 import { Button } from "@kilocode/kilo-ui/button"
 import { IconButton } from "@kilocode/kilo-ui/icon-button"
 import { Icon } from "@kilocode/kilo-ui/icon"
 import { TooltipKeybind } from "@kilocode/kilo-ui/tooltip"
 import { ContextMenu } from "@kilocode/kilo-ui/context-menu"
-import { createSignal, onCleanup, onMount, type JSX } from "solid-js"
-import type { WorktreeFileDiff, WorktreeState, WorktreeGitStats, PRStatus } from "../types/messages"
+import { ThinkingSelectorBase } from "../components/shared/ThinkingSelector"
+import { WorktreeOrigin } from "../../agent-manager/WorktreeOrigin"
+import { ProjectsSection } from "../../agent-manager/ProjectsSection"
+import { PRComments } from "../../agent-manager/pr/PRComments"
+import { PRConversation } from "../../agent-manager/pr/PRConversation"
+import { PRPanel } from "../../agent-manager/pr/PRPanel"
+import { PRReviewers } from "../../agent-manager/pr/PRReviewers"
+import type { PRComment, PRReviewer, PRTimelineItem } from "../../agent-manager/pr/pr-types"
+import { For, createSignal, onCleanup, onMount, type JSX } from "solid-js"
+import type {
+  AgentProjectSnapshot,
+  WorktreeFileDiff,
+  WorktreeState,
+  WorktreeGitStats,
+  PRStatus,
+} from "../types/messages"
 import type { ReviewComment } from "../../diff-viewer/review-comments"
+import { createModeRouter } from "../../agent-manager/mode-router"
 import "../../agent-manager/agent-manager.css"
 import "../../agent-manager/agent-manager-review.css"
+import "../../agent-manager/pr/pr-panel.css"
 
 registerVscodeToolOverrides()
 
@@ -75,13 +97,13 @@ const foldedDiffs: WorktreeFileDiff[] = [
 ]
 
 const ROWS = 140
-function edited(seed: string): WorktreeFileDiff {
+function edited(seed: string, file = "src/agent-edit.ts"): WorktreeFileDiff {
   const before = Array.from({ length: ROWS }, (_, i) => `const row${i} = "${seed}-old-${i}"\n`).join("")
   const after = Array.from({ length: ROWS }, (_, i) => `const row${i} = "${seed}-new-${i}"\n`).join("")
   const patch = [
-    "diff --git a/src/agent-edit.ts b/src/agent-edit.ts",
-    "--- a/src/agent-edit.ts",
-    "+++ b/src/agent-edit.ts",
+    `diff --git a/${file} b/${file}`,
+    `--- a/${file}`,
+    `+++ b/${file}`,
     `@@ -1,${ROWS} +1,${ROWS} @@`,
     ...before
       .trimEnd()
@@ -95,7 +117,7 @@ function edited(seed: string): WorktreeFileDiff {
   ].join("\n")
 
   return {
-    file: "src/agent-edit.ts",
+    file,
     status: "modified",
     additions: ROWS,
     deletions: ROWS,
@@ -126,6 +148,56 @@ const meta: Meta = {
 }
 export default meta
 type Story = StoryObj
+
+function IntroductionPreview(props: { skipped?: boolean }) {
+  const intro = createIntro({
+    base: () => "main",
+    git: () => true,
+    onCreateWorktree: () => {},
+    onSelectSession: () => {},
+    onShowHistory: () => {},
+    reveal: () => {},
+    focus: () => {},
+  })
+  if (props.skipped) intro.dismiss()
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+  const session = {
+    ...useSession(),
+    sessions: () => [
+      {
+        id: "intro-search",
+        title: "Add settings search",
+        createdAt: ago(10),
+        updatedAt: ago(5),
+      },
+      {
+        id: "intro-login",
+        title: "Fix login validation",
+        createdAt: ago(30),
+        updatedAt: ago(15),
+      },
+    ],
+  }
+  return <SessionContext.Provider value={session}>{intro.render()}</SessionContext.Provider>
+}
+
+export const Introduction: Story = {
+  name: "Introduction",
+  render: () => (
+    <StoryProviders>
+      <IntroductionPreview />
+    </StoryProviders>
+  ),
+}
+
+export const IntroductionSkipped: Story = {
+  name: "Introduction skipped",
+  render: () => (
+    <StoryProviders>
+      <IntroductionPreview skipped />
+    </StoryProviders>
+  ),
+}
 
 // ---------------------------------------------------------------------------
 // Wide chat layout
@@ -215,6 +287,11 @@ const chatServer = {
   errorDetails: () => undefined,
   isConnected: () => true,
   profileData: () => null,
+  providerUsage: () => undefined,
+  providerUsageLoading: () => false,
+  providerUsageError: () => undefined,
+  requestProviderUsage: () => undefined,
+  refreshProviderUsage: () => undefined,
   deviceAuth: () => ({ status: "idle" as const }),
   startLogin: () => undefined,
   goToLogin: () => undefined,
@@ -286,6 +363,37 @@ export const FileTreeEmpty: Story = {
   ),
 }
 
+export const FileTreeVirtualizedLarge: Story = {
+  name: "FileTree - virtualized large review",
+  render: () => {
+    const diffs = Array.from({ length: 600 }, (_, index): WorktreeFileDiff => {
+      const group = String(Math.floor(index / 30)).padStart(2, "0")
+      const file = String(index).padStart(4, "0")
+      return {
+        file: `src/group-${group}/file-${file}.ts`,
+        before: "",
+        after: "",
+        patch: "",
+        additions: 1,
+        deletions: 0,
+        status: "modified",
+        tracked: true,
+        generatedLike: false,
+        summarized: true,
+      }
+    })
+    const [selected, setSelected] = createSignal(diffs[0]!.file)
+
+    return (
+      <StoryProviders>
+        <div data-testid="large-file-tree" data-selected={selected()} style={{ width: "420px", height: "520px" }}>
+          <FileTree diffs={diffs} activeFile={selected()} onFileSelect={setSelected} />
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
 // ---------------------------------------------------------------------------
 // DiffPanel
 // ---------------------------------------------------------------------------
@@ -308,6 +416,232 @@ export const DiffPanelWithDiffs: Story = {
       </div>
     </StoryProviders>
   ),
+}
+
+export const DiffPanelScrollUp: Story = {
+  name: "DiffPanel - scroll upward through large diffs",
+  render: () => {
+    const diffs = Array.from({ length: 5 }, (_, i) => edited(`review-${i}`, `src/review-${i}.ts`))
+    return (
+      <StoryProviders noPadding>
+        <div style={{ height: "700px", display: "flex", "flex-direction": "column" }}>
+          <DiffPanel
+            diffs={diffs}
+            loading={false}
+            sessionKey="inline-scroll-up"
+            diffStyle="unified"
+            onDiffStyleChange={() => {}}
+            comments={[]}
+            onCommentsChange={() => {}}
+            onClose={() => {}}
+          />
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+export const DiffPanelCachedWorktreeSwitch: Story = {
+  name: "DiffPanel - switch cached worktrees without blank frames",
+  render: () => {
+    const ids = Array.from({ length: 12 }, (_, index) => `worktree-${index + 1}`)
+    const [current, setCurrent] = createSignal(ids[0]!)
+    const values = Object.fromEntries(ids.map((id) => [`single\0${id}#branch`, [edited(id, `src/${id}.ts`)]]))
+    const composers = createReviewComposers(() => undefined)
+    const comments = [
+      {
+        id: "cached-comment",
+        file: "src/worktree-1.ts",
+        side: "additions" as const,
+        line: 2,
+        comment: "Keep the cached review annotation mounted",
+        selectedText: "line 2",
+      },
+    ]
+
+    return (
+      <StoryProviders noPadding>
+        <div style={{ height: "700px", display: "flex", "flex-direction": "column" }}>
+          <div data-testid="cached-worktree-tabs">
+            {ids.map((id) => (
+              <button type="button" data-testid={`select-${id}`} onClick={() => setCurrent(id)}>
+                {id}
+              </button>
+            ))}
+          </div>
+          <div class="am-diff-panel-wrapper" style={{ flex: 1 }}>
+            <DiffPanelCache
+              current={() => `${current()}#branch`}
+              context={current}
+              project={() => undefined}
+              active={() => true}
+              contexts={() => new Set(ids)}
+              data={() => values}
+              loading={() => false}
+              loadingFiles={() => new Set()}
+              notice={() => undefined}
+              comments={(key) => (key === "worktree-1#branch" ? comments : [])}
+              setComments={() => {}}
+              composer={composers.get}
+              lead={() => <span>Branch</span>}
+              canRevert={false}
+              diffStyle="unified"
+              onDiffStyleChange={() => {}}
+              markdownRender={false}
+              onMarkdownRenderChange={() => {}}
+              onSendClick={() => {}}
+              onClose={() => {}}
+              onRequestDiff={() => {}}
+              onOpenFile={() => {}}
+              onOpenDocument={() => {}}
+              onRevertFile={() => {}}
+              revertingFiles={() => new Set()}
+            />
+          </div>
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+export const DiffPanelViewportLoading: Story = {
+  name: "DiffPanel - load only visible file details",
+  render: () => {
+    const [entries, setEntries] = createSignal<WorktreeFileDiff[]>(
+      Array.from({ length: 120 }, (_, index) => ({
+        file: `src/file-${String(index).padStart(3, "0")}.ts`,
+        before: "",
+        after: "",
+        patch: "",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        tracked: true,
+        generatedLike: false,
+        summarized: true,
+        stamp: "1:1",
+      })),
+    )
+    const [requested, setRequested] = createSignal<string[]>([])
+    const [offscreen, setOffscreen] = createSignal<string[]>([])
+    const load = (file: string) => {
+      const root = document.querySelector("[data-testid=viewport-diff-review] .am-diff-content")
+      const row = root?.querySelector(`[data-file-path="${CSS.escape(file)}"]`)
+      if (root && row) {
+        const box = root.getBoundingClientRect()
+        const rect = row.getBoundingClientRect()
+        if (rect.bottom < box.top - 201 || rect.top > box.bottom + 201) setOffscreen((prev) => [...prev, file])
+      }
+      setRequested((prev) => (prev.includes(file) ? prev : [...prev, file]))
+      // Simulate a host reply after the requesting Solid effect has completed.
+      queueMicrotask(() => {
+        setEntries((prev) =>
+          prev.map((item) =>
+            item.file === file
+              ? {
+                  ...item,
+                  before: "before\n",
+                  after: "after\n",
+                  patch: `--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-before\n+after\n`,
+                  summarized: false,
+                }
+              : item,
+          ),
+        )
+      })
+    }
+
+    return (
+      <StoryProviders noPadding>
+        <div
+          data-testid="viewport-diff-review"
+          data-request-count={requested().length}
+          data-requested={requested().join("|")}
+          data-offscreen={offscreen().join("|")}
+          style={{ height: "700px", display: "flex", "flex-direction": "column" }}
+        >
+          <DiffPanel
+            diffs={entries()}
+            loading={false}
+            sessionKey="viewport-diff-review"
+            diffStyle="unified"
+            onDiffStyleChange={() => {}}
+            comments={[]}
+            onCommentsChange={() => {}}
+            onClose={() => {}}
+            onRequestDiff={load}
+          />
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+export const DiffPanelInterruptedLoading: Story = {
+  name: "DiffPanel - resume interrupted visible file",
+  render: () => {
+    const [active, setActive] = createSignal(true)
+    const [count, setCount] = createSignal(0)
+    const [loading, setLoading] = createSignal(new Set<string>())
+    const [entries, setEntries] = createSignal<WorktreeFileDiff[]>([
+      { file: "src/resume.ts", before: "", after: "", patch: "", additions: 1, deletions: 1, summarized: true },
+    ])
+    const request = (file: string) => {
+      setCount((value) => value + 1)
+      setLoading(new Set([file]))
+      if (count() === 1) return
+      // Keep the resumed host reply asynchronous, as in the real request/response path.
+      queueMicrotask(() => {
+        setEntries([
+          {
+            ...entries()[0]!,
+            before: "before\n",
+            after: "after\n",
+            patch: "--- a/src/resume.ts\n+++ b/src/resume.ts\n@@ -1 +1 @@\n-before\n+after\n",
+            summarized: false,
+          },
+        ])
+        setLoading(new Set<string>())
+      })
+    }
+    return (
+      <StoryProviders noPadding>
+        <div
+          data-testid="interrupted-review"
+          data-requests={count()}
+          style={{ height: "700px", display: "flex", "flex-direction": "column" }}
+        >
+          <button
+            data-testid="interrupt-review"
+            onClick={() => {
+              setActive(false)
+              setLoading(new Set<string>())
+            }}
+          >
+            Interrupt
+          </button>
+          <button data-testid="resume-review" onClick={() => setActive(true)}>
+            Resume
+          </button>
+          <div style={{ flex: 1, "min-height": 0, display: "flex", "flex-direction": "column" }}>
+            <DiffPanel
+              diffs={entries()}
+              loading={false}
+              active={active()}
+              loadingFiles={loading()}
+              sessionKey="interrupted-review"
+              diffStyle="unified"
+              onDiffStyleChange={() => {}}
+              comments={[]}
+              onCommentsChange={() => {}}
+              onClose={() => {}}
+              onRequestDiff={request}
+            />
+          </div>
+        </div>
+      </StoryProviders>
+    )
+  },
 }
 
 const buttonFixtureStyle: JSX.CSSProperties = {
@@ -497,7 +831,7 @@ const defaultProps = {
   active: false,
   pendingDelete: false,
   busy: false,
-  working: false,
+  activity: "idle" as const,
   stale: false,
   shortcut: 2,
   sessions: 1,
@@ -523,6 +857,81 @@ const defaultProps = {
 // ---------------------------------------------------------------------------
 // WorktreeItem stories
 // ---------------------------------------------------------------------------
+
+const activityStates = [
+  ["busy", "Running"],
+  ["waiting", "Needs input"],
+  ["done", "Completed"],
+  ["retry", "Retrying"],
+  ["error", "Error"],
+  ["idle", "Idle"],
+] as const
+
+export const WorktreeActivityStates: Story = {
+  name: "Worktree cards - all activity states",
+  render: (args: { active?: boolean }) => (
+    <StoryProviders noPadding>
+      <div data-activity-story style={{ padding: "12px", background: "var(--surface-base)" }}>
+        <style>{'[data-activity-story] [data-component="spinner"] path { animation: none !important; }'}</style>
+        <For each={activityStates}>
+          {([state, title]) => (
+            <WorktreeItem
+              {...defaultProps}
+              worktree={{
+                ...baseWorktree,
+                id: `wt-${state}`,
+                branch: `feature/${state}`,
+                createdAt: "2026-01-01T00:00:00.000Z",
+              }}
+              label={title}
+              subtitle={`feature/${state}`}
+              active={args.active === true}
+              activity={state}
+              stats={{ ...baseStats, worktreeId: `wt-${state}` }}
+              shortcut={0}
+            />
+          )}
+        </For>
+      </div>
+    </StoryProviders>
+  ),
+}
+
+export const WorktreeActivityStatesActive: Story = {
+  ...WorktreeActivityStates,
+  name: "Worktree cards - selected activity states",
+  args: { active: true },
+}
+
+export const SessionTabActivityStates: Story = {
+  name: "Agent Manager session tabs - activity states",
+  render: () => (
+    <StoryProviders noPadding>
+      <div data-activity-story style={{ padding: "12px", background: "var(--surface-base)" }}>
+        <style>{'[data-activity-story] [data-component="spinner"] path { animation: none !important; }'}</style>
+        <For each={activityStates}>
+          {([state, title]) => (
+            <div class="am-tab-bar" role="tablist" aria-label={title}>
+              <SessionTab
+                title={title}
+                active
+                state={state}
+                stateLabel={title}
+                closeTitle="Close tab"
+                closeLabel="Close tab"
+                role="tab"
+                selected
+                onSelect={noop}
+                onMiddleClick={noop}
+                onClose={noop}
+              />
+            </div>
+          )}
+        </For>
+      </div>
+    </StoryProviders>
+  ),
+}
 
 export const WorktreeItemDefault: Story = {
   name: "WorktreeItem — default",
@@ -600,7 +1009,8 @@ const basePR: PRStatus = {
   url: "https://github.com/org/repo/pull/8594",
   state: "open",
   review: null,
-  checks: { status: "success", total: 5, passed: 5, failed: 0, pending: 0, items: [] },
+  checks: { status: "success", total: 5, passed: 5, failed: 0, pending: 0, checks: [] },
+  reviewers: [],
   additions: 978,
   deletions: 202,
   files: 12,
@@ -715,6 +1125,51 @@ export const PRBadgeNoReview: Story = {
       </div>
     </StoryProviders>
   ),
+}
+
+export const PRBadgeUnresolved: Story = {
+  name: "PR Badge - unresolved review threads",
+  render: () => (
+    <StoryProviders noPadding>
+      <WorktreeItem
+        {...defaultProps}
+        label="Cache change badge file reads"
+        subtitle="fix/change-badge-reads"
+        stats={baseStats}
+        active
+        pr={{ ...basePR, unresolvedThreads: 3 }}
+        onOpenComments={noop}
+      />
+      <WorktreeItem
+        {...defaultProps}
+        label="Update authentication"
+        subtitle="feat/authentication"
+        stats={baseStats}
+        pr={{ ...basePR, number: 8595, review: "approved", unresolvedThreads: 12 }}
+        onOpenComments={noop}
+      />
+      <WorktreeItem
+        {...defaultProps}
+        label="Improve settings"
+        subtitle="feat/settings"
+        stats={baseStats}
+        pr={{ ...basePR, number: 8596, state: "draft", unresolvedThreads: 1 }}
+        onOpenComments={noop}
+      />
+      <WorktreeItem
+        {...defaultProps}
+        label="All feedback resolved"
+        subtitle="fix/resolved-feedback"
+        stats={baseStats}
+        pr={{ ...basePR, number: 8597, unresolvedThreads: 0 }}
+      />
+    </StoryProviders>
+  ),
+}
+
+export const PRBadgeUnresolved200: Story = {
+  ...PRBadgeUnresolved,
+  name: "PR Badge - unresolved review threads, narrow",
 }
 
 export const PRBadgeApprovedChecksFailing: Story = {
@@ -843,6 +1298,23 @@ const MockTabAdd = () => (
   </div>
 )
 
+const MockDiffToggle = (props: { files: string; additions: string; deletions: string; active?: boolean }) => (
+  <IconButton
+    icon="layers"
+    size="small"
+    variant="ghost"
+    class="am-diff-toggle-btn"
+    aria-label="Toggle diff"
+    aria-pressed={props.active ?? false}
+  >
+    <span class="am-diff-toggle-stats">
+      <span class="am-stat-files">{props.files}</span>
+      <span class="am-stat-additions">{props.additions}</span>
+      <span class="am-stat-deletions">{props.deletions}</span>
+    </span>
+  </IconButton>
+)
+
 export const TabBarMultipleTabs: Story = {
   name: "TabBar — multiple tabs with active",
   render: () => (
@@ -860,14 +1332,7 @@ export const TabBarMultipleTabs: Story = {
         </div>
         <MockTabAdd />
         <div class="am-tab-actions">
-          <button class="am-diff-toggle-btn am-diff-toggle-has-changes">
-            <Icon name="layers" size="small" />
-            <span class="am-diff-toggle-stats">
-              <span class="am-stat-files">4f</span>
-              <span class="am-stat-additions">+32</span>
-              <span class="am-stat-deletions">−8</span>
-            </span>
-          </button>
+          <MockDiffToggle files="4f" additions="+32" deletions="−8" />
           <IconButton icon="console" size="small" variant="ghost" label="Terminal" />
         </div>
       </div>
@@ -891,7 +1356,6 @@ export const TabBarWithReviewTab: Story = {
         </div>
         <MockTabAdd />
         <div class="am-tab-actions">
-          <IconButton icon="expand" size="small" variant="ghost" label="Review" class="am-tab-diff-btn-active" />
           <IconButton icon="console" size="small" variant="ghost" label="Terminal" />
         </div>
       </div>
@@ -914,15 +1378,309 @@ export const TabBarSingleTab: Story = {
         </div>
         <MockTabAdd />
         <div class="am-tab-actions">
-          <button class="am-diff-toggle-btn am-diff-toggle-has-changes">
-            <Icon name="layers" size="small" />
-            <span class="am-diff-toggle-stats">
-              <span class="am-stat-files">188f</span>
-              <span class="am-stat-additions">+23625</span>
-              <span class="am-stat-deletions">−359</span>
-            </span>
-          </button>
+          <MockDiffToggle files="188f" additions="+23625" deletions="−359" />
           <IconButton icon="console" size="small" variant="ghost" label="Terminal" />
+        </div>
+      </div>
+    </StoryProviders>
+  ),
+}
+
+const MockFullContextActions = () => (
+  <div class="am-tab-actions">
+    <span class="am-tab-session-panels">
+      <TooltipKeybind title="Documents" keybind="" placement="bottom">
+        <IconButton icon="book-open-check" size="small" variant="ghost" label="Documents" />
+      </TooltipKeybind>
+      <TooltipKeybind title="Subagents" keybind="" placement="bottom">
+        <IconButton icon="task" size="small" variant="ghost" label="Subagents" />
+      </TooltipKeybind>
+      <span class="am-tab-actions-separator" />
+    </span>
+    <TooltipKeybind title="Toggle diff" keybind="" placement="bottom">
+      <MockDiffToggle files="4f" additions="+32" deletions="−8" />
+    </TooltipKeybind>
+    <TooltipKeybind title="Pull request" keybind="" placement="bottom">
+      <IconButton icon="pull-request" size="small" variant="ghost" label="Pull request" />
+    </TooltipKeybind>
+    <TooltipKeybind title="Apply selected worktree changes to local branch" keybind="" placement="bottom">
+      <IconButton
+        icon="check"
+        size="small"
+        variant="ghost"
+        aria-label="Apply selected worktree changes to local branch"
+      />
+    </TooltipKeybind>
+    <TooltipKeybind title="Open this worktree in VS Code" keybind="" placement="bottom">
+      <IconButton icon="folder" size="small" variant="ghost" aria-label="Open this worktree in VS Code" />
+    </TooltipKeybind>
+    <TooltipKeybind title="Browser" keybind="" placement="bottom">
+      <IconButton icon="globe" size="small" variant="ghost" label="Browser" />
+    </TooltipKeybind>
+    <span class="am-split-button">
+      <TooltipKeybind title="Run" keybind="⌘R" placement="bottom">
+        <IconButton size="small" variant="ghost" icon="play" aria-label="Run" />
+      </TooltipKeybind>
+      <TooltipKeybind title="Run options" keybind="" placement="bottom">
+        <IconButton icon="chevron-down" size="small" variant="ghost" aria-label="Run options" class="am-split-arrow" />
+      </TooltipKeybind>
+    </span>
+    <div class="am-split-button">
+      <TooltipKeybind title="Open Terminal" keybind="" placement="bottom">
+        <IconButton icon="console" size="small" variant="ghost" label="Open Terminal" />
+      </TooltipKeybind>
+      <IconButton
+        icon="chevron-down"
+        size="small"
+        variant="ghost"
+        aria-label="Choose terminal destination"
+        class="am-split-arrow"
+      />
+    </div>
+  </div>
+)
+
+export const TabBarFullContext: Story = {
+  name: "TabBar — all optional context actions",
+  render: () => (
+    <StoryProviders noPadding>
+      <div class="am-tab-bar">
+        <MockTabLeading />
+        <div class="am-tab-scroll-area">
+          <div class="am-tab-list-wrap">
+            <div class="am-tab-list" style={{ "--tab-count": "1" } as JSX.CSSProperties}>
+              <MockTab title="Full context" active />
+            </div>
+          </div>
+        </div>
+        <MockTabAdd />
+        <MockFullContextActions />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+// Side terminal panel inside the real inspector host chain, empty state —
+// no live PTY, so the start affordance renders. The tab strip header keeps
+// the .am-diff-header height so the a11y/screenshot baseline also guards
+// the alignment against the diff panel chrome.
+export const SideTerminalPanelEmpty: Story = {
+  name: "Side terminal panel — empty",
+  render: () => {
+    const state = createTerminalState(() => LOCAL)
+    return (
+      <StoryProviders noPadding>
+        <div class="am-detail-stack" style={{ height: "420px" }}>
+          <div class="am-detail-content am-detail-split">
+            <div class="am-main-pane" style={{ padding: "24px", color: "var(--text-weak)" }}>
+              Agent session stays visible beside the terminal.
+            </div>
+            <div class="am-diff-resize" style={{ width: "320px" }}>
+              <div class="am-diff-panel-wrapper">
+                <SideTerminalPanel
+                  state={state}
+                  contextKey={() => LOCAL}
+                  visible={() => true}
+                  nextKeybind="⌘⇧]"
+                  closeKeybind="⌘W"
+                  onFocusPrompt={() => undefined}
+                  onSelect={() => undefined}
+                  onClose={() => undefined}
+                  onCloseOthers={() => undefined}
+                  onStart={() => undefined}
+                  onStop={() => undefined}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+// Tab strip with several side terminals: the active one shows the X close
+// button, the others reveal it on hover. Terminals point at a dead port —
+// xterm renders its connection-error notice inside the panel, which keeps
+// the story self-contained without a live PTY.
+export const SideTerminalPanelTabs: Story = {
+  name: "Side terminal panel — tabs",
+  render: () => {
+    const state = createTerminalState(() => LOCAL)
+    const font = { fontFamily: "monospace", fontSize: 12 }
+    state.add(null, { id: "terminal:one", title: "Terminal 1", wsUrl: "ws://127.0.0.1:1/a", font, placement: "side" })
+    state.add(null, { id: "terminal:two", title: "Terminal 2", wsUrl: "ws://127.0.0.1:1/b", font, placement: "side" })
+    state.add(null, { id: "terminal:three", title: "Terminal 3", wsUrl: "ws://127.0.0.1:1/c", font, placement: "side" })
+    state.setSideActive(LOCAL, "terminal:two")
+    state.setTitle("terminal:two", "npm run dev")
+    return (
+      <StoryProviders noPadding>
+        <div class="am-detail-stack" style={{ height: "420px" }}>
+          <div class="am-detail-content am-detail-split">
+            <div class="am-main-pane" style={{ padding: "24px", color: "var(--text-weak)" }}>
+              Agent session stays visible beside the terminal.
+            </div>
+            <div class="am-diff-resize" style={{ width: "360px" }}>
+              <div class="am-diff-panel-wrapper">
+                <SideTerminalPanel
+                  state={state}
+                  contextKey={() => LOCAL}
+                  visible={() => true}
+                  nextKeybind="⌘⇧]"
+                  closeKeybind="⌘W"
+                  onFocusPrompt={() => undefined}
+                  onSelect={(id) => state.setSideActive(LOCAL, id)}
+                  onClose={() => undefined}
+                  onCloseOthers={() => undefined}
+                  onStart={() => undefined}
+                  onStop={() => undefined}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+// ---------------------------------------------------------------------------
+// NewWorktreeDialog — inline selector popovers must escape the dialog scroll
+// containers. Regression: the reasoning-variant and mode pickers were clipped
+// by .am-nv-dialog-content (overflow-y: auto) and .am-prompt-input-container
+// (overflow: hidden) because the overflow escape hatch only covered the model
+// picker. This fixture reproduces the real clipping chain (same CSS classes +
+// the real inline ThinkingSelectorBase with portal={false}) so a screenshot
+// baseline catches any future regression. Rendered inline (no dialog portal)
+// because the visual-regression harness screenshots #storybook-root.
+// ---------------------------------------------------------------------------
+
+const VariantPickerOpener = () => {
+  let frame = 0
+  let attempts = 0
+  const open = () => {
+    if (document.querySelector("[data-component='popover-content']")) return
+    if (attempts++ >= 120) return
+    window.dispatchEvent(new CustomEvent("openVariantPicker"))
+    frame = requestAnimationFrame(open)
+  }
+  onMount(() => {
+    frame = requestAnimationFrame(open)
+  })
+  onCleanup(() => cancelAnimationFrame(frame))
+  return null
+}
+
+export const NewWorktreeVariantDropdown1280: Story = {
+  name: "NewWorktreeDialog — variant dropdown open",
+  parameters: { layout: "fullscreen" },
+  render: () => (
+    <StoryProviders noPadding>
+      {/* Filler pushes the prompt container to the bottom of the dialog content.
+          The variant popover opens upward from the trigger, extending above the
+          container's top edge. Without the overflow escape fix, .am-prompt-input-container
+          (overflow: hidden + position: relative) clips the top of the popover. */}
+      <div style={{ height: "100vh", display: "flex", "flex-direction": "column" }}>
+        <div class="am-nv-dialog">
+          <div class="am-nv-dialog-content">
+            <div style={{ height: "500px", "flex-shrink": 0 }} />
+            <div
+              class="prompt-input-container am-prompt-input-container"
+              style={{ position: "relative", "flex-shrink": 0 }}
+            >
+              <div class="prompt-input-hint">
+                <div class="prompt-input-hint-selectors">
+                  <ThinkingSelectorBase
+                    variants={["low", "medium", "high"]}
+                    value="low"
+                    onSelect={() => {}}
+                    portal={false}
+                    deferDismiss
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <VariantPickerOpener />
+    </StoryProviders>
+  ),
+}
+
+const projectPickerProjects: AgentProjectSnapshot[] = [
+  {
+    id: "project-main",
+    root: "/workspace/kilocode",
+    label: "kilocode",
+    pinned: true,
+    active: true,
+    expanded: true,
+    initialized: true,
+    missing: false,
+  },
+  {
+    id: "project-cloud",
+    root: "/workspace/cloud",
+    label: "cloud",
+    pinned: false,
+    active: false,
+    expanded: false,
+    initialized: true,
+    missing: false,
+  },
+]
+
+export const NewWorktreeProjectDropdown: Story = {
+  name: "NewWorktreeDialog — project dropdown open",
+  parameters: { layout: "fullscreen" },
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ height: "100vh", display: "flex", "flex-direction": "column" }}>
+        <div data-component="dialog" data-fit="true">
+          <div data-slot="dialog-container">
+            <div data-slot="dialog-content">
+              <div data-slot="dialog-header">
+                <div data-slot="dialog-title">New Worktree</div>
+                <div class="am-nv-header">
+                  <div class="am-nv-mode" role="tablist" data-tab="new">
+                    <button class="am-nv-mode-tab am-nv-mode-tab-active" role="tab" type="button">
+                      New
+                    </button>
+                    <button class="am-nv-mode-tab" role="tab" type="button">
+                      Import
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div data-slot="dialog-body">
+                <div class="am-nv-dialog" style={{ "max-height": "520px" }}>
+                  <div class="am-nv-dialog-content">
+                    <div class="am-nv-start">
+                      <WorktreeOrigin
+                        projects={projectPickerProjects}
+                        project="project-main"
+                        onProject={() => undefined}
+                        projectOpen
+                        onProjectOpen={() => undefined}
+                        branch
+                        branches={[]}
+                        loading={false}
+                        base="main"
+                        fallback="main"
+                        onBase={() => undefined}
+                        onDefault={() => undefined}
+                      />
+                    </div>
+                    <div style={{ height: "420px", "flex-shrink": 0 }} />
+                    <div class="am-nv-version-bar">
+                      <span class="am-nv-config-label">VERSIONS</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </StoryProviders>
@@ -1016,9 +1774,13 @@ export const SidebarSearchOpen: Story = {
     return (
       <StoryProviders noPadding>
         <div style={{ "min-height": "430px", padding: "16px", background: "var(--surface-base)" }}>
-          <div class="am-section-header">
-            <span class="am-section-label">WORKTREES</span>
-            <div class="am-section-actions">
+          <div class="am-sidebar-header am-section-header">
+            <div class="am-sidebar-header-main">
+              <div class="am-sidebar-header-label">
+                <span class="am-section-label">WORKTREES</span>
+              </div>
+            </div>
+            <div class="am-sidebar-header-actions">
               <SidebarSearchMenu
                 items={() => sidebarSearchItems}
                 keybind="⌘F"
@@ -1028,8 +1790,7 @@ export const SidebarSearchOpen: Story = {
                   scope: "Searches the local workspace, local sessions, worktrees, and their sessions",
                   contexts: "LOCAL & WORKTREES",
                   sessions: "SESSIONS",
-                  waiting: "Wait",
-                  retry: "Retry",
+                  state: (value) => value,
                 }}
                 onSelect={(item) => setSelected(item.key)}
                 defaultOpen
@@ -1045,4 +1806,658 @@ export const SidebarSearchOpen: Story = {
       </StoryProviders>
     )
   },
+}
+
+// ---------------------------------------------------------------------------
+// Multi-project sidebar
+// ---------------------------------------------------------------------------
+
+import { ProjectList } from "../../agent-manager/ProjectList"
+import type { AgentManagerStateMessage, LocalGitStats, ProjectSessionInfo } from "../types/messages"
+
+const projectA: AgentProjectSnapshot = {
+  id: "prj-aaaa1111aaaa",
+  root: "/repos/kilocode",
+  label: "kilocode",
+  pinned: true,
+  active: true,
+  expanded: true,
+  initialized: true,
+  missing: false,
+}
+const projectB: AgentProjectSnapshot = {
+  id: "prj-bbbb2222bbbb",
+  root: "/repos/kilo-gateway",
+  label: "kilo-gateway",
+  pinned: false,
+  active: false,
+  expanded: true,
+  initialized: true,
+  missing: false,
+}
+
+const wt = (id: string, branch: string, label?: string, opts: Partial<WorktreeState> = {}): WorktreeState => ({
+  id,
+  branch,
+  path: `/repos/x/.kilo/worktrees/${id}`,
+  parentBranch: "main",
+  createdAt: "2026-07-20T10:00:00Z",
+  label,
+  ...opts,
+})
+
+const projectState = (
+  projectId: string,
+  worktrees: WorktreeState[],
+  sessions: { id: string; worktreeId: string | null }[],
+  sections: NonNullable<AgentManagerStateMessage["sections"]> = [],
+  baseBranch = "main",
+  worktreeOrder?: string[],
+): AgentManagerStateMessage => ({
+  type: "agentManager.state",
+  projectId,
+  worktrees,
+  sessions: sessions.map((s) => ({ id: s.id, worktreeId: s.worktreeId, createdAt: "2026-07-20T10:00:00Z" })),
+  sections,
+  worktreeOrder: worktreeOrder ?? [
+    ...worktrees.filter((item) => !item.sectionId).map((item) => item.id),
+    ...sections.map((item) => item.id),
+    ...worktrees.filter((item) => item.sectionId).map((item) => item.id),
+  ],
+  staleWorktreeIds: [],
+  isGitRepo: true,
+  defaultBaseBranch: baseBranch,
+  sessionsCollapsed: false,
+})
+
+const projectSession = (
+  id: string,
+  worktreeId: string | null,
+  title: string,
+  updatedAt: string,
+): ProjectSessionInfo => ({
+  id,
+  worktreeId,
+  parentID: null,
+  title,
+  createdAt: "2026-07-19T09:00:00Z",
+  updatedAt,
+})
+
+const storyStats = (worktreeId: string, additions: number, deletions: number, ahead = 0): WorktreeGitStats => ({
+  worktreeId,
+  files: 3,
+  additions,
+  deletions,
+  ahead,
+  behind: 0,
+})
+
+const storyLocal = (branch: string, additions: number, deletions: number, ahead = 0, behind = 0): LocalGitStats => ({
+  branch,
+  files: 2,
+  additions,
+  deletions,
+  ahead,
+  behind,
+})
+
+const renderProjectSidebar = (width: number) => (
+  <StoryProviders noPadding>
+    <div class="am-sidebar" style={{ width: `${width}px`, height: "720px", "box-sizing": "border-box" }}>
+      <ProjectList
+        mode={createModeRouter()}
+        projects={[projectA, projectB]}
+        states={{
+          [projectA.id]: projectState(
+            projectA.id,
+            [
+              wt("wt-a1", "feature/project-list", "Project list UI", { sectionId: "sec-a1" }),
+              wt("wt-a2", "fix/session-routing"),
+              wt("wt-a3", "feat/project-list-v2", undefined, { groupId: "grp-a1" }),
+              wt("wt-a4", "feat/project-list-v3", undefined, { groupId: "grp-a1" }),
+              wt("wt-a5", "feat/sticky-project-row", "Sticky project row"),
+              wt("wt-a6", "fix/overflow-menu", "Project overflow menu"),
+              wt("wt-a7", "chore/storybook-scroll"),
+              wt("wt-a8", "docs/agent-manager-projects"),
+              wt("wt-a9", "refactor/project-row-actions"),
+              wt("wt-a10", "test/project-row-sticky"),
+              wt("wt-a11", "feat/project-menu-i18n"),
+              wt("wt-a12", "fix/collapsed-project-plus"),
+            ],
+            [
+              { id: "ses-a1", worktreeId: null },
+              { id: "ses-a2", worktreeId: "wt-a1" },
+            ],
+            [{ id: "sec-a1", name: "Agent Manager", color: "Blue", order: 0, collapsed: false }],
+            "main",
+            [
+              "wt-a2",
+              "sec-a1",
+              "wt-a1",
+              "wt-a3",
+              "wt-a4",
+              "wt-a5",
+              "wt-a6",
+              "wt-a7",
+              "wt-a8",
+              "wt-a9",
+              "wt-a10",
+              "wt-a11",
+              "wt-a12",
+            ],
+          ),
+          [projectB.id]: projectState(
+            projectB.id,
+            [wt("wt-b1", "feat/gateway-routing", "Gateway routing", { sectionId: "sec-b1" }), wt("wt-b2", "fix/api")],
+            [{ id: "ses-b1", worktreeId: null }],
+            [{ id: "sec-b1", name: "In progress", color: null, order: 0, collapsed: false }],
+            "master",
+            ["wt-b2", "sec-b1", "wt-b1"],
+          ),
+        }}
+        stats={{
+          [projectA.id]: { "wt-a1": storyStats("wt-a1", 342, 87, 2), "wt-a2": storyStats("wt-a2", 18, 4) },
+          [projectB.id]: { "wt-b1": storyStats("wt-b1", 96, 12, 1) },
+        }}
+        local={{
+          [projectA.id]: storyLocal("main", 124, 33, 1),
+          [projectB.id]: storyLocal("master", 0, 0, 0, 2),
+        }}
+        prs={{ [projectA.id]: {}, [projectB.id]: {} }}
+        busy={() => false}
+        blocked={() => false}
+        sessions={{
+          [projectA.id]: [
+            projectSession("ses-a1", null, "Refine project accordion layout", "2026-07-24T08:30:00Z"),
+            projectSession("ses-a2", "wt-a1", "Add per-project actions", "2026-07-23T16:10:00Z"),
+          ],
+          [projectB.id]: [projectSession("ses-b1", null, "Route stats per project", "2026-07-24T07:45:00Z")],
+        }}
+        selectedProject={projectA.id}
+        selection="local"
+        activityFor={() => "idle"}
+        sessionActivity={() => "idle"}
+        bindings={{ search: "⌘F", showShortcuts: "⌘⇧/", newWorktree: "⌘N", quickWorktree: "⌘⇧N" }}
+        t={t}
+        onSearchRef={() => {}}
+        onShortcuts={() => {}}
+        onHistory={() => {}}
+      />
+    </div>
+  </StoryProviders>
+)
+
+export const MultiProjectSidebar: Story = {
+  name: "Project List — two expanded projects with restored controls",
+  render: () => renderProjectSidebar(280),
+}
+
+export const MultiProjectSidebar200: Story = {
+  name: "Project List - minimum sidebar width",
+  parameters: { layout: "fullscreen" },
+  render: () => renderProjectSidebar(200),
+}
+
+export const MultiProjectSidebarScrolled: Story = {
+  ...MultiProjectSidebar,
+  name: "Project List — scrolled with pinned project row",
+  play: (context: { canvasElement: HTMLElement }) => {
+    const list = context.canvasElement.querySelector<HTMLElement>(".am-projects-list")
+    if (list) list.scrollTop = 360
+  },
+}
+
+// ---------------------------------------------------------------------------
+// PR panel — review comments
+// ---------------------------------------------------------------------------
+
+const prComments: NonNullable<PRStatus["comments"]> = {
+  total: 4,
+  unresolved: 2,
+  comments: [
+    {
+      id: "PRRC_1",
+      threadId: "PRRT_1",
+      author: "octocat",
+      body: "This throws when `gh` is missing. Can we guard it and fall back to the cached status?",
+      file: "packages/kilo-vscode/src/agent-manager/gh.ts",
+      line: 42,
+      url: "https://github.com/org/repo/pull/8594#discussion_r1",
+      resolved: false,
+      outdated: false,
+      createdAt: Date.now() - 5 * 60 * 1000,
+      diffHunk:
+        '@@ -39,7 +39,7 @@ export function execGhRead(args: string[]) {\n-  return execWithShellEnv("gh", args, options)\n+  return execWithShellEnv("gh", args, { ...options, env: env(options) })',
+      side: "additions",
+      reactions: [{ content: "THUMBS_UP", count: 2, viewerHasReacted: false }],
+      preview: {
+        patch:
+          '@@ -40,6 +40,6 @@\n   const options = { timeout: 5000 }\n   const result = await\n-    execWithShellEnv("gh", args, options)\n+    execWithShellEnv("gh", args, { ...options, env: env(options) })\n   return result\n }\n ',
+        line: 42,
+        side: "additions",
+        base: "b".repeat(40),
+        head: "a".repeat(40),
+        top: true,
+        bottom: true,
+      },
+      replies: [
+        {
+          id: "PRRC_1_REPLY",
+          author: "hubot",
+          body: "Agreed. A guard plus a log line is enough here.",
+          createdAt: Date.now() - 4 * 60 * 1000,
+          reactions: [{ content: "HEART", count: 1, viewerHasReacted: false }],
+        },
+      ],
+    },
+    {
+      id: "PRRC_2",
+      threadId: "PRRT_2",
+      author: "hubot",
+      body: "The timeout should be a constant so the poller and the mutation cannot drift apart.",
+      file: "packages/kilo-vscode/src/agent-manager/pr/PRActions.ts",
+      line: 8,
+      url: "https://github.com/org/repo/pull/8594#discussion_r2",
+      resolved: false,
+      outdated: true,
+    },
+    {
+      id: "PRRC_3",
+      threadId: "PRRT_3",
+      author: "octocat",
+      body: "nit: rename this variable to `threads`.\n\nIt reads better next to the loop below.",
+      file: "packages/kilo-vscode/src/agent-manager/pr/am-pr-utils.ts",
+      line: 71,
+      url: "https://github.com/org/repo/pull/8594#discussion_r3",
+      resolved: true,
+      outdated: false,
+    },
+    {
+      id: "PRRC_4",
+      threadId: "PRRT_4",
+      author: "hubot",
+      body: "Good catch, fixed in a9f21c3.",
+      file: "packages/kilo-vscode/webview-ui/agent-manager/pr/PRComments.tsx",
+      line: 118,
+      url: "https://github.com/org/repo/pull/8594#discussion_r4",
+      resolved: true,
+      outdated: false,
+    },
+  ],
+}
+
+const prReviewers: PRReviewer[] = [
+  { login: "marius-kilocode", state: "approved" },
+  { login: "reviewer-changes", state: "changes_requested" },
+  { login: "reviewer-comment", state: "commented" },
+  { login: "reviewer-pending", state: "pending" },
+]
+
+export const PRPanelReviewers: Story = {
+  name: "PR panel — reviewers",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ background: "var(--vscode-editor-background)", width: "320px" }}>
+        <PRReviewers reviewers={prReviewers} />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+export const PRPanelComments: Story = {
+  name: "PR panel — review comments",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ background: "var(--vscode-editor-background)" }}>
+        <PRComments
+          comments={prComments}
+          worktreeId="wt-a1"
+          prNumber={8594}
+          prUrl="https://github.com/org/repo/pull/8594"
+          onOpenFile={() => {}}
+          onOpenDiff={() => {}}
+          onOpenUrl={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+export const PRPanelComments200: Story = {
+  name: "PR panel — review comments (narrow)",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ background: "var(--vscode-editor-background)" }}>
+        <PRComments
+          comments={prComments}
+          worktreeId="wt-a1"
+          prNumber={8594}
+          prUrl="https://github.com/org/repo/pull/8594"
+          onOpenFile={() => {}}
+          onOpenDiff={() => {}}
+          onOpenUrl={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+const prPanelStatus: PRStatus = {
+  number: 13945,
+  title: "fix(cli): prevent snapshot progress session hangs",
+  url: "https://github.com/org/repo/pull/13945",
+  state: "open",
+  review: "pending",
+  checks: {
+    status: "success",
+    total: 3,
+    passed: 3,
+    failed: 0,
+    pending: 0,
+    checks: [
+      { name: "Kilo Code Review", status: "success", duration: "2m 41s" },
+      { name: "build", status: "success", duration: "1m 12s" },
+      { name: "test", status: "success", duration: "4m 03s" },
+    ],
+  },
+  reviewers: [{ login: "octocat", state: "pending" }],
+  comments: prComments,
+  additions: 219,
+  deletions: 6,
+  files: 9,
+  body: [
+    "## What Problem This Solves",
+    "",
+    "Snapshot initialization could remain visible after a mid-session snapshot operation, and an interrupted progress part could be replayed into the next provider request.",
+    "",
+    "## Why This Change Was Made",
+    "",
+    "- Preserve the project Effect context for delayed snapshot progress updates and cleanup.",
+    "- Skip snapshot lock acquisition when snapshots are disabled.",
+    "",
+    "## Evidence",
+    "",
+    "- 39 focused snapshot, history, and fork regression tests pass.",
+  ].join("\n"),
+}
+
+export const PRPanelOverview: Story = {
+  name: "PR panel — overview layout",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ height: "700px", background: "var(--vscode-sideBar-background)" }}>
+        <PRPanel
+          pr={prPanelStatus}
+          worktree={{ ...baseWorktree, branch: "fix-snapshot-initialization-hang" }}
+          worktreeId="wt-a1"
+          onClose={() => {}}
+          onRefresh={() => {}}
+          onOpenExternal={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+const prConversation: PRTimelineItem[] = [
+  {
+    kind: "commit",
+    id: "commit-1",
+    sha: "a".repeat(40),
+    short: "a9f21c3",
+    message: "Guard the missing gh fallback",
+    author: "octocat",
+    createdAt: Date.now() - 50 * 60 * 1000,
+    url: "https://github.com/org/repo/commit/a9f21c3",
+  },
+  {
+    kind: "commit",
+    id: "commit-2",
+    sha: "b".repeat(40),
+    short: "b7d4e12",
+    message: "Add a regression test for the cached status",
+    author: "octocat",
+    createdAt: Date.now() - 45 * 60 * 1000,
+    url: "https://github.com/org/repo/commit/b7d4e12",
+  },
+  {
+    kind: "event",
+    event: "force_pushed",
+    id: "force-push-1",
+    actor: "octocat",
+    detail: "a9f21c3 to b7d4e12",
+    createdAt: Date.now() - 40 * 60 * 1000,
+  },
+  {
+    kind: "review",
+    id: "review-1",
+    author: "hubot",
+    body: "",
+    state: "approved",
+    createdAt: Date.now() - 30 * 60 * 1000,
+  },
+  {
+    id: "conversation-1",
+    kind: "issue",
+    author: "octocat",
+    body: "Thanks, this also covers the empty response case.",
+    createdAt: Date.now() - 20 * 60 * 1000,
+  },
+  {
+    kind: "event",
+    event: "merged",
+    id: "merged-1",
+    actor: "hubot",
+    detail: "main",
+    createdAt: Date.now() - 10 * 60 * 1000,
+  },
+]
+
+export const PRPanelConversation: Story = {
+  name: "PR panel — conversation timeline",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ background: "var(--vscode-editor-background)" }}>
+        <PRConversation
+          prNumber={8594}
+          prUrl="https://github.com/org/repo/pull/8594"
+          worktreeId="wt-a1"
+          description={
+            "Replaces the separate comments and reviews queries with the GitHub timeline.\n\nCommits, force pushes, merges, and reviews now read in the order they happened."
+          }
+          author="octocat"
+          createdAt={Date.now() - 60 * 60 * 1000}
+          items={prConversation}
+          onOpenUrl={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+const summaryPR: PRStatus = {
+  ...basePR,
+  review: "changes_requested",
+  checks: {
+    status: "failure",
+    total: 5,
+    passed: 3,
+    failed: 2,
+    pending: 0,
+    checks: [
+      { name: "Typecheck", status: "failure", url: "https://github.com/org/repo/actions/runs/100/job/200" },
+      { name: "Tests", status: "failure" },
+      { name: "Lint", status: "success" },
+      { name: "Build", status: "success" },
+      { name: "Docs", status: "success" },
+    ],
+  },
+  comments: prComments,
+  conversation: [
+    {
+      id: "IC_1",
+      author: "octocat",
+      body: "Ship it once CI is green.",
+      createdAt: Date.now() - 60_000,
+      isBot: false,
+    },
+  ],
+}
+
+export const PRPanelSummary: Story = {
+  name: "PR panel — header and summary",
+  render: () => (
+    <StoryProviders noPadding>
+      <div style={{ background: "var(--vscode-editor-background)", height: "680px" }}>
+        <PRPanel
+          pr={summaryPR}
+          worktreeId="wt-a1"
+          onClose={() => {}}
+          onRefresh={() => {}}
+          onOpenExternal={() => {}}
+          onOpenFile={() => {}}
+          onOpenDiff={() => {}}
+          onOpenUrl={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+const remoteThreads: PRComment[] = [
+  {
+    id: "remote-addition",
+    threadId: "thread-addition",
+    author: "kilo-code-bot",
+    body: "Keep this value stable while the request is in progress.\n\nThe caller uses `target` to restore the previous selection.",
+    file: tail.file,
+    line: 1,
+    side: "additions",
+    resolved: false,
+    outdated: false,
+    diffHunk: "@@ -1 +1 @@\n-const target = 'before'\n+const target = 'after'",
+    replies: [{ author: "hubot", body: "Agreed. The loading state should not clear the selection." }],
+  },
+  {
+    id: "remote-deletion",
+    threadId: "thread-deletion",
+    author: "hubot",
+    body: "Does the fallback still use the previous value?",
+    file: tail.file,
+    line: 1,
+    side: "deletions",
+    resolved: true,
+    outdated: false,
+    diffHunk: "@@ -1 +1 @@\n-const target = 'before'",
+  },
+  {
+    id: "remote-outdated",
+    threadId: "thread-outdated",
+    author: "octocat",
+    body: "This file has since been removed. Keep the original context available for the discussion.",
+    file: "src/removed.ts",
+    line: 2,
+    side: "additions",
+    resolved: false,
+    outdated: true,
+    diffHunk: "@@ -1,2 +1,2 @@\n export const state = {\n+  ready: true",
+  },
+]
+
+function RemoteReviewStory(props: { full?: boolean }) {
+  const Panel = props.full ? FullScreenDiffView : DiffPanel
+  const [style, setStyle] = createSignal<"unified" | "split">("unified")
+  const [comments, setComments] = createSignal<ReviewComment[]>([
+    {
+      id: "review-note",
+      file: tail.file,
+      side: "additions",
+      line: 1,
+      comment: "Keep this local note separate from the PR discussion.",
+      selectedText: "const target = 'after'",
+    },
+  ])
+  return (
+    <StoryProviders noPadding>
+      <div style={{ height: "700px", display: "flex", "flex-direction": "column" }}>
+        <Panel
+          diffs={[tail]}
+          loading={false}
+          sessionKey={props.full ? "remote-review-full" : "remote-review-inline"}
+          diffStyle={style()}
+          onDiffStyleChange={setStyle}
+          remoteComments={remoteThreads}
+          comments={comments()}
+          onCommentsChange={setComments}
+          onClose={() => {}}
+          onOpenFile={() => {}}
+        />
+      </div>
+    </StoryProviders>
+  )
+}
+
+export const DiffPanelWithPRThreads: Story = {
+  name: "DiffPanel - remote PR threads",
+  render: () => <RemoteReviewStory />,
+}
+
+export const FullScreenDiffWithPRThreads: Story = {
+  name: "FullScreenDiffView - remote PR threads",
+  render: () => <RemoteReviewStory full />,
+}
+
+const orgAvatar = `data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#f8f675"/><path d="M4 4h3v3H4zM9 9h3v3H9z" fill="#000"/></svg>',
+)}`
+
+const storyProjects = [
+  { id: "p1", root: "/repo/kilocode", label: "kilocode", avatar: orgAvatar, expanded: true, active: true },
+  { id: "p2", root: "/repo/internal-tools", label: "internal-tools", expanded: false, active: false },
+  {
+    id: "p3",
+    root: "/repo/a-very-long-project-name-that-needs-to-truncate",
+    label: "a-very-long-project-name-that-needs-to-truncate",
+    avatar: orgAvatar,
+    expanded: false,
+    active: false,
+  },
+].map((item) => ({ pinned: item.id === "p1", initialized: true, missing: false, ...item }))
+
+const ProjectsStory = () => (
+  <StoryProviders noPadding>
+    <div class="am-layout" style={{ "max-height": "320px" }}>
+      <ProjectsSection
+        projects={storyProjects}
+        t={t}
+        bindings={{}}
+        onAdd={() => {}}
+        onCreateProject={() => {}}
+        onClone={() => {}}
+        onSelect={() => {}}
+        onRemove={() => {}}
+        onExpand={() => {}}
+        onReorder={() => {}}
+        onHistory={() => {}}
+        onNew={() => {}}
+        onCreate={() => {}}
+        onSection={() => {}}
+        onSettings={() => {}}
+        count={(id) => (id === "p1" ? 3 : undefined)}
+        baseBranch={() => "main"}
+        body={() => <div style={{ padding: "6px 34px", color: "var(--text-weak)" }}>local</div>}
+      />
+    </div>
+  </StoryProviders>
+)
+
+export const ProjectsAvatars: Story = {
+  name: "Projects — organization avatars and letter fallback",
+  render: ProjectsStory,
+}
+
+export const ProjectsAvatars200: Story = {
+  name: "Projects — organization avatars 200px",
+  render: ProjectsStory,
 }

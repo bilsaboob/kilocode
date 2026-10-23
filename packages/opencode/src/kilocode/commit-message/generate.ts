@@ -5,10 +5,18 @@ import { Agent } from "@/agent/agent"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
 import * as Log from "@opencode-ai/core/util/log"
+import { errorMessage } from "@/util/error"
 import type { CommitMessageRequest, CommitMessageResponse, GitContext } from "./types"
 import { getGitContext } from "./git-context"
 
 const log = Log.create({ service: "commit-message" })
+
+export class NoChangesError extends Error {
+  constructor() {
+    super("No changes found to generate a commit message for")
+    this.name = "CommitMessageNoChanges"
+  }
+}
 
 export const CommitMessageRuntime = {
   context(repoPath: string, selectedFiles?: string[]) {
@@ -98,6 +106,11 @@ For significant changes, include a detailed body explaining the changes.
 
 Return ONLY the commit message in the conventional format, nothing else.`
 
+function languageInstruction(language?: string): string {
+  if (!language || language.toLowerCase() === "en") return ""
+  return `\n\n## Language Requirement\nCRITICAL: You MUST generate the commit message in the following language: ${language}. The entire commit message including type, scope, description, body, and footer MUST be in this language.`
+}
+
 function buildUserMessage(ctx: GitContext): string {
   const fileList = ctx.files.map((f) => `${f.status} ${f.path}`).join("\n")
   const diffs = ctx.files
@@ -146,7 +159,7 @@ const TIMEOUT_MS = 30_000
 export async function generateCommitMessage(request: CommitMessageRequest): Promise<CommitMessageResponse> {
   const ctx = await CommitMessageRuntime.context(request.path, request.selectedFiles)
   if (ctx.files.length === 0) {
-    throw new Error("No changes found to generate a commit message for")
+    throw new NoChangesError()
   }
 
   log.info("generating", {
@@ -162,7 +175,7 @@ export async function generateCommitMessage(request: CommitMessageRequest): Prom
     hidden: true,
     options: {},
     permission: [],
-    prompt: request.prompt || SYSTEM_PROMPT,
+    prompt: (request.prompt || SYSTEM_PROMPT) + languageInstruction(request.language),
     temperature: 0.3,
   }
 
@@ -213,7 +226,7 @@ export async function generateCommitMessage(request: CommitMessageRequest): Prom
     if (controller.signal.aborted) {
       throw new Error("Commit message generation timed out after 30 seconds")
     }
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = errorMessage(err)
     log.error("generation failed", { error: msg })
     throw new Error(`Failed to generate commit message: ${msg}`)
   } finally {

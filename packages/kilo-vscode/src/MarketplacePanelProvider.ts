@@ -3,10 +3,10 @@ import * as vscode from "vscode"
 import type { GlobalEvent, SessionStatus } from "@kilocode/sdk/v2/client"
 import { buildWebviewHtml, getWebviewFontSize } from "./utils"
 import { watchFontSizeConfig } from "./kilo-provider/font-size"
-import { mapSSEEventToWebviewMessage } from "./kilo-provider-utils"
+import { mapSSEEventToWebviewMessage, sameDirectory } from "./kilo-provider-utils"
 import { resolvePanelProjectDirectory } from "./project-directory"
 import { seedSessionStatuses } from "./session-status"
-import type { KiloConnectionService } from "./services/cli-backend"
+import { type KiloConnectionService, ServerStartupError } from "./services/cli-backend"
 import { MarketplaceService } from "./services/marketplace"
 import {
   fetchMarketplaceData,
@@ -17,6 +17,9 @@ import {
 import type { InstallMarketplaceItemOptions, MarketplaceItem } from "./services/marketplace/types"
 import { TelemetryProxy } from "./services/telemetry"
 import { TelemetryEventName } from "./services/telemetry/types"
+import { mcpAuth } from "./services/mcp-auth"
+import { mcpRemoval } from "./services/mcp-removal"
+import { notifySignInResult } from "./kilo-provider/mcp-oauth"
 
 interface MarketplaceMessage {
   type?: string
@@ -25,6 +28,8 @@ interface MarketplaceMessage {
   url?: unknown
   event?: string
   properties?: Record<string, unknown>
+  name?: string
+  notify?: boolean
 }
 
 export class MarketplacePanelProvider implements vscode.Disposable {
@@ -33,7 +38,11 @@ export class MarketplacePanelProvider implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined
   private project: string | null = null
   private ready = false
+  private generation = 0
+  private refresh: ReturnType<typeof setTimeout> | undefined
   private statuses = new Map<string, SessionStatus["type"]>()
+  private pendingInstall: MarketplaceItem | undefined
+  private pendingFocus: MarketplaceItem | undefined
   private disposables: vscode.Disposable[] = []
   private subscriptions: Array<() => void> = []
   private readonly marketplace = new MarketplaceService()
@@ -60,6 +69,8 @@ export class MarketplacePanelProvider implements vscode.Disposable {
     if (this.panel) {
       this.setProjectDirectory(project)
       this.panel.reveal(vscode.ViewColumn.One)
+      this.post({ type: "resetMarketplaceFilters" })
+      this.scheduleRefresh()
       return
     }
 
@@ -80,10 +91,23 @@ export class MarketplacePanelProvider implements vscode.Disposable {
     this.attach(panel, this.resolveProject())
   }
 
+  /** Open the panel and surface the install dialog for a specific item, project scope preselected. */
+  openInstall(item: MarketplaceItem): void {
+    this.openPanel()
+    this.pendingInstall = item
+    this.flushPendingInstall()
+  }
+
+  /** Open the panel focused on a specific item so it is easy to find. */
+  focusItem(item: MarketplaceItem): void {
+    this.openPanel()
+    this.pendingFocus = item
+    this.flushPendingFocus()
+  }
+
   dispose(): void {
     this.panel?.dispose()
     this.cleanup()
-    this.marketplace.dispose()
   }
 
   private attach(panel: vscode.WebviewPanel, project: string | null): void {
@@ -105,10 +129,22 @@ export class MarketplacePanelProvider implements vscode.Disposable {
       panel.webview.onDidReceiveMessage((msg) => void this.handle(msg as MarketplaceMessage)),
       panel.onDidDispose(() => this.cleanup()),
       watchFontSizeConfig((msg) => this.post(msg)),
+      vscode.extensions.onDidChange(() => this.scheduleRefresh()),
+      vscode.workspace.onDidCreateFiles(() => this.scheduleRefresh()),
+      vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
+      vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
     )
     this.subscriptions.push(
       this.connection.onStateChange((state, err) => {
-        this.post({ type: "connectionState", state, ...(err ? { error: err.message } : {}) })
+        this.post({
+          type: "connectionState",
+          state,
+          ...(err ? { error: err.message } : {}),
+          ...(err instanceof ServerStartupError && {
+            userMessage: err.userMessage,
+            userDetails: err.userDetails,
+          }),
+        })
         if (state === "connected") void this.sync(false)
       }),
       this.connection.onLanguageChanged((locale) => this.post({ type: "languageChanged", locale })),
@@ -118,18 +154,30 @@ export class MarketplacePanelProvider implements vscode.Disposable {
           if (event.type === "session.status") this.handleStatus(event)
         },
       ),
+      mcpAuth(this.connection).onChange((dir) => {
+        if (dir === this.directory()) this.sendMcpAuthState()
+      }),
+      mcpRemoval(this.connection).on((event) => {
+        if (!sameDirectory(event.directory, this.directory())) return
+        if (event.phase === "removed" || event.phase === "installed") void this.fetchData()
+      }),
     )
     void this.connect()
   }
 
   private cleanup(): void {
+    if (this.refresh) clearTimeout(this.refresh)
+    this.refresh = undefined
     for (const disposable of this.disposables) disposable.dispose()
     for (const unsubscribe of this.subscriptions) unsubscribe()
     this.disposables = []
     this.subscriptions = []
     this.panel = undefined
     this.ready = false
+    this.generation++
     this.statuses.clear()
+    this.pendingInstall = undefined
+    this.pendingFocus = undefined
   }
 
   private async connect(): Promise<void> {
@@ -137,7 +185,15 @@ export class MarketplacePanelProvider implements vscode.Disposable {
       await this.connection.connect(this.directory())
       await this.sync(this.statuses.size === 0)
     } catch (err) {
-      this.post({ type: "connectionState", state: "error", error: err instanceof Error ? err.message : String(err) })
+      this.post({
+        type: "connectionState",
+        state: "error",
+        error: err instanceof Error ? err.message : String(err),
+        ...(err instanceof ServerStartupError && {
+          userMessage: err.userMessage,
+          userDetails: err.userDetails,
+        }),
+      })
     }
   }
 
@@ -173,6 +229,8 @@ export class MarketplacePanelProvider implements vscode.Disposable {
         if (this.connection.getConnectionState() === "connected") await this.sync(true)
         else await this.connect()
         await this.fetchData()
+        this.flushPendingInstall()
+        this.flushPendingFocus()
         return
       case "retryConnection":
         await this.connect()
@@ -195,22 +253,84 @@ export class MarketplacePanelProvider implements vscode.Disposable {
       case "telemetry":
         if (msg.event) TelemetryProxy.capture(msg.event as TelemetryEventName, msg.properties)
         return
+      case "requestMcpAuthState":
+      case "signInMcp":
+      case "cancelMcpSignIn":
+        await this.handleMcpAuth(msg)
+        return
     }
   }
 
+  /** Dispatch the MCP OAuth sign-in messages, kept off `handle` to bound its complexity. */
+  private async handleMcpAuth(msg: MarketplaceMessage): Promise<void> {
+    if (msg.type === "requestMcpAuthState") {
+      this.sendMcpAuthState()
+      return
+    }
+    if (!msg.name) return
+    if (msg.type === "signInMcp") {
+      await this.signInMcp(msg.name, msg.notify !== false)
+      return
+    }
+    await mcpAuth(this.connection).cancel(this.directory(), msg.name)
+  }
+
+  private sendMcpAuthState(): void {
+    const dir = this.directory()
+    const auth = mcpAuth(this.connection)
+    this.post({ type: "mcpAuthState", directory: dir, needsAuth: auth.needsAuth(dir), busy: auth.busy(dir) })
+  }
+
+  private async signInMcp(name: string, notify: boolean): Promise<void> {
+    const dir = this.directory()
+    const result = await mcpAuth(this.connection).signIn(dir, name)
+    this.post({ type: "mcpAuthResult", name, status: result.status, error: result.error })
+    this.sendMcpAuthState()
+    if (notify) notifySignInResult(name, result)
+  }
+
+  /** Ask the webview to open the install dialog for a queued suggestion, once it can receive it. */
+  private flushPendingInstall(): void {
+    if (!this.pendingInstall || !this.ready) return
+    const item = this.pendingInstall
+    this.pendingInstall = undefined
+    this.post({ type: "openInstallModal", mpItem: item })
+  }
+
+  /** Ask the webview to focus a queued item, once it can receive it. */
+  private flushPendingFocus(): void {
+    if (!this.pendingFocus || !this.ready) return
+    const item = this.pendingFocus
+    this.pendingFocus = undefined
+    this.post({ type: "focusMarketplaceItem", mpItem: item })
+  }
+
+  private scheduleRefresh(): void {
+    if (!this.ready) return
+    if (this.refresh) clearTimeout(this.refresh)
+    this.refresh = setTimeout(() => {
+      this.refresh = undefined
+      void this.fetchData()
+    }, 250)
+  }
+
   private async fetchData(): Promise<void> {
+    const generation = ++this.generation
     try {
       const project = this.project ?? undefined
       const data = await fetchMarketplaceData(this.marketplaceCtx, project, this.directory())
+      if (generation !== this.generation) return
       const dismissed = this.context.globalState.get<boolean>("kilo.agentMigrationBannerDismissed") ?? false
       this.post({ type: "marketplaceData", ...data, showAgentMigrationBanner: !dismissed })
     } catch (err) {
+      if (generation !== this.generation) return
       const error = err instanceof Error ? err.message : String(err)
       console.warn("[Kilo New] Marketplace data fetch failed:", err)
       this.post({
         type: "marketplaceData",
         marketplaceItems: [],
         marketplaceInstalledMetadata: { project: {}, global: {} },
+        marketplaceRelevance: {},
         errors: [error],
       })
     }
@@ -224,10 +344,21 @@ export class MarketplacePanelProvider implements vscode.Disposable {
       this.project ?? undefined,
       this.directory(),
     )
-    this.post({ type: "marketplaceInstallResult", ...result })
+    if (result.success) void vscode.window.showInformationMessage(`Successfully installed ${item.name}`)
+    if (result.success && item.type === "mcp") {
+      mcpRemoval(this.connection).emit({ directory: this.directory(), name: item.id, phase: "installed" })
+    }
+    const needsAuth =
+      result.success && item.type === "mcp"
+        ? (await mcpAuth(this.connection).refresh(this.directory())).includes(item.id)
+        : false
+    this.post({ type: "marketplaceInstallResult", ...result, needsAuth })
   }
 
   private async remove(item: MarketplaceItem, scope: "project" | "global"): Promise<void> {
+    const directory = this.directory()
+    const bus = item.type === "mcp" ? mcpRemoval(this.connection) : undefined
+    bus?.emit({ directory, name: item.id, phase: "removing" })
     const result = await removeMarketplaceItem(
       this.marketplaceCtx,
       item,
@@ -235,6 +366,13 @@ export class MarketplacePanelProvider implements vscode.Disposable {
       this.project ?? undefined,
       this.directory(),
     )
+    if (result.success) void vscode.window.showInformationMessage(`Successfully removed ${item.name}`)
+    // Mirror install()'s auth refresh so a removed server's stale "needs
+    // sign-in" state clears for every provider sharing this McpAuthService
+    // (sidebar, chat tabs, Settings) via its onChange broadcast.
+    if (result.success && item.type === "mcp") await mcpAuth(this.connection).refresh(directory)
+    if (result.success) bus?.emit({ directory, name: item.id, phase: "removed" })
+    bus?.emit({ directory, name: item.id, phase: "idle" })
     this.post({ type: "marketplaceRemoveResult", ...result })
   }
 
@@ -247,6 +385,7 @@ export class MarketplacePanelProvider implements vscode.Disposable {
 
   private setProjectDirectory(project: string | null): void {
     if (this.project === project) return
+    this.generation++
     this.project = project
     this.post({ type: "workspaceDirectoryChanged", directory: project ?? "" })
   }

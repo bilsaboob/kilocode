@@ -1,6 +1,7 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { $ } from "bun"
 import { afterEach, describe, expect } from "bun:test"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Effect, Layer } from "effect"
@@ -8,22 +9,17 @@ import path from "path"
 import { Bus } from "../../src/bus"
 import { Config } from "../../src/config/config"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Git } from "../../src/git"
 import { Skill } from "../../src/skill"
 import { Discovery } from "../../src/skill/discovery"
-import { disposeAllInstances, provideInstance, tmpdirScoped } from "../fixture/fixture"
+import { disposeAllInstances, provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
-const layer = Skill.layer.pipe(
-  Layer.provide(Git.defaultLayer),
-  Layer.provide(Discovery.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(Bus.layer),
-  Layer.provide(AppFileSystem.defaultLayer),
-  Layer.provide(Global.layer),
-  Layer.provide(RuntimeFlags.layer({ disableExternalSkills: false, disableClaudeCodeSkills: false })),
-)
-const it = testEffect(Layer.mergeAll(layer, CrossSpawnSpawner.defaultLayer))
+const layer = AppNodeBuilder.build(Skill.node, [
+  [RuntimeFlags.node, RuntimeFlags.layer({ disableExternalSkills: false, disableClaudeCodeSkills: false })],
+])
+const it = testEffect(Layer.mergeAll(layer, AppNodeBuilder.build(CrossSpawnSpawner.node), testInstanceStoreLayer))
 
 afterEach(() => disposeAllInstances())
 
@@ -133,6 +129,58 @@ description: Nested worktree override.
       expect(list.find((item) => item.name === "agents-nested")?.location).toBe(
         path.join(dir, "packages", ".agents", "skills", "agents-nested", "SKILL.md"),
       )
+    }),
+  )
+
+  it.live("keeps every project skill when one process loads a worktree and then the primary checkout", () =>
+    Effect.gen(function* () {
+      const primary = yield* tmpdirScoped({ git: true })
+      const dir = path.join(primary, ".kilo", "worktrees", "feature")
+      const names = ["colon-alpha", "colon-beta"]
+
+      // Unquoted colons only parse through the permissive fallback, matching common real-world skills.
+      yield* Effect.promise(() =>
+        Promise.all(
+          names.map((name) =>
+            Bun.write(
+              path.join(primary, ".kilo", "skills", name, "SKILL.md"),
+              `---
+name: ${name}
+description: Use when: ${name} work is needed.
+---
+
+# ${name}
+`,
+            ),
+          ),
+        ),
+      )
+      yield* Effect.promise(() => $`git add .kilo`.cwd(primary).quiet())
+      yield* Effect.promise(() => $`git commit -m skills`.cwd(primary).quiet())
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => $`git worktree remove --force ${dir}`.cwd(primary).quiet().nothrow()).pipe(Effect.asVoid),
+      )
+      yield* Effect.promise(() => $`git worktree add -b colon-skills ${dir}`.cwd(primary).quiet())
+
+      const load = (directory: string) =>
+        provideInstance(directory)(
+          Effect.gen(function* () {
+            const skill = yield* Skill.Service
+            return yield* skill.all()
+          }),
+        )
+
+      const worktree = yield* load(dir)
+      const checkout = yield* load(primary)
+
+      for (const name of names) {
+        expect(worktree.find((item) => item.name === name)?.location).toBe(
+          path.join(dir, ".kilo", "skills", name, "SKILL.md"),
+        )
+        expect(checkout.find((item) => item.name === name)?.location).toBe(
+          path.join(primary, ".kilo", "skills", name, "SKILL.md"),
+        )
+      }
     }),
   )
 })

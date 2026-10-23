@@ -1,4 +1,6 @@
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import type { Auth } from "@/auth"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
@@ -24,15 +26,18 @@ import {
 } from "@kilocode/kilo-gateway"
 import { Identity } from "@kilocode/kilo-telemetry"
 import { KiloSession } from "@/kilocode/session"
+import { stripInternalOptions } from "@/kilocode/agent/options"
+import { KilocodeSystemPrompt } from "@/kilocode/system-prompt"
+import { KiloLLM } from "@/kilocode/session/llm"
 // kilocode_change end
 
 type PrepareInput = {
-  readonly user: MessageV2.User
+  readonly user: SessionV1.User
   readonly sessionID: string
   readonly parentSessionID?: string
   readonly model: Provider.Model
   readonly agent: Agent.Info
-  readonly permission?: Permission.Ruleset
+  readonly permission?: PermissionV1.Ruleset
   readonly system: string[]
   readonly messages: ModelMessage[]
   readonly small?: boolean
@@ -64,10 +69,11 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
+  const includePersona = KilocodeSystemPrompt.shouldIncludePersona(input.agent.name) // kilocode_change
   const system = [
     [
       // kilocode_change start - soul defines core identity and personality
-      ...(isOpenaiOauth ? [] : [SystemPrompt.soul()]),
+      ...(isOpenaiOauth || !includePersona ? [] : [SystemPrompt.soul()]),
       // kilocode_change end
       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
       ...input.system,
@@ -100,10 +106,21 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         sessionID: input.sessionID,
         providerOptions: input.provider.options,
       })
-  const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  // kilocode_change start - drop Kilo-internal agent metadata (id/displayName/source)
+  // so it never leaks into providerOptions and gets rejected by strict providers
+  const agentOptions = stripInternalOptions(input.agent.options)
+  const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), agentOptions), variant)
+  // kilocode_change end
+  if (
+    input.model.api.npm === "@ai-sdk/azure" &&
+    (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)
+  ) {
+    delete options.reasoningSummary
+    delete options.include
+  }
   if (isOpenaiOauth) {
     // kilocode_change start - prepend soul to instructions
-    options.instructions = SystemPrompt.soul() + "\n" + system.join("\n")
+    options.instructions = [...(includePersona ? [SystemPrompt.soul()] : []), ...system].join("\n")
     // kilocode_change end
   }
 
@@ -138,10 +155,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       // kilocode_change start - gpt-5 via @ai-sdk/openai-compatible proxies (e.g. LiteLLM)
       // rejects `max_tokens`; OpenAI requires `max_completion_tokens` and the compatible
       // SDK cannot rename the field, so drop the cap and let the upstream default apply.
+      // Claude on first-party routes requests its full output limit, see KiloLLM.outputTokens.
       maxOutputTokens:
         input.model.api.npm === "@ai-sdk/openai-compatible" && input.model.api.id.toLowerCase().includes("gpt-5")
           ? undefined
-          : ProviderTransform.maxOutputTokens(input.model, input.flags.outputTokenMax),
+          : KiloLLM.outputTokens({ model: input.model, options, max: input.flags.outputTokenMax, small: input.small }),
       // kilocode_change end
       options,
     },
@@ -176,6 +194,16 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // kilocode_change end
 
   const tools = resolveTools(input)
+  // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
+  // on every function tool so MCP-sourced and dynamic schemas that don't
+  // satisfy OpenAI's structured-outputs constraints still register.
+  if (
+    input.model.api.npm === "@ai-sdk/openai" ||
+    input.model.api.npm === "@ai-sdk/azure" ||
+    input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle"
+  ) {
+    for (const key of Object.keys(tools)) tools[key] = { ...tools[key], strict: false }
+  }
   if (
     input.model.providerID.includes("github-copilot") &&
     Object.keys(tools).length === 0 &&
@@ -194,7 +222,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     })
   }
 
-  const kiloProjectID = input.model.providerID.startsWith("kilo") // kilocode_change
+  const opencodeProjectID = input.model.providerID.startsWith("opencode")
     ? (yield* InstanceState.context).project.id
     : undefined
 
@@ -203,19 +231,27 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
     params,
-    messageTransformOptions: options,
+    // kilocode_change start - surface provider-level endpoint overrides to message
+    // transforms without leaking them into the wire params (options is also params.options)
+    messageTransformOptions: {
+      ...options,
+      ...(typeof (input.provider.options?.endpoint ?? input.provider.options?.baseURL) === "string"
+        ? { providerEndpointOverride: input.provider.options?.endpoint ?? input.provider.options?.baseURL }
+        : {}),
+    },
+    // kilocode_change end
     headers: {
-      ...(input.model.providerID.startsWith("kilo") // kilocode_change
+      ...(input.model.providerID.startsWith("opencode")
         ? {
-            ...(kiloProjectID ? { "x-kilo-project": kiloProjectID } : {}),
-            "x-kilo-session": input.sessionID,
-            "x-kilo-request": input.user.id,
-            "x-kilo-client": input.flags.client,
+            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
+            "x-opencode-session": input.sessionID,
+            "x-opencode-request": input.user.id,
+            "x-opencode-client": input.flags.client,
             "User-Agent": USER_AGENT,
           }
         : {
             "x-session-affinity": input.sessionID,
-            ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+            "X-Session-Id": input.sessionID,
             "User-Agent": USER_AGENT,
             ...(input.model.providerID !== "anthropic" ? DEFAULT_HEADERS : undefined), // kilocode_change
           }),
@@ -227,6 +263,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ...(isKilo && parent ? { [HEADER_PARENT_TASKID]: parent } : {}),
       ...(isKilo && attr.feature ? { [HEADER_FEATURE]: attr.feature } : {}),
       // kilocode_change end
+      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
       ...input.model.headers,
       ...headers,
     },

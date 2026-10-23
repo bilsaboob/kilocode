@@ -37,6 +37,24 @@ Before enabling Code Reviews:
     - [Kilo Discord](https://discord.gg/hZnd57qN)
 - **Kilo Code credits are still used** when the agent performs model reasoning during a review.
 
+## Concurrent reviews
+
+Cloud Code Reviews limit how many reviews one owner can run at the same time. Reviews past that limit wait, then start when a slot opens. Local `/review` commands do not count toward this limit.
+
+The limit is per owner. For a personal account, it follows credit balance, not whether the selected model is free.
+
+{% callout type="note" %}
+A funded personal account running a free model still gets 3 concurrent reviews.
+{% /callout %}
+
+| Owner | Concurrent reviews |
+|---|---|
+| Personal account, credit balance of $5 or less | 1. Reviews run one at a time. |
+| Personal account, credit balance above $5 | Up to 3 |
+| Organization | Up to 20 |
+
+Organization reviews use the organization as the owner. A member's personal balance does not set the organization limit.
+
 ## Getting Started
 
 1. Go to the **Code Reviews** page in your [personal dashboard](https://app.kilo.ai/profile) or [organization dashboard](https://app.kilo.ai/organizations).
@@ -45,8 +63,7 @@ Before enabling Code Reviews:
 4. Select a **Review Style** — Strict, Balanced, or Lenient.
 5. Choose which **repositories** should receive automatic reviews.
 6. Optionally select **Focus Areas** such as security, performance, bugs, style, testing, or documentation.
-7. Set a **maximum review time** (5–30 minutes).
-8. Optionally enable **Use REVIEW.md** and add a `REVIEW.md` file at the repository root to shape how the agent reviews your code.
+7. Optionally enable **Use REVIEW.md** and add a `REVIEW.md` file at the repository root to shape how the agent reviews your code.
 
 Once configured, the Review Agent runs automatically on PR/MR events. For platform-specific setup, see:
 
@@ -120,25 +137,25 @@ Code Reviewer is also available locally. This is valuable for developers who wan
 {% tabs %}
 {% tab label="VSCode" %}
 
-Two slash commands are available for local code reviews:
+Use `/review` for all local code reviews:
 
-- **`/local-review`** — Review all changes on your current branch vs the base branch
-- **`/local-review-uncommitted`** — Review uncommitted changes (staged + unstaged)
+- **`/review`** — Review uncommitted changes (staged, unstaged, and untracked) when run without arguments
+- **`/review uncommitted [guidance]`** — Review uncommitted changes with optional guidance
+- **`/review branch [base] [guidance]`** — Review your current branch vs. its detected or specified base, with optional guidance
+- **`/review worktree [guidance]`** - In an Agent Manager worktree session, review committed, staged, unstaged, and untracked changes against the recorded parent branch
+- **`/review <commit-hash>`** — Review a specific commit
+- **`/review <PR URL or number>`** — Review a pull request
 
 {% /tab %}
 {% tab label="CLI" %}
 
-Two slash commands are available for local code reviews:
+Use `/review` for all local code reviews:
 
-- **`/local-review`** — Review all changes on your current branch vs the base branch
-- **`/local-review-uncommitted`** — Review uncommitted changes (staged + unstaged)
-
-{% /tab %}
-{% tab label="VSCode (Legacy)" %}
-
-Select 'Review' from the mode dropdown after making local changes, and click 'Send' for AI-powered feedback and suggestions.
-
-{% image src="/docs/img/code-reviewer/review-mode.png" alt="VS Code interface showing Review option in mode dropdown" width="800" caption="Review Mode" /%}
+- **`/review`** — Review uncommitted changes (staged, unstaged, and untracked) when run without arguments
+- **`/review uncommitted [guidance]`** — Review uncommitted changes with optional guidance
+- **`/review branch [base] [guidance]`** — Review your current branch vs. its detected or specified base, with optional guidance
+- **`/review <commit-hash>`** — Review a specific commit
+- **`/review <PR URL or number>`** — Review a pull request
 
 {% /tab %}
 {% /tabs %}
@@ -155,10 +172,13 @@ When a pull request or merge request is opened or updated:
    - Summary findings
    - Suggested fixes
    - Risk and severity tagging
-5. Reviews respect the **maximum time limit** you set.
-6. Only repositories you’ve selected will trigger automatic analysis.
+5. Only repositories you’ve selected will trigger automatic analysis.
 
 Reviews are posted directly in your platform (GitHub or GitLab) as if coming from a team reviewer.
+
+{% callout type="info" title="Bot-generated PRs are ignored by default" %}
+Kilo does not automatically review pull or merge requests opened by bots, such as Dependabot, Renovate, or other automation accounts. This keeps review credits and notifications focused on human-authored changes.
+{% /callout %}
 
 ## Review Styles
 
@@ -232,8 +252,10 @@ The Review Agent is ideal for:
 
 ## Limitations and Guidance
 
-- Reviews can run for **up to 30 minutes** depending on your setting.
+- Cloud reviews are limited per owner. See [Concurrent reviews](#concurrent-reviews).
+- Reviews are subject to a fixed time limit — consider splitting very large PRs into smaller ones.
 - The agent reviews **only the changed files**, not the entire repository.
 - Some highly dynamic or domain-specific code may require additional context in `REVIEW.md`.
 - The agent will only run on **selected repositories**.
 - During beta, review capacity may be throttled for extremely large PRs.
+- PRs/MRs opened by bots (e.g. Dependabot, Renovate) are ignored by default.

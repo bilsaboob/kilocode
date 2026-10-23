@@ -7,12 +7,20 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js"
 import { Effect } from "effect"
 import { McpAuth } from "./auth"
-import * as Log from "@opencode-ai/core/util/log"
-
-const log = Log.create({ service: "mcp.oauth" })
+import { clientMetadataUrl } from "../kilocode/mcp/client-metadata" // kilocode_change
+import { configured, retain, stored } from "../kilocode/mcp/oauth-issuer" // kilocode_change
+import type { Expected } from "../kilocode/mcp/invalidation" // kilocode_change
 
 const OAUTH_CALLBACK_PORT = 19876
 const OAUTH_CALLBACK_PATH = "/mcp/oauth/callback"
+
+// kilocode_change start - shared state generator for both providers
+function generateState(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+}
+// kilocode_change end
 
 export interface McpOAuthConfig {
   clientId?: string
@@ -27,13 +35,32 @@ export interface McpOAuthCallbacks {
 }
 
 export class McpOAuthProvider implements OAuthClientProvider {
+  // kilocode_change start - credential the most recent rejected request presented, recorded by
+  // the OAuth fetch guard so invalidateCredentials can clear exactly that credential
+  protected rejected?: Expected
+
+  /** Record the credential a failed OAuth request was bound to, immediately before invalidation. */
+  markRejected(expected: Expected): void {
+    this.rejected = expected
+  }
+  // kilocode_change end
+
   constructor(
-    private mcpName: string,
-    private serverUrl: string,
-    private config: McpOAuthConfig,
+    protected mcpName: string,
+    protected serverUrl: string,
+    protected config: McpOAuthConfig,
     private callbacks: McpOAuthCallbacks,
-    private auth: McpAuth.Interface,
+    protected auth: McpAuth.Interface,
   ) {}
+
+  // kilocode_change start
+  get clientMetadataUrl(): string | undefined {
+    // The hosted document describes a public client with the default callback URI.
+    if (this.config.clientId || this.config.clientSecret) return undefined
+    if (this.redirectUrl !== `http://127.0.0.1:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}`) return undefined
+    return clientMetadataUrl
+  }
+  // kilocode_change end
 
   get redirectUrl(): string {
     if (this.config.redirectUri) {
@@ -56,12 +83,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
-    // Check config first (pre-registered client)
     if (this.config.clientId) {
-      return {
-        client_id: this.config.clientId,
-        client_secret: this.config.clientSecret,
-      }
+      // kilocode_change start - honor the stored issuer binding of pre-registered credentials
+      const entry = await Effect.runPromise(this.auth.getForUrl(this.mcpName, this.serverUrl))
+      return configured(entry?.clientInfo, this.config.clientId, this.config.clientSecret)
+      // kilocode_change end
     }
 
     // Check stored client info (from dynamic registration)
@@ -70,12 +96,12 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (entry?.clientInfo) {
       // Check if client secret has expired
       if (entry.clientInfo.clientSecretExpiresAt && entry.clientInfo.clientSecretExpiresAt < Date.now() / 1000) {
-        log.info("client secret expired, need to re-register", { mcpName: this.mcpName })
         return undefined
       }
       return {
         client_id: entry.clientInfo.clientId,
         client_secret: entry.clientInfo.clientSecret,
+        issuer: entry.clientInfo.issuer, // kilocode_change
       }
     }
 
@@ -84,6 +110,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   async saveClientInformation(info: OAuthClientInformationFull): Promise<void> {
+    // kilocode_change start - never store the configured secret, only its binding
+    if (this.config.clientId) {
+      await Effect.runPromise(
+        this.auth.updateClientInfo(this.mcpName, stored(info, this.config.clientId), this.serverUrl),
+      )
+      return
+    }
+    // kilocode_change end
     await Effect.runPromise(
       this.auth.updateClientInfo(
         this.mcpName,
@@ -92,14 +126,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
           clientSecret: info.client_secret,
           clientIdIssuedAt: info.client_id_issued_at,
           clientSecretExpiresAt: info.client_secret_expires_at,
+          issuer: info.issuer, // kilocode_change
         },
         this.serverUrl,
       ),
     )
-    log.info("saved dynamically registered client", {
-      mcpName: this.mcpName,
-      clientId: info.client_id,
-    })
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
@@ -115,6 +146,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         ? Math.max(0, Math.floor(entry.tokens.expiresAt - Date.now() / 1000))
         : undefined,
       scope: entry.tokens.scope,
+      issuer: entry.tokens.issuer, // kilocode_change
     }
   }
 
@@ -127,15 +159,20 @@ export class McpOAuthProvider implements OAuthClientProvider {
           refreshToken: tokens.refresh_token,
           expiresAt: tokens.expires_in ? Date.now() / 1000 + tokens.expires_in : undefined,
           scope: tokens.scope,
+          issuer: tokens.issuer, // kilocode_change
         },
         this.serverUrl,
       ),
     )
-    log.info("saved oauth tokens", { mcpName: this.mcpName })
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
-    log.info("redirecting to authorization", { mcpName: this.mcpName, url: authorizationUrl.toString() })
+    // kilocode_change start - backport upstream validation before local or external browser handoff
+    if (authorizationUrl.protocol !== "http:" && authorizationUrl.protocol !== "https:")
+      throw new Error(
+        `MCP server "${this.serverUrl}" returned a ${authorizationUrl.protocol} authorization URL; only http and https are supported`,
+      )
+    // kilocode_change end
     await this.callbacks.onRedirect(authorizationUrl)
   }
 
@@ -165,33 +202,142 @@ export class McpOAuthProvider implements OAuthClientProvider {
     // generator, not just a reader, so we need to produce a value even when
     // startAuth() hasn't pre-saved one (e.g. during automatic auth on first
     // connect).
-    const newState = Array.from(crypto.getRandomValues(new Uint8Array(32)))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
+    const newState = generateState() // kilocode_change
     await Effect.runPromise(this.auth.updateOAuthState(this.mcpName, newState))
     return newState
   }
 
   async invalidateCredentials(type: "all" | "client" | "tokens"): Promise<void> {
-    log.info("invalidating credentials", { mcpName: this.mcpName, type })
-    const entry = await Effect.runPromise(this.auth.get(this.mcpName))
-    if (!entry) {
-      return
-    }
+    // kilocode_change start - automatic invalidation is conditional. The fetch guard
+    // that observed the rejected OAuth request records the exact credential it presented
+    // here, then this clears only that credential and only if a newer one has not replaced
+    // it. Tokens without a recorded expectation are kept: refresh tokens rotate, so a blind
+    // delete could wipe a concurrent rotation, and the SDK retry re-reads the newer value.
+    const scope = type === "tokens" ? "tokens" : "client"
+    const recorded = this.rejected
+    this.rejected = undefined
+    if (!recorded && scope === "tokens") return
+    // "all"/"client" are raised for a rejected client (`invalid_client`/`unauthorized_client`);
+    // clear the client binding but keep any tokens. Without a recorded fingerprint, fall back to
+    // the client bound to this server URL: a stale client (for example an expired secret) would
+    // otherwise be retried forever, and client registrations do not rotate like refresh tokens.
+    const expected = recorded ?? { serverUrl: this.serverUrl }
+    const name = this.mcpName
+    const invalidate = this.auth.invalidate(name, scope, expected)
+    // Diagnose automatic invalidation: "cleared" means the rejected credential was still the
+    // stored one, "superseded" means a concurrent rotation won and the stored credential was kept.
+    await Effect.runPromise(
+      invalidate.pipe(
+        Effect.tap((result) =>
+          Effect.logInfo("MCP OAuth automatic invalidation", {
+            server: name,
+            type,
+            scope,
+            binding: recorded ? "request" : "url",
+            outcome: result._tag,
+          }),
+        ),
+        Effect.asVoid,
+      ),
+    )
+    // kilocode_change end
+  }
+}
 
-    switch (type) {
-      case "all":
-        await Effect.runPromise(this.auth.remove(this.mcpName))
-        break
-      case "client":
-        delete entry.clientInfo
-        await Effect.runPromise(this.auth.set(this.mcpName, entry))
-        break
-      case "tokens":
-        delete entry.tokens
-        await Effect.runPromise(this.auth.set(this.mcpName, entry))
-        break
-    }
+export class McpOAuthPendingProvider extends McpOAuthProvider {
+  private pendingClientInfo?: OAuthClientInformationFull
+  private pendingTokens?: OAuthTokens
+  // kilocode_change start - the authorization flow owns its state and PKCE verifier in
+  // memory. Reading them back from the process-shared mcp-auth.json let any other Kilo
+  // process that connected the same server replace the verifier the authorization server
+  // never saw, which failed the token exchange.
+  private pendingState?: string
+  private pendingVerifier?: string
+
+  /** Pin the state the CLI generated so the browser callback matches this flow. */
+  pinState(state: string): void {
+    this.pendingState = state
+  }
+
+  override async saveCodeVerifier(codeVerifier: string): Promise<void> {
+    this.pendingVerifier = codeVerifier
+  }
+
+  override async codeVerifier(): Promise<string> {
+    if (!this.pendingVerifier) throw new Error(`No code verifier saved for MCP server: ${this.mcpName}`)
+    return this.pendingVerifier
+  }
+
+  override async saveState(state: string): Promise<void> {
+    this.pendingState = state
+  }
+
+  override async state(): Promise<string> {
+    if (this.pendingState) return this.pendingState
+    const state = generateState()
+    this.pendingState = state
+    return state
+  }
+  // kilocode_change end
+
+  override async clientInformation(): Promise<OAuthClientInformation | undefined> {
+    if (!this.config.clientId) return this.pendingClientInfo
+    return this.pendingClientInfo ?? super.clientInformation() // kilocode_change - honor the issuer binding
+  }
+
+  override async saveClientInformation(info: OAuthClientInformationFull): Promise<void> {
+    this.pendingClientInfo = info
+  }
+
+  override async tokens(): Promise<OAuthTokens | undefined> {
+    return this.pendingTokens
+  }
+
+  override async saveTokens(tokens: OAuthTokens): Promise<void> {
+    this.pendingTokens = tokens
+  }
+
+  override async invalidateCredentials(type: "all" | "client" | "tokens"): Promise<void> {
+    if (type === "all" || type === "client") this.pendingClientInfo = undefined
+    if (type === "all" || type === "tokens") this.pendingTokens = undefined
+  }
+
+  async commit(): Promise<void> {
+    if (!this.pendingTokens) return
+    // kilocode_change start
+    const stored = this.config.clientId
+      ? (await Effect.runPromise(this.auth.getForUrl(this.mcpName, this.serverUrl)))?.clientInfo
+      : undefined
+    // kilocode_change end
+    await Effect.runPromise(
+      this.auth.set(
+        this.mcpName,
+        {
+          tokens: {
+            accessToken: this.pendingTokens.access_token,
+            refreshToken: this.pendingTokens.refresh_token,
+            expiresAt: this.pendingTokens.expires_in ? Date.now() / 1000 + this.pendingTokens.expires_in : undefined,
+            scope: this.pendingTokens.scope,
+            issuer: this.pendingTokens.issuer, // kilocode_change
+          },
+          clientInfo:
+            this.pendingClientInfo && !this.config.clientId
+              ? {
+                  clientId: this.pendingClientInfo.client_id,
+                  clientSecret: this.pendingClientInfo.client_secret,
+                  clientIdIssuedAt: this.pendingClientInfo.client_id_issued_at,
+                  clientSecretExpiresAt: this.pendingClientInfo.client_secret_expires_at,
+                  issuer: this.pendingClientInfo.issuer, // kilocode_change
+                }
+              : // kilocode_change start - keep the issuer binding of pre-registered credentials
+                this.config.clientId
+                ? retain(this.pendingClientInfo, stored, this.config.clientId)
+                : undefined,
+          // kilocode_change end
+        },
+        this.serverUrl,
+      ),
+    )
   }
 }
 

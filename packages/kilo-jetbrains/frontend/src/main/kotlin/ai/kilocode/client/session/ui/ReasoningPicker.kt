@@ -6,6 +6,7 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.ui.popup.ListPopup
 import com.intellij.openapi.ui.popup.PopupStep
+import com.intellij.openapi.ui.popup.PopupShowOptions
 import com.intellij.openapi.ui.popup.util.BaseListPopupStep
 import com.intellij.util.ui.EmptyIcon
 import java.awt.Cursor
@@ -17,7 +18,7 @@ import javax.swing.Icon
  * Clickable label-style dropdown picker with a native filled background.
  *
  * Shows the selected item's display text with a down-arrow. On click,
- * opens a list popup below the picker. Disabled (greyed out, not
+ * opens a list popup above the picker. Disabled (greyed out, not
  * clickable) when no items are loaded.
  */
 class ReasoningPicker : PickerButton() {
@@ -40,7 +41,7 @@ class ReasoningPicker : PickerButton() {
         isEnabled = false
         isVisible = false
         text = " "
-        toolTipText = KiloBundle.message("reasoning.picker.tooltip")
+        syncTooltip()
 
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
@@ -59,6 +60,29 @@ class ReasoningPicker : PickerButton() {
     fun select(id: String) {
         selected = items.firstOrNull { it.id == id }
         refresh()
+    }
+
+    /** Whether [cycle] would move to a different reasoning effort than the one selected now. */
+    fun canCycle(): Boolean = isVisible && nextCycleItem() != null
+
+    /** Selects the next reasoning effort after the current one, wrapping at the end. */
+    fun cycle() {
+        if (!isVisible) return
+        val next = nextCycleItem() ?: return
+        selected = next
+        refresh()
+        onSelect(next)
+    }
+
+    private fun nextCycleItem(): Item? {
+        if (items.isEmpty()) return null
+        val index = items.indexOfFirst { it.id == selected?.id }
+        val next = items[(index + 1).mod(items.size)]
+        return next.takeIf { it.id != selected?.id }
+    }
+
+    override fun syncTooltip() {
+        toolTipText = tip(KiloBundle.message("reasoning.picker.tooltip"))
     }
 
     internal fun selectedForTest(): Item? = selected
@@ -100,7 +124,8 @@ class ReasoningPicker : PickerButton() {
         }
 
         val popup: ListPopup = JBPopupFactory.getInstance().createListPopup(step)
-        popup.showUnderneathOf(this)
+        restoreFocusOnPick(popup)
+        popup.show(PopupShowOptions.aboveComponent(this))
     }
 
     private fun icon(item: Item): Icon = if (item.id == selected?.id) checked else empty

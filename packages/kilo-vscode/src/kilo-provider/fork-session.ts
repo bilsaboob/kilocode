@@ -1,12 +1,13 @@
 import type { Session, SessionStatus } from "@kilocode/sdk/v2/client"
 import type { KiloConnectionService } from "../services/cli-backend"
 import { forkSession } from "../agent-manager/fork-session"
+import { isRunningStatus } from "../session-status"
 
 export interface ForkContext {
   connection: KiloConnectionService
   post: (message: { type: "error"; message: string }) => void
   register: (session: Session) => void
-  forked: (session: Session) => void
+  forked: (session: Session, sourceID: string) => void
   status: (sessionID: string) => SessionStatus["type"] | undefined
   directory: (sessionID: string) => string
 }
@@ -23,7 +24,7 @@ export async function handleForkSession(ctx: ForkContext, sessionId: string, mes
         console.error("[Kilo New] refreshForkStatus failed:", e)
         return "busy" as SessionStatus["type"]
       }))
-  if (status !== "idle") {
+  if (isRunningStatus(status)) {
     ctx.post({ type: "error", message: "Wait for the session to finish before forking it." })
     return
   }
@@ -38,7 +39,7 @@ export async function handleForkSession(ctx: ForkContext, sessionId: string, mes
       pushState: () => {},
       notifyForked: (session) => {
         ctx.register(session)
-        ctx.forked(session)
+        ctx.forked(session, sessionId)
       },
       registerSession: () => {},
       log: (...args) => console.log("[Kilo New] KiloProvider:", ...args),

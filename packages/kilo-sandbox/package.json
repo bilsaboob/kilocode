@@ -1,13 +1,14 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@kilocode/sandbox",
-  "version": "7.3.52",
+  "version": "7.8.17",
   "type": "module",
   "license": "MIT",
   "private": true,
   "description": "OS-neutral sandbox profiles and launch preparation for Kilo Code",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./destination": "./src/destination.ts"
   },
   "files": [
     "src"
@@ -15,10 +16,12 @@
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000",
-    "test:ci": "mkdir -p .artifacts/unit && bun test --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml"
+    "test:ci": "mkdir -p .artifacts/unit && bun test --timeout 30000 --dots --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml"
   },
   "dependencies": {
-    "effect": "catalog:"
+    "@anthropic-ai/sandbox-runtime": "catalog:",
+    "effect": "catalog:",
+    "ipaddr.js": "catalog:"
   },
   "devDependencies": {
     "@effect/platform-node": "catalog:",

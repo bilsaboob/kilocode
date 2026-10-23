@@ -2,19 +2,35 @@ package ai.kilocode.backend.app
 
 import ai.kilocode.backend.app.KiloAppState
 import ai.kilocode.backend.app.KiloBackendAppService
+import ai.kilocode.backend.cli.CliServer
+import ai.kilocode.backend.cli.CliDownload
 import ai.kilocode.backend.rpc.appStateDto
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.rpc.dto.AgentConfigPatchDto
+import ai.kilocode.rpc.dto.ChatEventDto
+import ai.kilocode.rpc.dto.CompactionPatchDto
+import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.RetentionPatchDto
+import ai.kilocode.rpc.dto.SessionActivityKindDto
+import ai.kilocode.rpc.dto.WatcherPatchDto
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import java.net.ServerSocket
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,18 +56,163 @@ class KiloBackendAppServiceTest {
     private fun create(loadTimeoutMs: Long = 30_000L): KiloBackendAppService =
         KiloBackendAppService.create(scope, FakeCliServer(mock), log, loadTimeoutMs)
 
+    private suspend fun ready(svc: KiloBackendAppService): KiloAppState.Ready {
+        val state = assertNotNull(
+            withTimeoutOrNull(35_000) {
+                svc.appState.first {
+                    it is KiloAppState.Ready || it is KiloAppState.Error || it is KiloAppState.MigrationRequired
+                }
+            },
+            "App startup timed out in ${svc.appState.value}; logs=${log.messages}",
+        )
+        return assertIs<KiloAppState.Ready>(state, "App startup failed in $state; logs=${log.messages}")
+    }
+
+    private class StallingServer(private val mock: MockCliServer) : CliServer {
+        override var forceExtract = false
+        private val starts = AtomicInteger()
+        private var srv: ServerSocket? = null
+
+        val count: Int get() = starts.get()
+
+        override fun process(): Process? = null
+
+        override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit): CliServer.State {
+            onResolved()
+            if (starts.getAndIncrement() == 0) {
+                val socket = ServerSocket(0)
+                srv = socket
+                return CliServer.State.Ready(socket.localPort, mock.password)
+            }
+            return CliServer.State.Ready(mock.start(), mock.password)
+        }
+
+        override fun exited(proc: Process) {}
+
+        override fun stop() {
+            srv?.close()
+            srv = null
+            mock.shutdown()
+        }
+
+        override fun dispose() {
+            stop()
+            mock.close()
+        }
+    }
+
     @Test
     fun `full lifecycle reaches Ready`() = runBlocking {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val ready = svc.appState.value as KiloAppState.Ready
         assertNotNull(ready.data.config)
         assertNotNull(ready.data.notifications)
+    }
+
+    @Test
+    fun `ready reports the background subagent capability`() = runBlocking {
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+
+        // The probe runs off the load's critical path, so Ready starts with it off and flips once
+        // the answer lands.
+        withTimeout(10_000) { svc.capabilities.first { it } }
+        assertNotNull(mock.lastCapabilitiesPath)
+    }
+
+    @Test
+    fun `background subagent capability is false when the CLI reports it off`() = runBlocking {
+        mock.capabilities = """{"backgroundSubagents":false}"""
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+        awaitCapabilityProbe()
+
+        assertFalse(svc.capabilities.value)
+    }
+
+    @Test
+    fun `a hung capability probe still reaches Ready`() = runBlocking {
+        // The probe's client call is blocking, so it cannot live inside the load's coroutineScope:
+        // structured concurrency would wait on the socket and time the whole load out.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        mock.capabilitiesGate = gate
+        val svc = create()
+        try {
+            svc.connect()
+
+            ready(svc)
+
+            assertFalse(svc.capabilities.value)
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun `unreadable capability leaves it off without failing the load`() = runBlocking {
+        // An older CLI has no /experimental/capabilities route at all; that must not block Ready.
+        mock.capabilitiesStatus = 404
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+        awaitCapabilityProbe()
+
+        assertFalse(svc.capabilities.value)
+    }
+
+    private suspend fun awaitCapabilityProbe() {
+        withTimeout(10_000) {
+            while (mock.lastCapabilitiesPath == null) delay(20)
+        }
+    }
+
+    @Test
+    fun `download progress maps to app state before ready`() = runBlocking {
+        val resolved = CompletableDeferred<Unit>()
+        val signal = CompletableDeferred<Unit>()
+        val server = object : CliServer {
+            override var forceExtract = false
+            override fun process(): Process? = null
+            override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit): CliServer.State {
+                onProgress(CliDownload(37, "1.2.3", "darwin-arm64"))
+                resolved.await()
+                onResolved()
+                signal.await()
+                return CliServer.State.Ready(mock.start(), mock.password)
+            }
+            override fun exited(proc: Process) {}
+            override fun stop() {}
+            override fun dispose() {}
+        }
+        val svc = KiloBackendAppService.create(scope, server, log)
+        val job = scope.launch { svc.connect() }
+
+        val downloading = withTimeout(5_000) {
+            svc.appState.first { it is KiloAppState.Downloading }
+        }
+        assertEquals(KiloAppState.Downloading(37, "1.2.3", "darwin-arm64"), downloading)
+        val dto = appStateDto(downloading)
+        assertEquals(37, dto.downloadPercent)
+        assertEquals("1.2.3", dto.downloadVersion)
+        assertEquals("darwin-arm64", dto.downloadPlatform)
+
+        resolved.complete(Unit)
+        withTimeout(5_000) {
+            svc.appState.first { it == KiloAppState.Connecting }
+        }
+
+        signal.complete(Unit)
+        ready(svc)
+        job.join()
     }
 
     @Test
@@ -60,9 +221,7 @@ class KiloBackendAppServiceTest {
         val svc = KiloBackendAppService.create(scope, server, log)
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         svc.shutdownForUnload()
         svc.shutdownForUnload()
@@ -72,8 +231,22 @@ class KiloBackendAppServiceTest {
         assertNull(svc.profile)
         assertNull(svc.config)
         assertTrue(svc.notifications.isEmpty())
-        assertTrue(svc.warnings.isEmpty())
         assertEquals(1, server.disposeCount)
+    }
+
+    @Test
+    fun `shutdown for app close fast-closes server once without blocking dispose`() {
+        val server = FakeCliServer(mock)
+        val svc = KiloBackendAppService.create(scope, server, log)
+
+        svc.shutdownForAppClose()
+        svc.shutdownForAppClose()
+        svc.dispose()
+
+        assertEquals(KiloAppState.Disconnected, svc.appState.value)
+        // App close uses the non-blocking fast path, not the confirming dispose path.
+        assertEquals(1, server.closeCount)
+        assertEquals(0, server.disposeCount)
     }
 
     @Test
@@ -82,12 +255,133 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertNotNull(svc.config)
         assertEquals("claude-4", svc.config!!.model)
+    }
+
+    @Test
+    fun `update config patches model selections and reloads`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val state = svc.updateConfig(ConfigPatchDto(
+            values = linkedMapOf(
+                "model" to "openai/gpt-5",
+                "small_model" to "openai/gpt-5-mini",
+                "subagent_model" to "anthropic/claude",
+                "subagent_variant" to "high",
+            ),
+            agents = linkedMapOf("code" to AgentConfigPatchDto(model = "google/gemini", variant = "fast")),
+        ))
+
+        assertEquals(
+            "{\"model\":\"openai/gpt-5\",\"small_model\":\"openai/gpt-5-mini\",\"subagent_model\":\"anthropic/claude\",\"subagent_variant\":\"high\",\"agent\":{\"code\":{\"model\":\"google/gemini\",\"variant\":\"fast\"}}}",
+            mock.lastConfigPatchBody,
+        )
+        val cfg = appStateDto(state).config
+        assertEquals("openai/gpt-5", cfg?.model)
+        assertEquals("openai/gpt-5-mini", cfg?.smallModel)
+        assertEquals("anthropic/claude", cfg?.subagentModel)
+        assertEquals("high", cfg?.subagentVariant)
+        assertEquals("google/gemini", cfg?.agent?.get("code")?.model)
+        assertEquals("fast", svc.config?.agent?.get("code")?.variant)
+    }
+
+    @Test
+    fun `update config patches context settings and reloads`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val state = svc.updateConfig(ConfigPatchDto(
+            watcher = WatcherPatchDto(ignore = listOf("**/dist/**", "tmp/**")),
+            compaction = CompactionPatchDto(auto = false, threshold_percent = 75.5, prune = false),
+        ))
+
+        assertEquals(
+            "{\"watcher\":{\"ignore\":[\"**/dist/**\",\"tmp/**\"]},\"compaction\":{\"auto\":false,\"threshold_percent\":75.5,\"prune\":false}}",
+            mock.lastConfigPatchBody,
+        )
+        val cfg = appStateDto(state).config
+        assertEquals(listOf("**/dist/**", "tmp/**"), cfg?.watcher?.ignore)
+        assertEquals(false, cfg?.compaction?.auto)
+        assertEquals(75.5, cfg?.compaction?.threshold_percent)
+        assertEquals(false, svc.config?.compaction?.prune)
+    }
+
+    @Test
+    fun `update config patches shared_agent_board and reloads`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val state = svc.updateConfig(ConfigPatchDto(
+            shared_agent_board = true,
+        ))
+
+        assertEquals(
+            "{\"shared_agent_board\":true}",
+            mock.lastConfigPatchBody,
+        )
+        val cfg = appStateDto(state).config
+        assertEquals(true, cfg?.shared_agent_board)
+        assertEquals(true, svc.config?.shared_agent_board)
+    }
+
+    @Test
+    fun `update config patches snapshot and reloads`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val state = svc.updateConfig(ConfigPatchDto(snapshot = false))
+
+        assertEquals("{\"snapshot\":false}", mock.lastConfigPatchBody)
+        val cfg = appStateDto(state).config
+        assertEquals(false, cfg?.snapshot)
+        assertEquals(false, svc.config?.snapshot)
+    }
+
+    @Test
+    fun `update config patches retention and reloads`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val state = svc.updateConfig(ConfigPatchDto(
+            retention = RetentionPatchDto(enabled = true, maxAgeDays = 30),
+        ))
+
+        assertEquals("{\"retention\":{\"enabled\":true,\"maxAgeDays\":30}}", mock.lastConfigPatchBody)
+        val retention = appStateDto(state).config?.retention
+        assertEquals(true, retention?.enabled)
+        assertEquals(30, retention?.maxAgeDays)
+    }
+
+    @Test
+    fun `retention status and forced run map generated responses`() = runBlocking {
+        mock.retentionStatus = """
+            {"policy":{"enabled":true,"maxAgeDays":45},"last":{"at":1000,"scanned":8,"deleted":3,"skippedActive":2,"failed":1,"durationMs":250},"progress":{"phase":"scanning","total":4,"processed":1,"deleted":0,"failed":0,"skippedActive":2}}
+        """.trimIndent()
+        mock.retentionRun = """
+            {"policy":{"enabled":true,"maxAgeDays":45},"last":{"at":2000,"scanned":8,"deleted":4,"skippedActive":2,"failed":0,"durationMs":300},"progress":null}
+        """.trimIndent()
+        val svc = create()
+        svc.connect()
+        ready(svc)
+
+        val status = svc.retention.status()
+        val run = svc.retention.run(true)
+
+        assertEquals(45, status.policy.maxAgeDays)
+        assertEquals("scanning", status.progress?.phase)
+        assertEquals(2, status.progress?.skippedActive)
+        assertEquals(4, run.last?.deleted)
+        assertEquals(300, run.last?.durationMs)
+        assertEquals("{\"force\":true}", mock.lastRetentionRunBody)
     }
 
     @Test
@@ -96,9 +390,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val dto = appStateDto(svc.appState.value)
         assertEquals("openai/gpt", dto.config?.model)
@@ -107,69 +399,72 @@ class KiloBackendAppServiceTest {
     }
 
     @Test
-    fun `config warnings are loaded without blocking Ready`() = runBlocking {
-        mock.warnings = """[{"path":".kilo/kilo.json","message":"Invalid JSON","detail":"CloseBraceExpected"}]"""
+    fun `mcp config is populated end to end`() = runBlocking {
+        mock.config = """{"mcp":{"sample":{"type":"local","command":["node","s.js"]},"remote":{"type":"remote","url":"https://mcp.example.test"}}}"""
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
-        val ready = svc.appState.value as KiloAppState.Ready
-        assertEquals(1, ready.data.warnings.size)
-        assertEquals(".kilo/kilo.json", ready.data.warnings.first().path)
-        assertEquals("Invalid JSON", ready.data.warnings.first().message)
+        val dto = appStateDto(svc.appState.value)
+        assertEquals(listOf("node", "s.js"), dto.config?.mcp?.get("sample")?.command)
+        assertEquals("https://mcp.example.test", dto.config?.mcp?.get("remote")?.url)
+        assertEquals(listOf("node", "s.js"), svc.config?.mcp?.get("sample")?.command)
     }
 
     @Test
-    fun `retry refreshes warnings while Ready`() = runBlocking {
-        mock.warnings = """[{"path":".kilo/kilo.json","message":"Invalid JSON","detail":"CloseBraceExpected"}]"""
+    fun `agent config is populated end to end`() = runBlocking {
+        mock.config = """{"agent":{"build":{"model":"openai/gpt","mode":"subagent","permission":{"edit":"ask"}}}}"""
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
-        val before = svc.appState.value as KiloAppState.Ready
-        assertEquals(1, before.data.warnings.size)
-
-        mock.warnings = "[]"
-        svc.retry()
-
-        withTimeout(5_000) {
-            while ((svc.appState.value as? KiloAppState.Ready)?.data?.warnings?.isNotEmpty() == true) {
-                delay(100)
-            }
-        }
-
-        val ready = svc.appState.value as KiloAppState.Ready
-        assertTrue(ready.data.warnings.isEmpty())
-        assertTrue(svc.warnings.isEmpty())
+        val dto = appStateDto(svc.appState.value)
+        assertEquals("openai/gpt", dto.config?.agent?.get("build")?.model)
+        assertEquals("subagent", dto.config?.agent?.get("build")?.mode)
+        assertNotNull(dto.config?.agent?.get("build")?.permission?.get("edit"))
     }
 
     @Test
-    fun `retry restarts app when warnings remain after refresh`() = runBlocking {
-        mock.warnings = """[{"path":".kilo/kilo.json","message":"Invalid JSON","detail":"CloseBraceExpected"}]"""
+    fun `disabled mcp config is populated end to end`() = runBlocking {
+        mock.config = """{"mcp":{"sample":{"enabled":false}}}"""
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
+
+        val mcp = appStateDto(svc.appState.value).config?.mcp?.get("sample")
+        assertNotNull(mcp)
+        assertNull(mcp.type)
+        assertEquals(false, mcp.enabled)
+    }
+
+    @Test
+    fun `malformed config body still reaches Ready`() = runBlocking {
+        mock.config = "garbage"
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+
+        assertNull(svc.config?.model)
+        assertTrue(svc.config?.mcp?.isEmpty() == true)
+    }
+
+    @Test
+    fun `retry does not restart or refetch config when app is Ready`() = runBlocking {
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
 
         val before = mock.requestCount("/global/config")
         svc.retry()
+        delay(500)
 
-        withTimeout(15_000) {
-            while (mock.requestCount("/global/config") <= before) {
-                delay(100)
-            }
-        }
-
-        assertTrue(mock.requestCount("/global/config") > before)
-        assertTrue(log.messages.any { it.contains("retry: restarted connection") })
+        assertEquals(before, mock.requestCount("/global/config"))
+        assertFalse(log.messages.any { it.contains("retry: restarted connection") })
     }
 
     @Test
@@ -178,9 +473,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertNotNull(svc.profile)
         assertEquals("alice@test.com", svc.profile!!.profile.email)
@@ -191,9 +484,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         svc.setOrganization("org_1")
         assertEquals("""{"organizationId":"org_1"}""", mock.lastOrganizationSetBody)
@@ -208,13 +499,25 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         // Profile is null but we still reached Ready
         assertNull(svc.profile)
         assertIs<KiloAppState.Ready>(svc.appState.value)
+    }
+
+    @Test
+    fun `profile 400 does not prevent Ready`() = runBlocking {
+        mock.profileStatus = 400
+        mock.profile = """{"message":"Bad Request"}"""
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+
+        assertNull(svc.profile)
+        assertIs<KiloAppState.Ready>(svc.appState.value)
+        assertTrue(log.messages.any { it.contains("Profile: unavailable (400)") })
     }
 
     @Test
@@ -265,9 +568,7 @@ class KiloBackendAppServiceTest {
         mock.config = """{"model":"retry/model"}"""
         svc.retry()
 
-        withTimeout(15_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertEquals("retry/model", svc.config?.model)
         assertEquals(4, mock.requestCount("/global/config"))
@@ -278,7 +579,7 @@ class KiloBackendAppServiceTest {
         val failing = object : ai.kilocode.backend.cli.CliServer {
             override var forceExtract = false
             override fun process(): Process? = null
-            override suspend fun init() = ai.kilocode.backend.cli.CliServer.State.Error(
+            override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit) = ai.kilocode.backend.cli.CliServer.State.Error(
                 message = "CLI startup failed",
                 details = "stderr: missing dependency",
             )
@@ -301,23 +602,6 @@ class KiloBackendAppServiceTest {
     }
 
     @Test
-    fun `warning state emits final warn log`() = runBlocking {
-        mock.warnings = """[{"path":".kilo/kilo.json","message":"Invalid JSON","detail":"CloseBraceExpected"}]"""
-        val svc = create()
-        svc.connect()
-
-        withTimeout(10_000) {
-            svc.appState.first { state ->
-                state is KiloAppState.Ready && state.data.warnings.any { it.path == ".kilo/kilo.json" }
-            }
-        }
-
-        assertTrue(log.awaitMessage {
-            it.contains("App warnings:") && it.contains(".kilo/kilo.json: Invalid JSON")
-        })
-    }
-
-    @Test
     fun `app load error emits final warn log`() = runBlocking {
         mock.configStatus = 500
         mock.config = """{"error":"internal"}"""
@@ -331,6 +615,8 @@ class KiloBackendAppServiceTest {
         assertTrue(log.messages.any {
             it.contains("App error: Failed to load required data") && it.contains("config")
         })
+        assertTrue(log.messages.any { it.contains("WARN: config: all 3 attempts failed") })
+        assertTrue(log.messages.none { it.contains("ERROR: config: all 3 attempts failed") })
     }
 
     @Test
@@ -338,9 +624,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         // Second connect should not change state
         svc.connect()
@@ -352,9 +636,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val dto = svc.health()
         assertTrue(dto.healthy)
@@ -367,9 +649,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val dto = svc.health()
         assertFalse(dto.healthy)
@@ -383,9 +663,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(15_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertNull(svc.profile)
         assertIs<KiloAppState.Ready>(svc.appState.value)
@@ -396,9 +674,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         svc.dispose()
         assertEquals(KiloAppState.Disconnected, svc.appState.value)
@@ -419,10 +695,7 @@ class KiloBackendAppServiceTest {
             assertIs<KiloAppState.Loading>(loading)
 
             gate.countDown()
-            val ready = withTimeout(10_000) {
-                svc.appState.first { it is KiloAppState.Ready }
-            }
-            assertIs<KiloAppState.Ready>(ready)
+            ready(svc)
         } finally {
             gate.countDown()
         }
@@ -453,26 +726,6 @@ class KiloBackendAppServiceTest {
     }
 
     @Test
-    fun `hung warnings do not prevent Ready`() = runBlocking {
-        val gate = CountDownLatch(1)
-        mock.warningsGate = gate
-        val svc = create(loadTimeoutMs = 300L)
-
-        try {
-            svc.connect()
-
-            val ready = withTimeout(10_000) {
-                svc.appState.first { it is KiloAppState.Ready }
-            } as KiloAppState.Ready
-
-            assertTrue(ready.data.warnings.isEmpty())
-            assertTrue(svc.warnings.isEmpty())
-        } finally {
-            gate.countDown()
-        }
-    }
-
-    @Test
     fun `restart during Loading cancels stale load and reaches Ready`() = runBlocking {
         val gate = CountDownLatch(1)
         mock.responseGate = gate
@@ -488,12 +741,13 @@ class KiloBackendAppServiceTest {
             gate.countDown()
             svc.restart()
 
-            withTimeout(10_000) {
-                svc.appState.first { it is KiloAppState.Ready }
-            }
+            ready(svc)
 
             assertIs<KiloAppState.Ready>(svc.appState.value)
             assertFalse(log.messages.any { it.contains("Application start timed out") })
+            assertTrue(log.messages.any { it.contains("restart: requested") && it.contains("waiting for lifecycle mutex") })
+            assertTrue(log.messages.any { it.contains("restart: acquired lifecycle mutex") })
+            assertTrue(log.messages.any { it.contains("restart: complete") })
         } finally {
             gate.countDown()
         }
@@ -515,12 +769,13 @@ class KiloBackendAppServiceTest {
             gate.countDown()
             svc.reinstall()
 
-            withTimeout(10_000) {
-                svc.appState.first { it is KiloAppState.Ready }
-            }
+            ready(svc)
 
             assertIs<KiloAppState.Ready>(svc.appState.value)
             assertFalse(log.messages.any { it.contains("Application start timed out") })
+            assertTrue(log.messages.any { it.contains("reinstall: requested") && it.contains("waiting for lifecycle mutex") })
+            assertTrue(log.messages.any { it.contains("reinstall: acquired lifecycle mutex") })
+            assertTrue(log.messages.any { it.contains("reinstall: complete") })
         } finally {
             gate.countDown()
         }
@@ -532,9 +787,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertEquals("initial", svc.config?.model)
 
@@ -554,33 +807,6 @@ class KiloBackendAppServiceTest {
         assertEquals("updated", svc.config?.model)
     }
 
-    @Test
-    fun `SSE config updated refreshes warnings`() = runBlocking {
-        mock.warnings = """[{"path":".kilo/kilo.json","message":"Invalid JSON","detail":"CloseBraceExpected"}]"""
-        val svc = create()
-        svc.connect()
-
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
-
-        assertEquals(1, (svc.appState.value as KiloAppState.Ready).data.warnings.size)
-
-        mock.warnings = "[]"
-        val before = mock.requestCount("/config/warnings")
-        mock.awaitSseConnection()
-        mock.pushEvent("global.config.updated", """{"type":"global.config.updated"}""")
-
-        assertTrue(mock.awaitRequestCount("/config/warnings", before + 1))
-        withTimeout(5_000) {
-            svc.appState.first { state ->
-                state is KiloAppState.Ready && state.data.warnings.isEmpty()
-            }
-        }
-
-        assertTrue((svc.appState.value as KiloAppState.Ready).data.warnings.isEmpty())
-    }
-
     // ------ Auth mapping tests ------
 
     @Test
@@ -589,9 +815,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val auth = svc.startLogin(null)
         assertEquals("https://auth.kilo.ai/device", auth.verificationUrl)
@@ -606,9 +830,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val profile = svc.completeLogin(null)
         assertNotNull(profile)
@@ -623,9 +845,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         mock.awaitSseConnection()
 
@@ -652,25 +872,105 @@ class KiloBackendAppServiceTest {
         assertNotNull(svc.config)
     }
 
+    /**
+     * Disposing an instance cancels every runner it owns, and the CLI reports that as the same
+     * `MessageAbortedError` a user Stop produces. Naming the cause here is the only thing that lets the
+     * UI explain the lost turn instead of reporting it as "Stopped" — three sessions once died to a
+     * config reload with no trace the user could see.
+     */
+    @Test
+    fun `disposal while a session is busy names the reason for that session`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+        mock.awaitSseConnection()
+
+        mock.pushEvent("session.status", """{"sessionID":"ses_abc","status":{"type":"busy","message":"Running..."}}""")
+        withTimeout(5_000) { svc.sessions.statuses.first { it["ses_abc"]?.type == "busy" } }
+
+        val received = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            svc.chat.events.first { it is ChatEventDto.SessionInterrupted }
+        }
+        mock.pushEvent("global.disposed", """{"type":"global.disposed"}""")
+
+        val event = assertIs<ChatEventDto.SessionInterrupted>(withTimeout(15_000) { received.await() })
+        assertEquals("ses_abc", event.sessionID)
+        assertEquals(ChatEventDto.SessionInterrupted.RELOAD, event.reason)
+    }
+
+    /**
+     * The reload a disposal triggers restarts the activity collector, so the badge has to be recorded in
+     * a way that survives it — otherwise a worktree row rests as if its cancelled turn had finished.
+     */
+    @Test
+    fun `disposal badges the cancelled session after the reload settles`() = runBlocking {
+        // A badge needs a resolvable directory, which a status event alone does not carry.
+        mock.sessions = """[{"id":"ses_abc","slug":"abc","projectID":"prj_test","directory":"/test/project","title":"Work","version":"1.0.0","time":{"created":1000,"updated":1000}}]"""
+        val svc = create()
+        svc.connect()
+        ready(svc)
+        mock.awaitSseConnection()
+        svc.sessions.list("/test/project")
+
+        mock.pushEvent("session.status", """{"sessionID":"ses_abc","status":{"type":"busy","message":"Running..."}}""")
+        withTimeout(5_000) { svc.sessions.statuses.first { it["ses_abc"]?.type == "busy" } }
+
+        mock.pushEvent("global.disposed", """{"type":"global.disposed"}""")
+        // Disposal badges the session and then reloads, and the reload is what restarts the activity
+        // collector — so the restart proves the badge was already taken, and waiting for it is what
+        // makes the assertion below about surviving the restart instead of racing it. Reporting idle
+        // before that point would race too: the status map is fed by a separate collector that can
+        // reach it before the disposal watcher runs, leaving the cancelled turn looking finished.
+        assertTrue(
+            log.awaitMessage(20_000, count = 2) { it == "INFO: Activity manager started" },
+            "Disposal must reload the app and restart the activity collector; logs=${log.messages}",
+        )
+
+        // The cancelled turn then reports idle, which is what lets the badge show: live work
+        // deliberately outranks a past error so a resumed row keeps spinning instead.
+        mock.pushEvent("session.status", """{"sessionID":"ses_abc","status":{"type":"idle"}}""")
+
+        val badged = withTimeoutOrNull(20_000) {
+            svc.activity.activity.first { it["ses_abc"]?.kind == SessionActivityKindDto.ERROR }
+        }
+        assertNotNull(badged, "Disposal must leave a badge on the session it cancelled; logs=${log.messages}")
+        assertEquals("/test/project", badged["ses_abc"]?.directory)
+    }
+
+    @Test
+    fun `disposal with no busy session names nothing`() = runBlocking {
+        val svc = create()
+        svc.connect()
+        ready(svc)
+        mock.awaitSseConnection()
+
+        val received = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            svc.chat.events.first { it is ChatEventDto.SessionInterrupted }
+        }
+        mock.pushEvent("global.disposed", """{"type":"global.disposed"}""")
+
+        assertNull(withTimeoutOrNull(2_000) { received.await() })
+        received.cancel()
+    }
+
     @Test
     fun `restart lifecycle transitions correctly`() = runBlocking {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         // Restart should tear down and reconnect
         svc.restart()
 
         // Should transition back to Ready after restart
-        withTimeout(15_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertIs<KiloAppState.Ready>(svc.appState.value)
         assertNotNull(svc.config)
+        assertTrue(log.messages.any { it.contains("restart: requested") && it.contains("waiting for lifecycle mutex") })
+        assertTrue(log.messages.any { it.contains("restart: acquired lifecycle mutex") })
+        assertTrue(log.messages.any { it.contains("restart: complete") })
     }
 
     @Test
@@ -678,9 +978,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         // Close SSE to trigger reconnect path
         mock.closeSse()
@@ -693,6 +991,19 @@ class KiloBackendAppServiceTest {
             svc.appState.first { it is KiloAppState.Ready }
         }
 
+        assertIs<KiloAppState.Ready>(svc.appState.value)
+    }
+
+    @Test
+    fun `startup SSE timeout reconnects from Connecting`() = runBlocking {
+        val server = StallingServer(mock)
+        val svc = KiloBackendAppService.create(scope, server, log)
+        svc.connect()
+
+        ready(svc)
+
+        assertTrue(server.count >= 2)
+        assertTrue(log.messages.any { it.contains("SSE: connection timed out") })
         assertIs<KiloAppState.Ready>(svc.appState.value)
     }
 
@@ -712,16 +1023,40 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val dto = appStateDto(svc.appState.value)
         assertEquals("alice@test.com", dto.profile?.email)
         assertEquals("Alice", dto.profile?.name)
         assertEquals("ADMIN", dto.profile?.organizations?.firstOrNull()?.role)
+        // The pinned CLI does not expose hasPersonalAccount yet; the mapper defaults it to true.
+        assertTrue(dto.profile?.hasPersonalAccount ?: false)
         assertEquals(42.5, dto.profile?.balance?.balance)
         assertEquals("org_1", dto.profile?.currentOrgId)
+    }
+
+    @Test
+    fun `ready dto hides unknown profile amounts`() = runBlocking {
+        mock.profile = """{
+            "profile":{"email":"alice@test.com","name":"Alice"},
+            "balance":{"balance":null},
+            "kiloPass":{
+                "currentPeriodBaseCreditsUsd":null,
+                "currentPeriodUsageUsd":null,
+                "currentPeriodBonusCreditsUsd":null,
+                "nextBillingAt":null
+            },
+            "currentOrgId":null
+        }""".trimIndent()
+        val svc = create()
+        svc.connect()
+
+        ready(svc)
+
+        val dto = appStateDto(svc.appState.value)
+        assertEquals("alice@test.com", dto.profile?.email)
+        assertNull(dto.profile?.balance)
+        assertNull(dto.profile?.kiloPass)
     }
 
     @Test
@@ -730,9 +1065,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         // Update mock to return different profile
         mock.profile = """{"profile":{"email":"alice@test.com","name":"Updated Alice"},"balance":{"balance":99.0},"currentOrgId":null}"""
@@ -750,9 +1083,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         assertNotNull(svc.profile)
         mock.authRemoveStatus = 200
@@ -769,9 +1100,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val before = svc.profile
         assertNotNull(before)
@@ -793,9 +1122,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         mock.authorizeStatus = 500
         var thrown = false
@@ -814,9 +1141,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         val auth = svc.startLogin(null)
         assertNull(auth.code, "code should be null when instructions have no code: prefix")
@@ -828,9 +1153,7 @@ class KiloBackendAppServiceTest {
         val svc = create()
         svc.connect()
 
-        withTimeout(10_000) {
-            svc.appState.first { it is KiloAppState.Ready }
-        }
+        ready(svc)
 
         mock.callbackStatus = 500
         var thrown = false

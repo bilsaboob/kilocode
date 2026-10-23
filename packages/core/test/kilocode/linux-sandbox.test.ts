@@ -1,23 +1,33 @@
 import { expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
+import { createSocket } from "node:dgram"
+import { createServer } from "node:net"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { backendSupport, run, type Profile } from "@kilocode/sandbox"
+import { CurrentProxyFactory, startProxy, type ProxyFactory } from "@kilocode/sandbox"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 
 const linux = process.platform === "linux" ? test : test.skip
+const linuxIPv6 = process.platform === "linux" && supportsIPv6() ? test : test.skip
 
-function profile(allow: ReadonlyArray<string>, denyNames: ReadonlyArray<string> = []): Profile {
+function profile(
+  allow: ReadonlyArray<string>,
+  denyNames: ReadonlyArray<string> = [],
+  mode: Profile["network"]["mode"] = "allow",
+  allowedHosts: ReadonlyArray<string> = [],
+): Profile {
   return {
     filesystem: {
       allowWrite: allow.map((path) => ({ path, kind: "subtree" })),
       denyWrite: [],
       denyNames,
     },
-    network: { mode: "allow", allowedHosts: [] },
+    network: { mode, allowedHosts },
     environment: { deny: [], set: {} },
   }
 }
@@ -26,16 +36,40 @@ function denied(base: Profile, rules: Profile["filesystem"]["denyWrite"]): Profi
   return { ...base, filesystem: { ...base.filesystem, denyWrite: rules } }
 }
 
-function spawn(script: string, cwd: string, policy: Profile) {
-  return Effect.scoped(
+function execute(command: string, args: ReadonlyArray<string>, cwd: string, policy: Profile, factory?: ProxyFactory) {
+  const effect = Effect.scoped(
     run(
       policy,
       ChildProcessSpawner.ChildProcessSpawner.use((spawner) =>
         spawner
-          .spawn(ChildProcess.make(process.execPath, ["-e", script], { cwd }))
+          .spawn(ChildProcess.make(command, args, { cwd }))
           .pipe(Effect.flatMap((handle) => handle.exitCode)),
       ),
-    ).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer)),
+    ).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+  return factory ? effect.pipe(Effect.provideService(CurrentProxyFactory, factory)) : effect
+}
+
+function spawn(script: string, cwd: string, policy: Profile, factory?: ProxyFactory) {
+  return execute(process.execPath, ["-e", script], cwd, policy, factory)
+}
+
+function output(command: string, args: ReadonlyArray<string>, cwd: string, policy: Profile, factory: ProxyFactory) {
+  return Effect.scoped(
+    run(
+      policy,
+      ChildProcessSpawner.ChildProcessSpawner.use((spawner) =>
+        spawner.spawn(ChildProcess.make(command, args, { cwd })).pipe(
+          Effect.flatMap((handle) =>
+            Effect.all({
+              code: handle.exitCode,
+              stdout: Stream.mkString(Stream.decodeText(handle.stdout)),
+              stderr: Stream.mkString(Stream.decodeText(handle.stderr)),
+            }),
+          ),
+        ),
+      ),
+    ).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)), Effect.provideService(CurrentProxyFactory, factory)),
   )
 }
 
@@ -46,6 +80,81 @@ async function fixture() {
   await fs.mkdir(project)
   await fs.mkdir(outside)
   return { root, project, outside }
+}
+
+function requireNetwork() {
+  const support = backendSupport({ mode: "deny", allowedHosts: [] })
+  expect(support.available, support.reason).toBe(true)
+}
+
+function tcp(hostname = "127.0.0.1") {
+  let accepted = 0
+  const listener = Bun.listen({
+    hostname,
+    port: 0,
+    socket: {
+      open(socket) {
+        accepted++
+        socket.write("sandbox-tcp-ok")
+        socket.end()
+      },
+      data() {},
+    },
+  })
+  return { listener, accepted: () => accepted }
+}
+
+function supportsIPv6() {
+  if (process.platform !== "linux") return false
+  try {
+    const probe = tcp("::1")
+    probe.listener.stop(true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function udp() {
+  let received = 0
+  const socket = createSocket("udp4")
+  socket.on("message", (_message, peer) => {
+    received++
+    socket.send("sandbox-udp-ok", peer.port, peer.address)
+  })
+  await new Promise<void>((resolve, reject) => {
+    socket.once("error", reject)
+    socket.bind(0, "127.0.0.1", () => {
+      socket.off("error", reject)
+      resolve()
+    })
+  })
+  const address = socket.address()
+  if (typeof address === "string") throw new Error("UDP server did not expose an IP address")
+  return { socket, port: address.port, received: () => received }
+}
+
+function tcpClient(port: number, expected: boolean, hostname = "127.0.0.1") {
+  return [
+    'const net = require("node:net")',
+    `const socket = net.connect({ host: ${JSON.stringify(hostname)}, port: ${port} })`,
+    `const expected = ${expected}`,
+    'socket.on("data", (data) => process.exit(expected && data.toString() === "sandbox-tcp-ok" ? 0 : 2))',
+    'socket.on("error", () => process.exit(expected ? 3 : 0))',
+    "setTimeout(() => process.exit(expected ? 4 : 0), 1000)",
+  ].join("\n")
+}
+
+function udpClient(port: number, expected: boolean) {
+  return [
+    'const dgram = require("node:dgram")',
+    'const socket = dgram.createSocket("udp4")',
+    `const expected = ${expected}`,
+    'socket.on("message", (data) => process.exit(expected && data.toString() === "sandbox-udp-ok" ? 0 : 2))',
+    'socket.on("error", () => process.exit(expected ? 3 : 0))',
+    `socket.send("probe", ${port}, "127.0.0.1", (error) => { if (error) process.exit(expected ? 4 : 0) })`,
+    "setTimeout(() => process.exit(expected ? 5 : 0), 500)",
+  ].join("\n")
 }
 
 linux("confines writes from spawned processes to the profile allowlist", async () => {
@@ -69,6 +178,277 @@ linux("confines writes from spawned processes to the profile allowlist", async (
 
   try {
     expect(Number(await Effect.runPromise(spawn(script, root.project, profile([root.project]))))).toBe(0)
+    expect(await fs.readFile(allowed, "utf8")).toBe("allowed")
+    expect(await fs.readFile(sentinel, "utf8")).toBe("original")
+  } finally {
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("allows host loopback TCP in network allow mode and blocks it in deny mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const allowed = tcp()
+  const blocked = tcp()
+
+  try {
+    const allow = profile([root.project], [], "allow")
+    const deny = profile([root.project], [], "deny")
+    expect(Number(await Effect.runPromise(spawn(tcpClient(allowed.listener.port, true), root.project, allow)))).toBe(0)
+    expect(Number(await Effect.runPromise(spawn(tcpClient(blocked.listener.port, false), root.project, deny)))).toBe(0)
+    expect(allowed.accepted()).toBe(1)
+    expect(blocked.accepted()).toBe(0)
+  } finally {
+    allowed.listener.stop(true)
+    blocked.listener.stop(true)
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("blocks UDP datagrams in network deny mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const allowed = await udp()
+  const blocked = await udp()
+
+  try {
+    const allow = profile([root.project], [], "allow")
+    const deny = profile([root.project], [], "deny")
+    expect(Number(await Effect.runPromise(spawn(udpClient(allowed.port, true), root.project, allow)))).toBe(0)
+    expect(Number(await Effect.runPromise(spawn(udpClient(blocked.port, false), root.project, deny)))).toBe(0)
+    expect(allowed.received()).toBe(1)
+    expect(blocked.received()).toBe(0)
+  } finally {
+    allowed.socket.close()
+    blocked.socket.close()
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("allows only configured HTTP proxy destinations", async () => {
+  requireNetwork()
+  const root = await fixture()
+  let allowedRequests = 0
+  let blockedRequests = 0
+  const allowed = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      allowedRequests++
+      return new Response("sandbox-proxy-ok")
+    },
+  })
+  const blocked = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      blockedRequests++
+      return new Response("sandbox-direct-bypass")
+    },
+  })
+  const port = allowed.port!
+  const factory: ProxyFactory = (hosts) =>
+    startProxy(hosts, "linux", async (dest) => {
+      if (dest.port !== port) throw new Error("unexpected port")
+      return { address: "127.0.0.1", family: 4 }
+    })
+  const policy = profile([root.project], [], "proxy", [`allowed.test:${port}`])
+
+  try {
+    const ok = await Effect.runPromise(
+      output("/usr/bin/curl", ["-fsS", `http://allowed.test:${port}/allowed`], root.project, policy, factory),
+    )
+    const denied = await Effect.runPromise(
+      execute("/usr/bin/curl", ["-fsS", `http://blocked.test:${port}/blocked`], root.project, policy, factory),
+    )
+    const direct = await Effect.runPromise(
+      execute(
+        "/usr/bin/curl",
+        ["--noproxy", "*", "-fsS", `http://127.0.0.1:${blocked.port}/direct`],
+        root.project,
+        policy,
+        factory,
+      ),
+    )
+    expect(Number(ok.code), ok.stderr).toBe(0)
+    expect(ok.stdout).toBe("sandbox-proxy-ok")
+    expect(Number(denied)).not.toBe(0)
+    expect(Number(direct)).not.toBe(0)
+    expect(allowedRequests).toBe(1)
+    expect(blockedRequests).toBe(0)
+  } finally {
+    await Promise.all([allowed.stop(true), blocked.stop(true)])
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("drops proxy setup capabilities and blocks nested user namespaces", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const target = tcp()
+  const port = target.listener.port
+  const factory: ProxyFactory = (hosts) =>
+    startProxy(hosts, "linux", async () => ({ address: "127.0.0.1", family: 4 }))
+  const policy = profile([root.project], [], "proxy", [`allowed.test:${port}`])
+  const script = [
+    'const child = require("node:child_process")',
+    'const fs = require("node:fs")',
+    'const match = fs.readFileSync("/proc/self/status", "utf8").match(/^CapEff:\\s+([0-9a-f]+)$/m)',
+    "if (!match || (BigInt(`0x${match[1]}`) & (1n << 21n)) !== 0n) process.exit(2)",
+    'const nested = child.spawnSync("/usr/bin/unshare", ["--user", "--map-root-user", "true"])',
+    "process.exit(nested.status === 0 ? 3 : 0)",
+  ].join("\n")
+
+  try {
+    const result = await Effect.runPromise(output(process.execPath, ["-e", script], root.project, policy, factory))
+    expect(Number(result.code), result.stderr).toBe(0)
+  } finally {
+    target.listener.stop(true)
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("blocks arbitrary host Unix sockets in proxy mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const socket = path.join(root.outside, "escape.sock")
+  let accepted = 0
+  const listener = createServer((client) => {
+    accepted++
+    client.end("escaped")
+  })
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject)
+    listener.listen(socket, () => {
+      listener.off("error", reject)
+      resolve()
+    })
+  })
+  const target = tcp()
+  const port = target.listener.port
+  const factory: ProxyFactory = (hosts) =>
+    startProxy(hosts, "linux", async () => ({ address: "127.0.0.1", family: 4 }))
+  const policy = profile([root.project], [], "proxy", [`allowed.test:${port}`])
+  const script = [
+    'const net = require("node:net")',
+    `const socket = net.connect({ path: ${JSON.stringify(socket)} })`,
+    "socket.on('connect', () => process.exit(2))",
+    "socket.on('error', () => process.exit(0))",
+    "setTimeout(() => process.exit(4), 1000)",
+  ].join("\n")
+
+  try {
+    const result = await Effect.runPromise(output(process.execPath, ["-e", script], root.project, policy, factory))
+    expect(Number(result.code), result.stderr).toBe(0)
+    expect(accepted).toBe(0)
+  } finally {
+    target.listener.stop(true)
+    await new Promise<void>((resolve) => listener.close(() => resolve()))
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("blocks localhost connections in network deny mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const listener = tcp()
+  const deny = profile([root.project], [], "deny")
+
+  try {
+    expect(
+      Number(await Effect.runPromise(spawn(tcpClient(listener.listener.port, false, "localhost"), root.project, deny))),
+    ).toBe(0)
+    expect(listener.accepted()).toBe(0)
+  } finally {
+    listener.listener.stop(true)
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linuxIPv6("blocks IPv6 loopback connections in network deny mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const listener = tcp("::1")
+  const deny = profile([root.project], [], "deny")
+
+  try {
+    expect(
+      Number(await Effect.runPromise(spawn(tcpClient(listener.listener.port, false, "::1"), root.project, deny))),
+    ).toBe(0)
+    expect(listener.accepted()).toBe(0)
+  } finally {
+    listener.listener.stop(true)
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("keeps loopback available between processes inside the denied network namespace", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const child = [
+    'const net = require("node:net")',
+    "const port = Number(process.argv[1])",
+    'const socket = net.connect({ host: "127.0.0.1", port })',
+    'socket.on("connect", () => socket.write("sandbox-internal-ok"))',
+    'socket.on("data", (data) => process.exit(data.toString() === "sandbox-internal-ok" ? 0 : 2))',
+    'socket.on("error", () => process.exit(3))',
+  ].join("\n")
+  const script = [
+    'const child = require("node:child_process")',
+    'const net = require("node:net")',
+    'const server = net.createServer((socket) => socket.on("data", (data) => socket.end(data)))',
+    'server.listen(0, "127.0.0.1", () => {',
+    `  const proc = child.spawn(process.execPath, ["-e", ${JSON.stringify(child)}, String(server.address().port)])`,
+    '  proc.on("exit", (code) => process.exit(code ?? 4))',
+    "})",
+  ].join("\n")
+
+  try {
+    expect(Number(await Effect.runPromise(spawn(script, root.project, profile([root.project], [], "deny"))))).toBe(0)
+  } finally {
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("keeps descendants in the denied network namespace", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const blocked = tcp()
+  const child = tcpClient(blocked.listener.port, false)
+  const script = [
+    'const child = require("node:child_process")',
+    `const result = child.spawnSync(process.execPath, ["-e", ${JSON.stringify(child)}])`,
+    "process.exit(result.status ?? 3)",
+  ].join("\n")
+
+  try {
+    expect(Number(await Effect.runPromise(spawn(script, root.project, profile([root.project], [], "deny"))))).toBe(0)
+    expect(blocked.accepted()).toBe(0)
+  } finally {
+    blocked.listener.stop(true)
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("preserves filesystem confinement in network deny mode", async () => {
+  requireNetwork()
+  const root = await fixture()
+  const allowed = path.join(root.project, "network-deny.txt")
+  const sentinel = path.join(root.outside, "network-deny.txt")
+  await fs.writeFile(sentinel, "original")
+  const script = [
+    'const fs = require("node:fs")',
+    `fs.writeFileSync(${JSON.stringify(allowed)}, "allowed")`,
+    "try {",
+    `  fs.writeFileSync(${JSON.stringify(sentinel)}, "escaped")`,
+    "  process.exit(2)",
+    "} catch {",
+    "  process.exit(0)",
+    "}",
+  ].join("\n")
+
+  try {
+    expect(Number(await Effect.runPromise(spawn(script, root.project, profile([root.project], [], "deny"))))).toBe(0)
     expect(await fs.readFile(allowed, "utf8")).toBe("allowed")
     expect(await fs.readFile(sentinel, "utf8")).toBe("original")
   } finally {
@@ -212,6 +592,30 @@ linux("applies explicit file and subtree denies after a writable parent", async 
   }
 })
 
+linux("prevents renaming denied policy state while sibling state remains writable", async () => {
+  const root = await fixture()
+  const state = path.join(root.project, "state")
+  const store = path.join(root.project, "policy")
+  const sibling = path.join(state, "sibling.txt")
+  const moved = path.join(state, "moved")
+  await fs.mkdir(state)
+  await fs.mkdir(store)
+  const policy = denied(profile([state]), [{ path: store, kind: "subtree" }])
+  const script = [
+    'const fs = require("node:fs")',
+    `fs.writeFileSync(${JSON.stringify(sibling)}, "allowed")`,
+    `try { fs.renameSync(${JSON.stringify(store)}, ${JSON.stringify(moved)}); process.exit(2) } catch {}`,
+  ].join("\n")
+
+  try {
+    expect(Number(await Effect.runPromise(spawn(script, root.project, policy)))).toBe(0)
+    expect(await fs.readFile(sibling, "utf8")).toBe("allowed")
+    expect((await fs.stat(store)).isDirectory()).toBe(true)
+  } finally {
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
 linux("supports writable literal files without opening writable siblings", async () => {
   const root = await fixture()
   const allowed = path.join(root.project, "allowed.txt")
@@ -323,7 +727,7 @@ linux("applies the profile environment without inheriting denied values", async 
             )
             .pipe(Effect.flatMap((handle) => handle.exitCode)),
         ),
-      ).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer)),
+      ).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
     )
     expect(Number(await Effect.runPromise(effect))).toBe(0)
   } finally {
@@ -404,7 +808,7 @@ linux("terminates daemonized descendants when the command scope closes", async (
               })
             }),
           ),
-        ).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer)),
+        ).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
       ),
     )
 
@@ -440,6 +844,48 @@ linux("rejects a Bubblewrap helper inside a writable root", async () => {
     const result = spawnSync(process.execPath, ["-e", script], {
       cwd: import.meta.dir,
       env: { ...process.env, KILO_BWRAP_PATH: link },
+      encoding: "utf8",
+    })
+    expect(result.status, result.stderr).toBe(0)
+  } finally {
+    await fs.rm(root.root, { recursive: true, force: true })
+  }
+})
+
+linux("reports network namespace support separately and fails deny mode closed", async () => {
+  const root = await fixture()
+  const source = process.env.KILO_BWRAP_PATH ?? "/usr/bin/bwrap"
+  const helper = path.join(root.outside, "bwrap-no-network")
+  await fs.writeFile(
+    helper,
+    [
+      "#!/bin/sh",
+      'for arg in "$@"; do',
+      '  if [ "$arg" = "--unshare-net" ]; then echo "network namespaces blocked" >&2; exit 42; fi',
+      "done",
+      `exec ${JSON.stringify(source)} "$@"`,
+      "",
+    ].join("\n"),
+  )
+  await fs.chmod(helper, 0o755)
+  const script = [
+    'import { Effect } from "effect"',
+    'import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"',
+    'import { backendSupport, run } from "@kilocode/sandbox"',
+    'import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"',
+    'const allow = backendSupport({ mode: "allow", allowedHosts: [] })',
+    'const deny = backendSupport({ mode: "deny", allowedHosts: [] })',
+    "if (!allow.available) process.exit(2)",
+    'if (deny.available || !deny.reason?.includes("Linux network sandbox")) process.exit(3)',
+    'const profile = { filesystem: { allowWrite: [], denyWrite: [], denyNames: [] }, network: { mode: "deny", allowedHosts: [] }, environment: { deny: [], set: {} } }',
+    'const effect = Effect.scoped(run(profile, ChildProcessSpawner.ChildProcessSpawner.use((spawner) => spawner.spawn(ChildProcess.make(process.execPath, ["-e", "process.exit(0)"])))).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer)))',
+    "try { await Effect.runPromise(effect); process.exit(4) } catch { process.exit(0) }",
+  ].join("\n")
+
+  try {
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: import.meta.dir,
+      env: { ...process.env, KILO_BWRAP_PATH: helper },
       encoding: "utf8",
     })
     expect(result.status, result.stderr).toBe(0)

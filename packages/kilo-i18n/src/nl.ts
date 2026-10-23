@@ -2,13 +2,6 @@
 // Keys here will override any matching keys from upstream translations
 export const dict = {
   // Kilo Gateway provider translations
-  "provider.connect.kiloGateway.line1":
-    "Kilo Gateway geeft je toegang tot een gecureerde set van betrouwbare, geoptimaliseerde modellen voor coding agents.",
-  "provider.connect.kiloGateway.line2":
-    "Met één enkele API key krijg je toegang tot modellen zoals Claude, GPT, Gemini, GLM en meer.",
-  "provider.connect.kiloGateway.visit.prefix": "Bezoek ",
-  "provider.connect.kiloGateway.visit.link": "kilo.ai",
-  "provider.connect.kiloGateway.visit.suffix": " om je API key op te halen.",
   "provider.connect.kiloGateway.byok.prefix": "Voor meer gebruiksstatistieken, gebruik ",
   "provider.connect.kiloGateway.byok.link": "BYOK via Kilo's Gateway",
   "provider.connect.kiloGateway.byok.suffix": ".",
@@ -26,14 +19,9 @@ export const dict = {
   "settings.providers.note.vercel": "Geïntegreerde toegang tot AI-modellen met slimme routering",
 
   // Reasoning block label
-  "ui.permission.run": "Uitvoeren",
   "ui.reasoning.label": "Redenering",
 
   // Marketplace
-  "marketplace.tab.skills": "Skills",
-  "marketplace.tab.mcpServers": "MCP Servers",
-  "marketplace.category.all": "Alle",
-  "marketplace.placeholder": "Nog te implementeren",
   "marketplace.card.installed": "Geïnstalleerd",
   "marketplace.card.install": "Installeren",
   "marketplace.card.remove": "Verwijderen",
@@ -44,6 +32,30 @@ export const dict = {
   "marketplace.install.scope": "Scope",
   "marketplace.install.scope.project": "Project",
   "marketplace.install.scope.global": "Globaal",
+  "marketplace.install.scope.project.description":
+    "Alleen dit project. De geïnstalleerde bestanden kunnen aan versiebeheer worden toegevoegd en met je team worden gedeeld.",
+  "marketplace.install.scope.global.description":
+    "Alle projecten op deze computer. Wordt opgeslagen in je gebruikersconfiguratie.",
+  "marketplace.install.destination": "Installatielocatie",
+  "marketplace.install.includedSkills": "Meegeleverde skills",
+  "marketplace.install.about.mcp":
+    "Een MCP-server geeft Kilo extra hulpmiddelen om met externe diensten of lokale programma's te werken.",
+  "marketplace.install.about.agent": "Een agent voegt een herbruikbare rol toe met eigen instructies en machtigingen.",
+  "marketplace.install.about.skill":
+    "Een vaardigheid voegt taakspecifieke instructies en bronnen toe die Kilo indien nodig kan laden.",
+  "marketplace.install.mcp.warning":
+    "MCP-servers kunnen lokale opdrachten uitvoeren of verbinding maken met externe diensten. Kilo vraagt toestemming voordat hun hulpmiddelen worden gebruikt, tenzij je machtigingen dit automatisch toestaan.",
+  "marketplace.install.project.warning":
+    "Projectbestanden kunnen aan versiebeheer worden toegevoegd. Sla hier geen geheimen op, tenzij de configuratie naar een omgevingsvariabele verwijst.",
+  "marketplace.install.learnMore": "Lees hoe installaties vanuit Marketplace werken",
+  "marketplace.install.learnMcp": "Meer informatie over MCP",
+  "marketplace.install.about.plugin":
+    "Een plugin voegt aangepaste hulpmiddelen en integraties toe aan Kilo. Plugins worden uitgevoerd met volledige machtigingen.",
+  "marketplace.install.plugin.warning":
+    "Plugins voeren code uit met volledige machtigingen. Ze kunnen je bestanden lezen en wijzigen, opdrachten uitvoeren en toegang krijgen tot je inloggegevens en netwerk. Installeer alleen plugins die je vertrouwt.",
+  "marketplace.intro":
+    "Installeer herbruikbare agenten, vaardigheden, MCP-hulpmiddelen en plugins voor één project of voor alle projecten.",
+  "marketplace.intro.learnMore": "Over Marketplace",
   "marketplace.install.prerequisites": "Vereisten",
   "marketplace.install.installing": "Installeren...",
   "marketplace.install.cancel": "Annuleren",
@@ -51,27 +63,36 @@ export const dict = {
   "marketplace.install.failed": "Installatie mislukt",
   "marketplace.install.done": "Klaar",
   "marketplace.install.close": "Sluiten",
+  "marketplace.install.mcp.signIn.message": "{{name}} is geïnstalleerd, maar vereist een login voordat de tools gebruikt kunnen worden.",
+  "marketplace.install.mcp.signIn.button": "Inloggen",
+  "marketplace.install.mcp.signIn.waiting": "Wachten op inloggen via de browser…",
+  "marketplace.install.mcp.signIn.cancel": "Annuleren",
+  "marketplace.install.mcp.signIn.skip": "Later",
+  "marketplace.install.mcp.signIn.success": "Ingelogd bij {{name}}.",
+  "marketplace.install.mcp.signIn.failed": "Inloggen bij {{name}} mislukt.",
   "marketplace.remove.title": "{{name}} verwijderen?",
   "marketplace.remove.confirm":
     "Weet je zeker dat je deze {{type}} wilt verwijderen? Dit verwijdert het uit je {{scope}} configuratie.",
   "marketplace.remove.cancel": "Annuleren",
+  "marketplace.remove.mcp.skills":
+    "Dit verwijdert ook de bijbehorende skills die bij deze installatie horen. Afzonderlijk geïnstalleerde skills blijven behouden.",
   "marketplace.remove.confirm.button": "Verwijderen",
-  "marketplace.tab.mcp": "MCP",
-  "marketplace.tab.agents": "Agenten",
   "marketplace.search": "Zoeken...",
   "marketplace.filter.all": "Alle items",
   "marketplace.filter.notInstalled": "Niet geïnstalleerd",
+  "marketplace.filter.relevant": "Relevant voor mijn werkruimte",
   "marketplace.empty": "Geen items gevonden",
+  "marketplace.empty.relevant": "Geen relevante marketplace-items gevonden voor deze werkruimte.",
   "marketplace.badge.mcpServer": "MCP Server",
-  "marketplace.badge.mode": "Modus",
+  "marketplace.badge.skills": "Inclusief skills",
   "marketplace.card.by": "door {{author}}",
   "marketplace.install.method": "Installatiemethode",
   "marketplace.install.parameters": "Parameters",
   "marketplace.install.optional": "(optioneel)",
-  "marketplace.install.required": "{{name}} is vereist",
   "marketplace.scope.project": "project",
   "marketplace.scope.global": "globaal",
   "marketplace.remove.type.mcp": "MCP server",
+  "marketplace.remove.type.plugin": "plugin",
   "marketplace.remove.type.skill": "skill",
   "marketplace.remove.type.agent": "agent",
   "marketplace.remove.failed": "Verwijderen van {{name}} mislukt",
@@ -82,7 +103,7 @@ export const dict = {
   "marketplace.warning.busyMany": "Er zijn meerdere sessies actief en deze zullen worden onderbroken",
   "marketplace.warning.installAnyway": "Toch installeren",
   "marketplace.warning.cancel": "Annuleren",
-  "marketplace.contribute.prompt": "Mist u een skill, agent of MCP-server?",
+  "marketplace.contribute.prompt": "Mist u een skill, agent, MCP-server of plugin?",
   "marketplace.contribute.cta": "Bijdragen op GitHub",
   "marketplace.migration.notice":
     "Modi zijn vervangen door agenten. Als u eerder marketplace-modi hebt geïnstalleerd, verwijder ze dan en installeer ze opnieuw als agenten om naar het nieuwe formaat te migreren.",
@@ -94,6 +115,8 @@ export const dict = {
   "plan.followup.answer.newSession.description": "Implementeren in een nieuwe sessie met een lege context",
   "plan.followup.answer.continue": "Hier doorgaan",
   "plan.followup.answer.continue.description": "Het plan in deze sessie implementeren",
+  "plan.followup.answer.keepRefining": "Blijven verfijnen",
+  "plan.followup.answer.keepRefining.description": "Blijven plannen zonder nu te implementeren",
 
   // Slow-repo snapshot prompt
   "snapshot.slowRepo.header": "Snapshot is traag",
@@ -108,8 +131,6 @@ export const dict = {
 
   // Edit-tool header and shell-tool section labels
   "ui.messagePart.openInDiffViewer": "Openen in Diff-weergave",
-  "ui.messagePart.shell.command": "Opdracht",
-  "ui.messagePart.shell.output": "Uitvoer",
   "ui.messagePart.openInEditor": "Openen in editor",
 
   // Message feedback (thumbs up/down per assistant response)

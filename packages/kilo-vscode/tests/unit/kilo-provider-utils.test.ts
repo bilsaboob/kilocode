@@ -1,8 +1,6 @@
 import { describe, it, expect } from "bun:test"
 import {
   sessionToWebview,
-  applySessionPatch,
-  sessionPatchToWebview,
   indexProvidersById,
   filterVisibleAgents,
   buildSettingPath,
@@ -15,15 +13,16 @@ import {
   type ProviderInfo,
 } from "../../src/kilo-provider-utils"
 import type { CloudSessionMessage } from "../../src/services/cli-backend/types"
+import { normalize, type SyncPayload } from "../../src/services/cli-backend/sdk-sse-adapter"
 import type {
   Session,
   Agent,
   Provider,
   Event,
-  SyncEventMessagePartUpdated,
-  SyncEventMessageUpdated,
   EventSessionStatus,
+  EventSessionWakeup,
   EventSessionTurnClose,
+  EventSessionError,
   EventSandboxStatusChanged,
   EventPermissionAsked,
   EventPermissionReplied,
@@ -34,12 +33,15 @@ import type {
   EventSuggestionShown,
   EventSuggestionAccepted,
   EventSuggestionDismissed,
-  SyncEventSessionCreated,
-  SyncEventSessionUpdated,
   EventServerConnected,
   TextPart,
   AssistantMessage,
 } from "@kilocode/sdk/v2/client"
+
+type SyncEventMessagePartUpdated = Extract<SyncPayload, { name: "message.part.updated.1" }>
+type SyncEventMessageUpdated = Extract<SyncPayload, { name: "message.updated.1" }>
+type SyncEventSessionCreated = Extract<SyncPayload, { name: "session.created.1" }>
+type SyncEventSessionUpdated = Extract<SyncPayload, { name: "session.updated.1" }>
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -154,6 +156,21 @@ describe("sessionToWebview", () => {
     expect(result.title).toBe("My Session")
   })
 
+  it.each([
+    ["high", { providerID: "kilo", modelID: "gpt", variant: "high" }],
+    ["default", { providerID: "kilo", modelID: "gpt" }],
+  ])("projects the agent and model the session last ran (variant %s)", (variant, model) => {
+    const result = sessionToWebview(makeSession({ agent: "plan", model: { id: "gpt", providerID: "kilo", variant } }))
+    expect(result.agent).toBe("plan")
+    expect(result.model).toEqual(model)
+  })
+
+  it("omits the agent and model before the session first runs", () => {
+    const result = JSON.parse(JSON.stringify(sessionToWebview(makeSession())))
+    expect(result).not.toHaveProperty("agent")
+    expect(result).not.toHaveProperty("model")
+  })
+
   it("produces valid ISO format", () => {
     const result = sessionToWebview(makeSession())
     expect(() => new Date(result.createdAt)).not.toThrow()
@@ -164,115 +181,49 @@ describe("sessionToWebview", () => {
     const result = sessionToWebview(makeSession())
     expect(result.revert).toBeNull()
     expect(result.summary).toBeNull()
-  })
-})
-
-describe("applySessionPatch", () => {
-  it("applies values without dropping unrelated session fields", () => {
-    const session = makeSession({
-      workspaceID: "workspace-1",
-      cost: 1,
-      tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 4, write: 5 } },
-    })
-
-    const result = applySessionPatch(session, { title: "Updated", cost: 2, time: { updated: 1700002000000 } })
-
-    expect(result.title).toBe("Updated")
-    expect(result.cost).toBe(2)
-    expect(result.workspaceID).toBe("workspace-1")
-    expect(result.tokens).toEqual(session.tokens)
-    expect(result.time).toEqual({ created: 1700000000000, updated: 1700002000000 })
+    expect(result.goal).toBeNull()
   })
 
-  it("clears optional fields when the patch contains null", () => {
-    const session = makeSession({
-      workspaceID: "workspace-1",
-      summary: { additions: 1, deletions: 2, files: 3 },
-      cost: 4,
-      tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 4, write: 5 } },
-      share: { url: "https://example.com" },
-      agent: "code",
-      model: { id: "model-1", providerID: "provider-1" },
-      permission: [],
-      revert: { messageID: "msg-1" },
-      time: { created: 1, updated: 2, compacting: 3, archived: 4 },
-    })
-
-    const result = applySessionPatch(session, {
-      workspaceID: null,
-      summary: null,
-      cost: null,
-      tokens: null,
-      share: { url: null },
-      agent: null,
-      model: null,
-      permission: null,
-      revert: null,
-      time: { compacting: null, archived: null },
-    })
-
-    expect(result.workspaceID).toBeUndefined()
-    expect(result.summary).toBeUndefined()
-    expect(result.cost).toBeUndefined()
-    expect(result.tokens).toBeUndefined()
-    expect(result.share).toBeUndefined()
-    expect(result.agent).toBeUndefined()
-    expect(result.model).toBeUndefined()
-    expect(result.permission).toBeUndefined()
-    expect(result.revert).toBeUndefined()
-    expect(result.time).toEqual({ created: 1, updated: 2 })
+  it.each([true, false])("projects the saved goal with active=%s", (active) => {
+    const goal = { text: "Fix the failing tests", active }
+    const result = sessionToWebview(makeSession({ metadata: { "kilo.goal": goal, unrelated: "private" } }))
+    expect(result.goal).toEqual(goal)
+    expect(result).not.toHaveProperty("metadata")
   })
 
-  it("ignores null patches for required session fields", () => {
-    const session = makeSession()
-    const result = applySessionPatch(session, {
-      slug: null,
-      projectID: null,
-      directory: null,
-      title: null,
-      version: null,
-      time: { created: null, updated: null },
-    })
-
-    expect(result.slug).toBe(session.slug)
-    expect(result.projectID).toBe(session.projectID)
-    expect(result.directory).toBe(session.directory)
-    expect(result.title).toBe(session.title)
-    expect(result.version).toBe(session.version)
-    expect(result.time).toEqual(session.time)
+  it("clears the saved goal through JSON serialization and a session merge", () => {
+    const saved = sessionToWebview(makeSession({ metadata: { "kilo.goal": { text: "Fix tests", active: true } } }))
+    const cleared = JSON.parse(JSON.stringify(sessionToWebview(makeSession({ metadata: {} }))))
+    expect({ ...saved, ...cleared }.goal).toBeNull()
   })
 
-  it("does not mutate the original session", () => {
-    const session = makeSession({ revert: { messageID: "msg-1" }, time: { created: 1, updated: 2, compacting: 3 } })
+  it.each(["active", "complete", "blocked", "paused"] as const)(
+    "carries %s goal state and report through JSON",
+    (status) => {
+      const goal = {
+        text: "Fix tests",
+        status,
+        active: status === "active",
+        reason: "Reported by the working model, not independently verified.",
+      }
+      const result = sessionToWebview(makeSession({ metadata: { "kilo.goal": goal } }))
+      expect(JSON.parse(JSON.stringify(result)).goal).toEqual(goal)
+    },
+  )
 
-    applySessionPatch(session, { revert: null, time: { updated: 4, compacting: null } })
+  it.each([null, "text", { text: 1, active: true }, { text: "Goal" }, { text: "Goal", active: "true" }])(
+    "ignores invalid goal metadata %j",
+    (goal) => {
+      expect(sessionToWebview(makeSession({ metadata: { "kilo.goal": goal } })).goal).toBeNull()
+    },
+  )
 
-    expect(session.revert).toEqual({ messageID: "msg-1" })
-    expect(session.time).toEqual({ created: 1, updated: 2, compacting: 3 })
-  })
-})
-
-describe("sessionPatchToWebview", () => {
-  it("converts relevant patch timestamps and preserves explicit clears", () => {
-    const result = sessionPatchToWebview("sess-1", {
-      parentID: null,
-      summary: null,
-      revert: null,
-      time: { created: 1700000000000, updated: 1700001000000 },
-    })
-
-    expect(result).toEqual({
-      id: "sess-1",
-      parentID: null,
-      summary: null,
-      revert: null,
-      createdAt: new Date(1700000000000).toISOString(),
-      updatedAt: new Date(1700001000000).toISOString(),
-    })
-  })
-
-  it("omits fields not present in the patch", () => {
-    expect(sessionPatchToWebview("sess-1", { cost: 2 })).toEqual({ id: "sess-1" })
+  it("preserves the workspace restoration outcome from a revert response", () => {
+    const session = {
+      ...makeSession(),
+      revert: { messageID: "msg-1", workspace: "snapshots-disabled" as const },
+    }
+    expect(sessionToWebview(session).revert).toMatchObject({ workspace: "snapshots-disabled" })
   })
 })
 
@@ -449,6 +400,19 @@ describe("mapSSEEventToWebviewMessage", () => {
     }
   })
 
+  it("maps session.wakeup to sessionWakeup", () => {
+    const event: EventSessionWakeup = {
+      type: "session.wakeup",
+      properties: { sessionID: "sess-1", pending: 2 },
+    }
+
+    expect(mapSSEEventToWebviewMessage(event, "sess-1")).toEqual({
+      type: "sessionWakeup",
+      sessionID: "sess-1",
+      pending: 2,
+    })
+  })
+
   it("maps sandbox status changes to effective button state", () => {
     const event: EventSandboxStatusChanged = {
       type: "sandbox.status.changed",
@@ -466,14 +430,70 @@ describe("mapSSEEventToWebviewMessage", () => {
     })
   })
 
-  it("maps session.turn.close to its terminal reason", () => {
+  it("maps session.turn.close with its event identity and terminal reason", () => {
     const event: EventSessionTurnClose = {
       id: "evt-turn",
       type: "session.turn.close",
       properties: { sessionID: "sess-1", reason: "interrupted" },
     }
     const msg = mapSSEEventToWebviewMessage(event, "sess-1")
-    expect(msg).toEqual({ type: "sessionTurnClosed", sessionID: "sess-1", reason: "interrupted" })
+    expect(msg).toEqual({ type: "sessionTurnClosed", sessionID: "sess-1", eventID: "evt-turn", reason: "interrupted" })
+  })
+
+  it("forwards the parent session ID when a child turn closes", () => {
+    const event: EventSessionTurnClose = {
+      id: "evt-child-turn",
+      type: "session.turn.close",
+      properties: { sessionID: "child", parentID: "parent", reason: "completed" },
+    }
+
+    expect(mapSSEEventToWebviewMessage(event, "child")).toEqual({
+      type: "sessionTurnClosed",
+      sessionID: "child",
+      eventID: "evt-child-turn",
+      reason: "completed",
+      parentID: "parent",
+    })
+  })
+
+  it("maps session errors with their event identity and message", () => {
+    const event: EventSessionError = {
+      id: "evt-error",
+      type: "session.error",
+      properties: {
+        sessionID: "sess-1",
+        error: {
+          name: "APIError",
+          data: {
+            message: "prompt_cache_breakpoint is not supported on this model",
+            isRetryable: false,
+          },
+        },
+      },
+    }
+
+    expect(mapSSEEventToWebviewMessage(event, "sess-1")).toEqual({
+      type: "sessionError",
+      eventID: "evt-error",
+      sessionID: "sess-1",
+      error: event.properties.error,
+    })
+  })
+
+  it.each(["admission", "execution"] as const)("preserves the %s session error phase", (phase) => {
+    const event = {
+      id: "evt-phase",
+      type: "session.error" as const,
+      properties: { sessionID: "sess-1", error: { name: "UnknownError" as const, data: { message: "error" } } },
+      metadata: { phase },
+    }
+    expect(mapSSEEventToWebviewMessage(normalize(event), "sess-1")).toEqual({
+      type: "sessionError",
+      eventID: event.id,
+      sessionID: "sess-1",
+      error: event.properties.error,
+      phase,
+    })
   })
 
   it("maps permission.asked to permissionRequest", () => {
@@ -621,8 +641,8 @@ describe("mapSSEEventToWebviewMessage", () => {
       properties: {
         id: "sug-1",
         sessionID: "sess-1",
-        text: "Review changes?",
-        actions: [{ label: "Start", prompt: "/local-review-uncommitted" }],
+        text: "Run tests?",
+        actions: [{ label: "Run tests", prompt: "Run the test suite" }],
       },
     }
     const msg = mapSSEEventToWebviewMessage(event, "sess-1")
@@ -636,7 +656,7 @@ describe("mapSSEEventToWebviewMessage", () => {
         sessionID: "sess-1",
         requestID: "sug-1",
         index: 0,
-        action: { label: "Start", prompt: "/local-review-uncommitted" },
+        action: { label: "Run tests", prompt: "Run the test suite" },
       },
     }
     const msg = mapSSEEventToWebviewMessage(event, "sess-1")
@@ -786,6 +806,16 @@ describe("mapCloudSessionMessage", () => {
     const msg = mapCloudSessionMessageToWebviewMessage(makeCloudMessage({ role: "user" }))
     expect(msg.role).toBe("user")
   })
+
+  it("passes parentID through so turn grouping can link answers to prompts", () => {
+    const msg = mapCloudSessionMessageToWebviewMessage(makeCloudMessage({ parentID: "msg-0" }))
+    expect(msg.parentID).toBe("msg-0")
+  })
+
+  it("leaves parentID undefined when the cloud message has none", () => {
+    const msg = mapCloudSessionMessageToWebviewMessage(makeCloudMessage())
+    expect(msg.parentID).toBeUndefined()
+  })
 })
 
 describe("getErrorMessage", () => {
@@ -919,6 +949,20 @@ describe("getConfigErrorDetails", () => {
 
   it("omits the issues section when only the path is present", () => {
     expect(getConfigErrorDetails({ data: { path: "/cfg.json" } })).toBe("File: /cfg.json")
+  })
+
+  it("formats a shadowed-write error with the overriding file", () => {
+    const err = {
+      data: {
+        message:
+          "The setting was saved to /home/me/.config/kilo/kilo.json, but /home/me/.config/kilo/opencode.json still takes precedence over it.",
+        path: "/home/me/.config/kilo/kilo.json",
+        shadowedBy: "/home/me/.config/kilo/opencode.json",
+      },
+    }
+    expect(getConfigErrorDetails(err)).toBe(
+      "File: /home/me/.config/kilo/kilo.json\nShadowed by: /home/me/.config/kilo/opencode.json",
+    )
   })
 
   it("returns undefined when issues array is empty and no path", () => {

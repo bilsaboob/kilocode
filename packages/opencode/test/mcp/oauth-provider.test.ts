@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test"
+import { determineScope } from "@modelcontextprotocol/sdk/client/auth.js"
 import { McpOAuthProvider, OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH } from "../../src/mcp/oauth-provider"
 import type { McpAuth } from "../../src/mcp/auth"
 
@@ -33,6 +34,38 @@ describe("McpOAuthProvider.redirectUrl", () => {
   })
 })
 
+// kilocode_change start - backport upstream OAuth authorization URL coverage
+describe("McpOAuthProvider.redirectToAuthorization", () => {
+  test("forwards http and https authorization URLs", async () => {
+    const seen: string[] = []
+    const provider = new McpOAuthProvider(
+      "test-server",
+      "https://mcp.example.com/mcp",
+      {},
+      { onRedirect: (url) => void seen.push(url.href) },
+      stubAuth,
+    )
+    await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize?state=1"))
+    await provider.redirectToAuthorization(new URL("http://127.0.0.1:8080/authorize"))
+    expect(seen).toEqual(["https://auth.example.com/authorize?state=1", "http://127.0.0.1:8080/authorize"])
+  })
+
+  test("rejects authorization URLs that are not http or https", async () => {
+    const seen: string[] = []
+    const provider = new McpOAuthProvider(
+      "test-server",
+      "https://mcp.example.com/mcp",
+      {},
+      { onRedirect: (url) => void seen.push(url.href) },
+      stubAuth,
+    )
+    const err = await provider.redirectToAuthorization(new URL("file:///tmp/authorize")).catch((err: unknown) => err)
+    expect(err).toMatchObject({ message: expect.stringContaining("returned a file: authorization URL") })
+    expect(seen).toEqual([])
+  })
+})
+// kilocode_change end
+
 describe("McpOAuthProvider.clientMetadata", () => {
   test("includes redirect_uris from redirectUrl", () => {
     const provider = makeProvider({ callbackPort: 6620 })
@@ -57,5 +90,45 @@ describe("McpOAuthProvider.clientMetadata", () => {
   test("sets token_endpoint_auth_method to none when no clientSecret", () => {
     const provider = makeProvider({})
     expect(provider.clientMetadata.token_endpoint_auth_method).toBe("none")
+  })
+})
+
+describe("MCP OAuth scope selection", () => {
+  test("adds offline_access when the authorization server and client support refresh tokens", () => {
+    expect(
+      determineScope({
+        resourceMetadata: {
+          resource: "https://mcp.example.com/mcp",
+          scopes_supported: ["resource.read"],
+        },
+        authServerMetadata: {
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://auth.example.com/token",
+          response_types_supported: ["code"],
+          scopes_supported: ["resource.read", "offline_access"],
+        },
+        clientMetadata: makeProvider({}).clientMetadata,
+      }),
+    ).toBe("resource.read offline_access")
+  })
+
+  test("does not add unsupported authorization server scopes", () => {
+    expect(
+      determineScope({
+        resourceMetadata: {
+          resource: "https://mcp.example.com/mcp",
+          scopes_supported: ["resource.read"],
+        },
+        authServerMetadata: {
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://auth.example.com/token",
+          response_types_supported: ["code"],
+          scopes_supported: ["resource.read"],
+        },
+        clientMetadata: makeProvider({}).clientMetadata,
+      }),
+    ).toBe("resource.read")
   })
 })

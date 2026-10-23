@@ -17,6 +17,7 @@ import {
   isLocalProviderOptionalApiKey,
   LOCAL_PROVIDER_API_KEY_PLACEHOLDER,
 } from "../../utils/local-providers"
+import AnacondaDesktopDialog from "./AnacondaDesktopDialog"
 
 interface ProviderConnectDialogProps {
   providerID: string
@@ -26,17 +27,13 @@ interface ProviderConnectDialogProps {
 interface ViewState {
   methodIndex?: number
   authorization?: ProviderAuthAuthorization
-  phase?: "authorizing" | "connecting"
+  phase?: "authorizing" | "connecting" | "prompts"
   error?: string
   field?: string
   failed?: string
 }
 
 type Prompt = NonNullable<ProviderAuthMethod["prompts"]>[number]
-
-function fallbackMethods(label: string): ProviderAuthMethod[] {
-  return [{ type: "api", label }]
-}
 
 function formatError(value: unknown, fallback: string): string {
   if (value && typeof value === "object" && "message" in value) {
@@ -56,6 +53,8 @@ function visible(prompt: Prompt, values: Record<string, string>) {
 }
 
 const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => {
+  if (props.providerID === "anaconda-desktop") return <AnacondaDesktopDialog />
+
   const dialog = useDialog()
   const language = useLanguage()
   const provider = useProvider()
@@ -67,8 +66,61 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
   const item = createMemo(() => provider.providers()[props.providerID])
   const name = () => item()?.name ?? props.providerID
   const methods = createMemo<ProviderAuthMethod[]>(() => {
-    const list =
-      provider.authMethods()[props.providerID] ?? fallbackMethods(language.t("provider.connect.method.apiKey"))
+    const fallback = (): ProviderAuthMethod[] => {
+      if (props.providerID === "amazon-bedrock") {
+        return [
+          {
+            type: "api",
+            label: language.t("provider.connect.bedrock.method.accessKeys"),
+            prompts: [
+              {
+                type: "text",
+                key: "secretAccessKey",
+                message: language.t("provider.connect.bedrock.secretAccessKey.label"),
+                placeholder: language.t("provider.connect.bedrock.secretAccessKey.placeholder"),
+              },
+              {
+                type: "text",
+                key: "sessionToken",
+                message: language.t("provider.connect.bedrock.sessionToken.label"),
+                placeholder: language.t("provider.connect.bedrock.sessionToken.placeholder"),
+              },
+              {
+                type: "text",
+                key: "region",
+                message: language.t("provider.connect.bedrock.region.label"),
+                placeholder: language.t("provider.connect.bedrock.region.placeholder"),
+              },
+            ],
+          },
+          { type: "api", label: language.t("provider.connect.bedrock.method.apiKey") },
+        ]
+      }
+      if (props.providerID === "google-vertex") {
+        return [
+          {
+            type: "api",
+            label: language.t("provider.connect.vertex.method.serviceAccount"),
+            prompts: [
+              {
+                type: "text",
+                key: "project",
+                message: language.t("provider.connect.vertex.project.label"),
+                placeholder: language.t("provider.connect.vertex.project.placeholder"),
+              },
+              {
+                type: "text",
+                key: "location",
+                message: language.t("provider.connect.vertex.location.label"),
+                placeholder: language.t("provider.connect.vertex.location.placeholder"),
+              },
+            ],
+          },
+        ]
+      }
+      return [{ type: "api", label: language.t("provider.connect.method.apiKey") }]
+    }
+    const list = provider.authMethods()[props.providerID] ?? fallback()
     if (props.oauthOnly) return list.filter((item) => item.type === "oauth")
     return list
   })
@@ -76,6 +128,16 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     const index = state.methodIndex
     return index === undefined ? undefined : methods()[index]
   })
+  const bedrockKeys = () =>
+    props.providerID === "amazon-bedrock" && method()?.prompts?.some((prompt) => prompt.key === "secretAccessKey")
+  const vertexCredentials = () => props.providerID === "google-vertex" && method()?.type === "api"
+
+  function optional(prompt: Prompt) {
+    if (bedrockKeys() && prompt.key === "sessionToken") return true
+    if (vertexCredentials() && prompt.key === "project") return true
+    if (props.providerID === "snowflake-cortex" && prompt.key === "role") return true
+    return false
+  }
 
   function promptLabel(prompt: Prompt) {
     if (props.providerID === "azure" && prompt.key === "endpointType") {
@@ -126,6 +188,91 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     const hint = optionHint(prompt, option)
     return hint ? `${label} (${hint})` : label
   }
+
+  const PromptField: Component<{
+    prompt: Prompt
+    fields: Record<string, string>
+    setField: (key: string, value: string) => void
+    invalid?: boolean
+    error?: string
+  }> = (props) => {
+    return (
+      <Switch>
+        <Match when={props.prompt.type === "text"}>
+          <TextField
+            type={bedrockKeys() && ["secretAccessKey", "sessionToken"].includes(props.prompt.key) ? "password" : "text"}
+            autocomplete="off"
+            spellcheck={false}
+            label={promptLabel(props.prompt)}
+            placeholder={promptPlaceholder(props.prompt)}
+            value={props.fields[props.prompt.key] ?? ""}
+            onChange={(next) => props.setField(props.prompt.key, next)}
+            validationState={props.invalid ? "invalid" : undefined}
+            error={props.invalid ? props.error : undefined}
+          />
+        </Match>
+        <Match when={props.prompt.type === "select"}>
+          <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
+            <label
+              style={{
+                "font-size": "var(--kilo-font-size-12)",
+                "font-weight": "500",
+                color: "var(--text-weak-base)",
+              }}
+            >
+              {promptLabel(props.prompt)}
+            </label>
+            <Select
+              options={props.prompt.type === "select" ? props.prompt.options : []}
+              current={
+                props.prompt.type === "select"
+                  ? props.prompt.options.find((item) => item.value === props.fields[props.prompt.key])
+                  : undefined
+              }
+              value={(item) => item.value}
+              label={(item) => optionText(props.prompt, item)}
+              onSelect={(item) => props.setField(props.prompt.key, item?.value ?? "")}
+              variant="secondary"
+              size="small"
+              triggerVariant="settings"
+            />
+            <Show when={props.invalid && props.error}>
+              <span style={{ "font-size": "var(--kilo-font-size-12)", color: "var(--vscode-errorForeground)" }}>
+                {props.error}
+              </span>
+            </Show>
+          </div>
+        </Match>
+      </Switch>
+    )
+  }
+
+  const PromptFields: Component<{
+    prompts: Prompt[]
+    fields: Record<string, string>
+    setField: (key: string, value: string) => void
+    invalidKey?: string
+    error?: string
+  }> = (props) => (
+    <>
+      <For each={props.prompts}>
+        {(prompt) => (
+          <PromptField
+            prompt={prompt}
+            fields={props.fields}
+            setField={props.setField}
+            invalid={props.invalidKey === prompt.key}
+            error={props.error}
+          />
+        )}
+      </For>
+      <Show when={props.error && !props.invalidKey}>
+        <div style={{ color: "var(--vscode-errorForeground)", "font-size": "var(--kilo-font-size-13)" }}>
+          {props.error}
+        </div>
+      </Show>
+    </>
+  )
 
   onCleanup(action.dispose)
 
@@ -179,24 +326,23 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     dialog.close()
   }
 
-  function selectMethod(index: number) {
-    const current = methods()[index]
-    action.clear()
+  function authorize(inputs?: Record<string, string>) {
+    const index = state.methodIndex
+    if (index === undefined) return
+
     setState({
-      methodIndex: index,
-      authorization: undefined,
-      phase: current?.type === "oauth" ? "authorizing" : undefined,
+      ...state,
+      phase: "authorizing",
       error: undefined,
       field: undefined,
       failed: undefined,
     })
-    if (current?.type !== "oauth") return
-
     action.send(
       {
         type: "authorizeProviderOAuth",
         providerID: props.providerID,
         method: index,
+        inputs,
       },
       {
         onOAuthReady: (message) => {
@@ -211,6 +357,23 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
         onError: (message) => fail(message.message),
       },
     )
+  }
+
+  function selectMethod(index: number) {
+    const current = methods()[index]
+    action.clear()
+    const needsPrompts = current?.type === "oauth" && (current.prompts?.length ?? 0) > 0
+    setState({
+      methodIndex: index,
+      authorization: undefined,
+      phase: current?.type === "oauth" ? (needsPrompts ? "prompts" : "authorizing") : undefined,
+      error: undefined,
+      field: undefined,
+      failed: undefined,
+    })
+    if (current?.type !== "oauth" || needsPrompts) return
+
+    authorize()
   }
 
   function connect(apiKey: string, metadata?: Record<string, string>) {
@@ -291,6 +454,12 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     const apiKeyOptional = () => isLocalProviderOptionalApiKey(props.providerID)
 
     function apiKeyDescription() {
+      if (bedrockKeys()) {
+        return language.t("provider.connect.bedrock.description")
+      }
+      if (vertexCredentials()) {
+        return language.t("provider.connect.vertex.description")
+      }
       if (props.providerID === ATOMIC_CHAT_PROVIDER_KEY) {
         return language.t("provider.connect.atomicChat.description")
       }
@@ -301,10 +470,22 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     }
 
     function apiKeyLabel() {
+      if (bedrockKeys()) {
+        return language.t("provider.connect.bedrock.accessKeyId.label")
+      }
+      if (vertexCredentials()) {
+        return language.t("provider.connect.vertex.credentials.label")
+      }
       if (apiKeyOptional()) {
         return language.t("provider.connect.apiKey.label.optional", { provider: name() })
       }
       return language.t("provider.connect.apiKey.label", { provider: name() })
+    }
+
+    function apiKeyRequired() {
+      if (bedrockKeys()) return language.t("provider.connect.bedrock.accessKeyId.required")
+      if (vertexCredentials()) return language.t("provider.connect.vertex.credentials.required")
+      return language.t("provider.connect.apiKey.required")
     }
 
     function submit(e: SubmitEvent) {
@@ -312,13 +493,29 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
       const trimmed = value().trim()
       const apiKey = trimmed || (apiKeyOptional() ? LOCAL_PROVIDER_API_KEY_PLACEHOLDER : "")
       if (!apiKey) {
-        setState({ ...state, error: language.t("provider.connect.apiKey.required"), field: "apiKey" })
+        setState({ ...state, error: apiKeyRequired(), field: "apiKey" })
+        return
+      }
+      const serviceAccount = (() => {
+        if (!vertexCredentials()) return undefined
+        try {
+          const parsed = JSON.parse(apiKey) as Record<string, unknown>
+          if (parsed.type !== "service_account") return undefined
+          if (typeof parsed.client_email !== "string" || !parsed.client_email.trim()) return undefined
+          if (typeof parsed.private_key !== "string" || !parsed.private_key.trim()) return undefined
+          return parsed
+        } catch {
+          return undefined
+        }
+      })()
+      if (vertexCredentials() && !serviceAccount) {
+        setState({ ...state, error: language.t("provider.connect.vertex.credentials.invalid"), field: "apiKey" })
         return
       }
       const metadata: Record<string, string> = {}
       for (const prompt of prompts()) {
         const field = (fields[prompt.key] ?? "").trim()
-        if (!field) {
+        if (!field && !optional(prompt)) {
           setState({
             ...state,
             error: language.t("provider.connect.prompt.required", { field: promptLabel(prompt) }),
@@ -326,8 +523,23 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
           })
           return
         }
+        if (!field) continue
         metadata[prompt.key] = field
       }
+      if (
+        vertexCredentials() &&
+        !metadata.project &&
+        !(typeof serviceAccount?.project_id === "string" && serviceAccount.project_id.trim())
+      ) {
+        setState({
+          ...state,
+          error: language.t("provider.connect.vertex.project.required"),
+          field: "project",
+        })
+        return
+      }
+      if (bedrockKeys()) metadata.authType = "accessKey"
+      if (vertexCredentials()) metadata.authType = "serviceAccount"
       connect(apiKey, Object.keys(metadata).length > 0 ? metadata : undefined)
     }
 
@@ -340,72 +552,36 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
         <div class="provider-connect-body">{apiKeyDescription()}</div>
         <TextField
           autofocus
-          type="password"
+          type={vertexCredentials() ? "text" : "password"}
+          multiline={vertexCredentials()}
+          style={{
+            "max-height": vertexCredentials() ? "min(240px, 35vh)" : undefined,
+            "overflow-y": vertexCredentials() ? "auto" : undefined,
+          }}
+          autocomplete="off"
+          spellcheck={false}
           label={apiKeyLabel()}
           placeholder={
-            apiKeyOptional()
-              ? language.t("provider.connect.apiKey.placeholder.optional")
-              : language.t("provider.connect.apiKey.placeholder")
+            bedrockKeys()
+              ? language.t("provider.connect.bedrock.accessKeyId.placeholder")
+              : vertexCredentials()
+                ? language.t("provider.connect.vertex.credentials.placeholder")
+                : apiKeyOptional()
+                  ? language.t("provider.connect.apiKey.placeholder.optional")
+                  : language.t("provider.connect.apiKey.placeholder")
           }
           value={value()}
           onChange={setValue}
           validationState={state.field === "apiKey" ? "invalid" : undefined}
           error={state.field === "apiKey" ? state.error : undefined}
         />
-        <For each={prompts()}>
-          {(prompt) => (
-            <Switch>
-              <Match when={prompt.type === "text"}>
-                <TextField
-                  type="text"
-                  label={promptLabel(prompt)}
-                  placeholder={promptPlaceholder(prompt)}
-                  value={fields[prompt.key] ?? ""}
-                  onChange={(next) => setFields(prompt.key, next)}
-                  validationState={state.field === prompt.key ? "invalid" : undefined}
-                  error={state.field === prompt.key ? state.error : undefined}
-                />
-              </Match>
-              <Match when={prompt.type === "select"}>
-                <div style={{ display: "flex", "flex-direction": "column", gap: "4px" }}>
-                  <label
-                    style={{
-                      "font-size": "var(--kilo-font-size-12)",
-                      "font-weight": "500",
-                      color: "var(--text-weak-base)",
-                    }}
-                  >
-                    {promptLabel(prompt)}
-                  </label>
-                  <Select
-                    options={prompt.type === "select" ? prompt.options : []}
-                    current={
-                      prompt.type === "select"
-                        ? prompt.options.find((item) => item.value === fields[prompt.key])
-                        : undefined
-                    }
-                    value={(item) => item.value}
-                    label={(item) => optionText(prompt, item)}
-                    onSelect={(item) => setFields(prompt.key, item?.value ?? "")}
-                    variant="secondary"
-                    size="small"
-                    triggerVariant="settings"
-                  />
-                  <Show when={state.field === prompt.key && state.error}>
-                    <span style={{ "font-size": "var(--kilo-font-size-12)", color: "var(--vscode-errorForeground)" }}>
-                      {state.error}
-                    </span>
-                  </Show>
-                </div>
-              </Match>
-            </Switch>
-          )}
-        </For>
-        <Show when={state.error && !state.field}>
-          <div style={{ color: "var(--vscode-errorForeground)", "font-size": "var(--kilo-font-size-13)" }}>
-            {state.error}
-          </div>
-        </Show>
+        <PromptFields
+          prompts={prompts()}
+          fields={fields}
+          setField={(key, value) => setFields(key, value)}
+          invalidKey={state.field}
+          error={state.error}
+        />
         <div class="dialog-confirm-actions provider-connect-actions">
           <div class="provider-connect-byok">
             {language.t("provider.connect.kiloGateway.byok.prefix")}
@@ -413,6 +589,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
               href="https://blog.kilo.ai/p/kilo-gateway-now-supports-byok-20-providers"
               onClick={(e) => {
                 e.preventDefault()
+                e.stopPropagation()
                 openExternal("https://blog.kilo.ai/p/kilo-gateway-now-supports-byok-20-providers")
               }}
               class="provider-connect-byok-link"
@@ -462,6 +639,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
             href={state.authorization?.url ?? "#"}
             onClick={(e) => {
               e.preventDefault()
+              e.stopPropagation()
               if (!state.authorization?.url) return
               openExternal(state.authorization.url)
             }}
@@ -492,6 +670,54 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     )
   }
 
+  const OAuthPromptsView: Component = () => {
+    const [fields, setFields] = createStore<Record<string, string>>({})
+    const prompts = createMemo(() => method()?.prompts?.filter((prompt) => visible(prompt, fields)) ?? [])
+
+    function submit(e: SubmitEvent) {
+      e.preventDefault()
+      const inputs: Record<string, string> = {}
+      for (const prompt of prompts()) {
+        const value = (fields[prompt.key] ?? "").trim()
+        if (!value && !optional(prompt)) {
+          setState({
+            ...state,
+            error: language.t("provider.connect.prompt.required", { field: promptLabel(prompt) }),
+            field: prompt.key,
+          })
+          return
+        }
+        if (!value) continue
+        inputs[prompt.key] = value
+      }
+      authorize(Object.keys(inputs).length > 0 ? inputs : undefined)
+    }
+
+    return (
+      <form
+        class="dialog-confirm-body"
+        style={{ display: "flex", "flex-direction": "column", gap: "16px" }}
+        onSubmit={submit}
+      >
+        <PromptFields
+          prompts={prompts()}
+          fields={fields}
+          setField={(key, value) => setFields(key, value)}
+          invalidKey={state.field}
+          error={state.error}
+        />
+        <div class="dialog-confirm-actions">
+          <Button variant="ghost" size="large" type="button" onClick={back}>
+            {language.t("common.goBack")}
+          </Button>
+          <Button variant="primary" size="large" type="submit">
+            {language.t("common.submit")}
+          </Button>
+        </div>
+      </form>
+    )
+  }
+
   const OAuthAutoView: Component = () => {
     const code = createMemo(() => {
       const instructions = state.authorization?.instructions
@@ -513,6 +739,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
             href={state.authorization?.url ?? "#"}
             onClick={(e) => {
               e.preventDefault()
+              e.stopPropagation()
               if (!state.authorization?.url) return
               openExternal(state.authorization.url)
             }}
@@ -549,6 +776,9 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
       <Switch>
         <Match when={state.methodIndex === undefined}>
           <MethodSelection />
+        </Match>
+        <Match when={state.phase === "prompts"}>
+          <OAuthPromptsView />
         </Match>
         <Match when={state.phase === "authorizing"}>
           <div class="dialog-confirm-body">

@@ -1,7 +1,16 @@
 package ai.kilocode.client.settings
 
+import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.settings.profile.UserProfileConfigurable
+import ai.kilocode.client.settings.context.ContextConfigurable
+import ai.kilocode.client.settings.integrations.IntegrationsConfigurable
 import ai.kilocode.client.settings.models.ModelsConfigurable
+import ai.kilocode.client.settings.agents.AgentBehaviorConfigurable
+import ai.kilocode.client.settings.autoapprove.AutoApproveConfigurable
+import ai.kilocode.client.settings.checkpoints.CheckpointsConfigurable
+import ai.kilocode.client.settings.providers.ProvidersConfigurable
+import ai.kilocode.client.settings.rules.RulesConfigurable
+import ai.kilocode.client.settings.transcript.TranscriptConfigurable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.options.SearchableConfigurable
@@ -25,6 +34,41 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
 
     fun `test child models id matches xml registration`() {
         assertEquals("ai.kilocode.jetbrains.settings.models", ModelsConfigurable.ID)
+    }
+
+    fun `test child context id matches xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.context", ContextConfigurable.ID)
+    }
+
+    fun `test child checkpoints id matches xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.checkpoints", CheckpointsConfigurable.ID)
+    }
+
+    fun `test child integrations id matches xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.integrations", IntegrationsConfigurable.ID)
+    }
+
+    fun `test child transcript id matches xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.transcript", TranscriptConfigurable.ID)
+    }
+
+    fun `test child advanced id matches xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.advanced", AdvancedConfigurable.ID)
+    }
+
+    fun `test child provider and behavior ids match xml registration`() {
+        assertEquals("ai.kilocode.jetbrains.settings.providers", ProvidersConfigurable.ID)
+        assertEquals("ai.kilocode.jetbrains.settings.agentBehavior", AgentBehaviorConfigurable.ID)
+        assertEquals("ai.kilocode.jetbrains.settings.agentBehavior.rules", RulesConfigurable.ID)
+    }
+
+    fun `test auto approve opts out of platform scrollpane`() {
+        // Auto-Approve renders its own fixed search field and scrollable body, so it must not be
+        // wrapped in the platform configurable scrollpane.
+        val auto: Configurable = AutoApproveConfigurable()
+        val context: Configurable = ContextConfigurable()
+        assertTrue(auto is Configurable.NoScroll)
+        assertTrue(context is Configurable.NoScroll)
     }
 
     fun `test root implements SearchableConfigurable but not Parent`() {
@@ -72,12 +116,24 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
         }
     }
 
-    fun `test profile link appears before models link`() {
+    fun `test createComponent contains Context link`() {
+        val cfg = KiloSettingsConfigurable()
+        edt {
+            val panel = cfg.createComponent()
+            val links = links(panel as Container)
+            assertTrue("expected a link labeled 'Context'", links.any { it.text == "Context" })
+        }
+    }
+
+    fun `test createComponent contains settings links in order`() {
         val cfg = KiloSettingsConfigurable()
         edt {
             val panel = cfg.createComponent()
             val labels = links(panel as Container).map { it.text }
-            assertTrue("User Profile should appear before Models", labels.indexOf("User Profile") < labels.indexOf("Models"))
+            assertEquals(
+                listOf("User Profile", "Models", "Providers", "Marketplace", "Agent Behavior", "Auto-Approve", "Transcript", "Context", "Checkpoints", "Integrations", "Advanced"),
+                labels,
+            )
         }
     }
 
@@ -108,12 +164,7 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
 
     // -- helpers --
 
-    private fun <T> edt(block: () -> T): T {
-        var result: T? = null
-        ApplicationManager.getApplication().invokeAndWait { result = block() }
-        @Suppress("UNCHECKED_CAST")
-        return result as T
-    }
+    private fun <T> edt(block: () -> T): T = edtWait(block)
 
     private fun links(root: Container): List<ActionLink> = buildList {
         for (comp in root.components) {

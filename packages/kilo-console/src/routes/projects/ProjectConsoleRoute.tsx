@@ -1,14 +1,25 @@
 import { A, useLocation, useParams } from "@solidjs/router"
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js"
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  lazy,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+  Suspense,
+} from "solid-js"
 import { Badge } from "@kilocode/kilo-web-ui/badge"
 import { Button } from "@kilocode/kilo-web-ui/button"
 import { Card } from "@kilocode/kilo-web-ui/card"
 import { Icon } from "@kilocode/kilo-web-ui/icon"
 import { ResizeHandle } from "@kilocode/kilo-web-ui/resize-handle"
 import { Spinner } from "@kilocode/kilo-web-ui/spinner"
-import { File } from "@kilocode/kilo-web-ui/file"
 import { FileComponentProvider } from "@kilocode/kilo-web-ui/context/file"
-import { SessionReview, type SessionReviewDiffStyle } from "@kilocode/kilo-web-ui/session-review"
+import type { SessionReviewDiffStyle } from "@kilocode/kilo-web-ui/session-review"
 import { ConfirmDialog } from "../../components/ConfirmDialog"
 import { LoadingScreen } from "../../components/LoadingScreen"
 import { PromptDialog } from "../../components/PromptDialog"
@@ -26,6 +37,7 @@ import {
   removeProjectWorktree,
   resetProjectWorktree,
   resolveServer,
+  running,
   saveCached,
   subscribeProjectEvents,
   viewProjectSessions,
@@ -36,11 +48,7 @@ import {
   type Query,
 } from "../../client"
 import { clean, errMsg, friendly } from "../../shared/utils"
-import {
-  markUnread as storeMarkUnread,
-  clearUnread as storeClearUnread,
-  sessionHasUnread,
-} from "../../shared/terminal-status"
+import { markUnread as storeMarkUnread, clearUnread as storeClearUnread } from "../../shared/terminal-status"
 import {
   DEFAULT_CONSOLE_DIFF_STYLE,
   DEFAULT_CONTEXT_SIDEBAR_WIDTH,
@@ -49,7 +57,17 @@ import {
   normalizeConsoleDiffStyle,
   normalizeContextSidebarWidth,
 } from "../config/state/console"
-import { GhosttyTerminal } from "./terminal/GhosttyTerminal"
+import { sender } from "./project-console-presence-sender"
+import "../../styles/project-console.css"
+import "../../styles/dialogs.css"
+
+const GhosttyTerminal = lazy(() =>
+  import("./terminal/GhosttyTerminal").then((mod) => ({ default: mod.GhosttyTerminal })),
+)
+const SessionReview = lazy(() =>
+  import("@kilocode/kilo-web-ui/session-review").then((mod) => ({ default: mod.SessionReview })),
+)
+const File = lazy(() => import("@kilocode/kilo-web-ui/file").then((mod) => ({ default: mod.File })))
 
 const ui = new Set(["3017", "3018"])
 
@@ -147,6 +165,7 @@ function terminalKey(url: string, item: ProjectTerminalItem) {
 export function ProjectConsoleRoute() {
   const loc = useLocation()
   const params = useParams()
+  const viewerId = crypto.randomUUID()
   const search = createMemo(() => new URLSearchParams(loc.search))
   const fallback = () => base(search())
   const [url, setUrl] = createSignal(fallback())
@@ -296,7 +315,7 @@ export function ProjectConsoleRoute() {
 
   function terminalState(item: ProjectTerminalItem) {
     if (item.attention) return "attention"
-    if (item.sessionStatus && item.sessionStatus.type !== "idle") return "busy"
+    if (item.sessionStatus && running(item.sessionStatus)) return "busy"
     const id = sessionID(item)
     if (id && unread().has(id)) return "unread"
     return "idle"
@@ -660,19 +679,37 @@ export function ProjectConsoleRoute() {
     if (item) clearUnread(item)
   })
 
-  createEffect(() => {
+  let lastInput: { url: string; dir: string } | undefined
+  const queue = sender((err) => console.warn(`Viewed sessions: ${errMsg(err)}`))
+
+  function sendSnapshot(force = false) {
     const base = query()
     const data = snap()
     if (!base || !data) return
-    const focused = activeSessionID()
-    const open = terminals().flatMap((item) => {
+    const selected = activeSessionID()
+    const ids = new Set<string>()
+    if (selected) ids.add(selected)
+    for (const item of terminals()) {
       const id = sessionID(item)
-      return id ? [id] : []
-    })
-    void viewProjectSessions({ url: base.url, dir: data.project.worktree }, focused ? [focused] : [], open).catch(
-      () => {},
+      if (id) ids.add(id)
+    }
+    const input = { url: base.url, dir: data.project.worktree }
+    const key = input.url + "|" + input.dir + "|" + [...ids].sort().join(",")
+    lastInput = input
+    queue.push(
+      {
+        key,
+        run: async () => {
+          await viewProjectSessions(input, { id: viewerId, active: false }, [...ids], [])
+        },
+      },
+      force,
     )
-  })
+  }
+
+  createEffect(() => sendSnapshot())
+
+  const checkin = window.setInterval(() => sendSnapshot(true), 60_000)
 
   createEffect(() => {
     const base = query()
@@ -704,6 +741,19 @@ export function ProjectConsoleRoute() {
   onCleanup(() => {
     if (events.timer) window.clearTimeout(events.timer)
     if (resize.timer) window.clearTimeout(resize.timer)
+    window.clearInterval(checkin)
+    if (lastInput) {
+      const input = lastInput
+      queue.push(
+        {
+          key: input.url + "|" + input.dir + "|",
+          run: async () => {
+            await viewProjectSessions(input, { id: viewerId, active: false }, [], [])
+          },
+        },
+        true,
+      )
+    }
   })
 
   createEffect(() => {
@@ -912,15 +962,17 @@ export function ProjectConsoleRoute() {
                       classList={{ active: terminal() === key }}
                       aria-hidden={terminal() !== key}
                     >
-                      <GhosttyTerminal
-                        query={target()}
-                        pty={item.id}
-                        active={terminal() === key}
-                        onExit={() => {
-                          const next = pty()
-                          if (next) dropTerminal(next.id)
-                        }}
-                      />
+                      <Suspense fallback={<span class="project-terminal-loading">Starting terminal...</span>}>
+                        <GhosttyTerminal
+                          query={target()}
+                          pty={item.id}
+                          active={terminal() === key}
+                          onExit={() => {
+                            const next = pty()
+                            if (next) dropTerminal(next.id)
+                          }}
+                        />
+                      </Suspense>
                     </div>
                   )
                 }}
@@ -980,17 +1032,19 @@ export function ProjectConsoleRoute() {
                 </div>
               }
             >
-              <FileComponentProvider component={File}>
-                <SessionReview
-                  diffs={reviewDiffs()}
-                  title={<span>Changes</span>}
-                  diffStyle={diffStyle()}
-                  onDiffStyleChange={changeDiffStyle}
-                  open={openFiles()}
-                  onOpenChange={openReviewFiles}
-                  empty={<div class="project-review-empty">No changes detected.</div>}
-                />
-              </FileComponentProvider>
+              <Suspense fallback={<div class="project-review-state">Loading changes...</div>}>
+                <FileComponentProvider component={File}>
+                  <SessionReview
+                    diffs={reviewDiffs()}
+                    title={<span>Changes</span>}
+                    diffStyle={diffStyle()}
+                    onDiffStyleChange={changeDiffStyle}
+                    open={openFiles()}
+                    onOpenChange={openReviewFiles}
+                    empty={<div class="project-review-empty">No changes detected.</div>}
+                  />
+                </FileComponentProvider>
+              </Suspense>
             </Show>
           </Show>
         </div>

@@ -30,7 +30,11 @@ export const CodeWithAiNav: NavSection[] = [
       },
       { href: "/code-with-ai/platforms/cloud-agent", children: "Cloud Agent" },
       { href: "/code-with-ai/platforms/mobile", children: "Mobile Apps" },
-      { href: "/code-with-ai/app-builder", children: "App Builder" },
+    ],
+  },
+  {
+    title: "Features",
+    links: [
       {
         href: "/code-with-ai/gastown",
         children: "Gas Town by Kilo",
@@ -60,6 +64,10 @@ export const CodeWithAiNav: NavSection[] = [
         children: "Chat Interface",
       },
       {
+        href: "/code-with-ai/agents/session-history",
+        children: "Session History and Search",
+      },
+      {
         href: "/code-with-ai/agents/context-mentions",
         children: "Context & Mentions",
       },
@@ -80,16 +88,18 @@ export const CodeWithAiNav: NavSection[] = [
         href: "/code-with-ai/agents/using-agents",
         children: "Agents",
         subLinks: [
-          { href: "/code-with-ai/agents/using-agents", children: "Using Agents" },
           {
             href: "/code-with-ai/agents/orchestrator-mode",
             children: "Orchestrator Mode",
           },
         ],
       },
+      {
+        href: "/code-with-ai/agents/goals",
+        children: "Session Goals",
+      },
     ],
   },
-
   {
     title: "Productivity Tools",
     links: [
@@ -113,12 +123,7 @@ export const CodeWithAiNav: NavSection[] = [
         href: "/code-with-ai/features/browser-use",
         children: "Agent Behavior",
         subLinks: [
-          { href: "/code-with-ai/features/browser-use", children: "Browser Use" },
-          { href: "/code-with-ai/features/fast-edits", children: "Fast Edits" },
-          {
-            href: "/code-with-ai/features/task-todo-list",
-            children: "Task Todo List",
-          },
+          { href: "/code-with-ai/features/task-todo-list", children: "Task Todo List" },
           { href: "/code-with-ai/features/checkpoints", children: "Checkpoints" },
           { href: "/code-with-ai/features/file-encoding", children: "File Encoding" },
         ],

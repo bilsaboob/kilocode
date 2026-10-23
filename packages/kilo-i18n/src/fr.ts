@@ -1,12 +1,5 @@
 export const dict = {
   // Kilo Gateway provider translations
-  "provider.connect.kiloGateway.line1":
-    "Kilo Gateway vous donne accès à une sélection de modèles fiables et optimisés pour les agents de codage.",
-  "provider.connect.kiloGateway.line2":
-    "Avec une seule clé API, vous aurez accès à des modèles tels que Claude, GPT, Gemini, GLM et plus encore.",
-  "provider.connect.kiloGateway.visit.prefix": "Visitez ",
-  "provider.connect.kiloGateway.visit.link": "kilo.ai",
-  "provider.connect.kiloGateway.visit.suffix": " pour obtenir votre clé API.",
   "provider.connect.kiloGateway.byok.prefix": "Pour plus de statistiques d'utilisation, utilisez ",
   "provider.connect.kiloGateway.byok.link": "BYOK via Kilo's Gateway",
   "provider.connect.kiloGateway.byok.suffix": ".",
@@ -24,14 +17,9 @@ export const dict = {
   "settings.providers.note.vercel": "Accès unifié aux modèles IA avec routage intelligent",
 
   // Reasoning block label
-  "ui.permission.run": "Exécuter",
   "ui.reasoning.label": "Raisonnement",
 
   // Marketplace
-  "marketplace.tab.skills": "Skills",
-  "marketplace.tab.mcpServers": "Serveurs MCP",
-  "marketplace.category.all": "Tout",
-  "marketplace.placeholder": "À implémenter",
   "marketplace.card.installed": "Installé",
   "marketplace.card.install": "Installer",
   "marketplace.card.remove": "Supprimer",
@@ -42,6 +30,31 @@ export const dict = {
   "marketplace.install.scope": "Portée",
   "marketplace.install.scope.project": "Projet",
   "marketplace.install.scope.global": "Global",
+  "marketplace.install.scope.project.description":
+    "Uniquement ce projet. Les fichiers installés peuvent être ajoutés au contrôle de version et partagés avec votre équipe.",
+  "marketplace.install.scope.global.description":
+    "Tous les projets sur cette machine. Enregistré dans votre configuration utilisateur.",
+  "marketplace.install.destination": "Destination de l'installation",
+  "marketplace.install.includedSkills": "Compétences incluses",
+  "marketplace.install.about.mcp":
+    "Un serveur MCP fournit à Kilo des outils supplémentaires pour interagir avec des services externes ou des programmes locaux.",
+  "marketplace.install.about.agent":
+    "Un agent ajoute un rôle réutilisable avec ses propres instructions et autorisations.",
+  "marketplace.install.about.skill":
+    "Une compétence ajoute des instructions et des ressources propres à une tâche que Kilo peut charger en cas de besoin.",
+  "marketplace.install.mcp.warning":
+    "Les serveurs MCP peuvent exécuter des commandes locales ou se connecter à des services externes. Kilo demandera votre autorisation avant d'utiliser leurs outils, sauf si vos autorisations le permettent automatiquement.",
+  "marketplace.install.project.warning":
+    "Les fichiers du projet peuvent être ajoutés au contrôle de version. N'y stockez pas de secrets, sauf si la configuration fait référence à une variable d'environnement.",
+  "marketplace.install.learnMore": "Découvrir le fonctionnement des installations depuis le Marketplace",
+  "marketplace.install.learnMcp": "En savoir plus sur MCP",
+  "marketplace.install.about.plugin":
+    "Un plugin ajoute des outils et des intégrations personnalisés à Kilo. Les plugins s'exécutent avec toutes les autorisations.",
+  "marketplace.install.plugin.warning":
+    "Les plugins exécutent du code avec toutes les autorisations. Ils peuvent lire et modifier vos fichiers, exécuter des commandes et accéder à vos identifiants et à votre réseau. Installez uniquement des plugins auxquels vous faites confiance.",
+  "marketplace.intro":
+    "Installez des agents, des compétences, des outils MCP et des plugins réutilisables pour un projet ou pour tous vos projets.",
+  "marketplace.intro.learnMore": "À propos du Marketplace",
   "marketplace.install.prerequisites": "Prérequis",
   "marketplace.install.installing": "Installation en cours...",
   "marketplace.install.cancel": "Annuler",
@@ -49,27 +62,36 @@ export const dict = {
   "marketplace.install.failed": "L'installation a échoué",
   "marketplace.install.done": "Terminé",
   "marketplace.install.close": "Fermer",
+  "marketplace.install.mcp.signIn.message": "{{name}} est installé, mais nécessite une connexion avant que ses outils puissent être utilisés.",
+  "marketplace.install.mcp.signIn.button": "Se connecter",
+  "marketplace.install.mcp.signIn.waiting": "En attente de connexion via le navigateur…",
+  "marketplace.install.mcp.signIn.cancel": "Annuler",
+  "marketplace.install.mcp.signIn.skip": "Plus tard",
+  "marketplace.install.mcp.signIn.success": "Connecté à {{name}}.",
+  "marketplace.install.mcp.signIn.failed": "La connexion à {{name}} a échoué.",
   "marketplace.remove.title": "Supprimer {{name}} ?",
   "marketplace.remove.confirm":
     "Êtes-vous sûr de vouloir supprimer ce {{type}} ? Cela le supprimera de votre configuration {{scope}}.",
   "marketplace.remove.cancel": "Annuler",
+  "marketplace.remove.mcp.skills":
+    "Cela supprime aussi les compétences associées qui appartiennent à cette installation. Les compétences installées indépendamment sont conservées.",
   "marketplace.remove.confirm.button": "Supprimer",
-  "marketplace.tab.mcp": "MCP",
-  "marketplace.tab.agents": "Agents",
   "marketplace.search": "Rechercher...",
   "marketplace.filter.all": "Tous les éléments",
   "marketplace.filter.notInstalled": "Non installé",
+  "marketplace.filter.relevant": "Pertinents pour mon espace de travail",
   "marketplace.empty": "Aucun élément trouvé",
+  "marketplace.empty.relevant": "Aucun élément pertinent du marketplace trouvé pour cet espace de travail.",
   "marketplace.badge.mcpServer": "Serveur MCP",
-  "marketplace.badge.mode": "Mode",
+  "marketplace.badge.skills": "Inclut des compétences",
   "marketplace.card.by": "par {{author}}",
   "marketplace.install.method": "Méthode d'installation",
   "marketplace.install.parameters": "Paramètres",
   "marketplace.install.optional": "(facultatif)",
-  "marketplace.install.required": "{{name}} est requis",
   "marketplace.scope.project": "projet",
   "marketplace.scope.global": "global",
   "marketplace.remove.type.mcp": "serveur MCP",
+  "marketplace.remove.type.plugin": "plugin",
   "marketplace.remove.type.skill": "compétence",
   "marketplace.remove.type.agent": "agent",
   "marketplace.remove.failed": "Échec de la suppression de {{name}}",
@@ -80,7 +102,7 @@ export const dict = {
   "marketplace.warning.busyMany": "Plusieurs sessions sont en cours et seront interrompues",
   "marketplace.warning.installAnyway": "Installer quand même",
   "marketplace.warning.cancel": "Annuler",
-  "marketplace.contribute.prompt": "Il manque une compétence, un agent ou un serveur MCP ?",
+  "marketplace.contribute.prompt": "Il manque une compétence, un agent, un serveur MCP ou un plugin ?",
   "marketplace.contribute.cta": "Contribuer sur GitHub",
   "marketplace.migration.notice":
     "Les modes ont été remplacés par des agents. Si vous avez précédemment installé des modes depuis le marketplace, veuillez les supprimer et les réinstaller en tant qu'agents pour migrer vers le nouveau format.",
@@ -92,6 +114,8 @@ export const dict = {
   "plan.followup.answer.newSession.description": "Implémenter dans une nouvelle session avec un contexte vierge",
   "plan.followup.answer.continue": "Continuer ici",
   "plan.followup.answer.continue.description": "Implémenter le plan dans cette session",
+  "plan.followup.answer.keepRefining": "Continuer à affiner",
+  "plan.followup.answer.keepRefining.description": "Continuer à planifier sans implémenter pour l'instant",
 
   // Slow-repo snapshot prompt
   "snapshot.slowRepo.header": "Instantané lent",
@@ -106,8 +130,6 @@ export const dict = {
 
   // Edit-tool header and shell-tool section labels
   "ui.messagePart.openInDiffViewer": "Ouvrir dans le visualiseur de différences",
-  "ui.messagePart.shell.command": "Commande",
-  "ui.messagePart.shell.output": "Sortie",
   "ui.messagePart.openInEditor": "Ouvrir dans l'éditeur",
 
   // Message feedback (thumbs up/down per assistant response)

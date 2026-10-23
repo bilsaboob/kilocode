@@ -10,10 +10,13 @@ import type { Meta, StoryObj } from "storybook-solidjs-vite"
 import { StoryProviders } from "./StoryProviders"
 import { MarketplaceListView } from "../components/marketplace/MarketplaceListView"
 import { ItemCard } from "../components/marketplace/ItemCard"
+import { InstallModal } from "../components/marketplace/InstallModal"
+import { MarketplaceSessionProvider } from "../context/marketplace-session"
 import type {
   SkillMarketplaceItem,
   McpMarketplaceItem,
   AgentMarketplaceItem,
+  PluginMarketplaceItem,
   MarketplaceInstalledMetadata,
 } from "../types/marketplace"
 import "../components/marketplace/marketplace.css"
@@ -114,6 +117,7 @@ const MOCK_MCPS: McpMarketplaceItem[] = [
     content:
       '{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" } }',
     parameters: [{ name: "GitHub Token", key: "GITHUB_TOKEN", placeholder: "ghp_xxxxxxxxxxxx" }],
+    suggest_for: { vscode_extension: ["github.vscode-pull-request-github"] },
     author: "Anthropic",
     category: "development",
   },
@@ -197,6 +201,7 @@ const MOCK_AGENTS: AgentMarketplaceItem[] = [
     name: "Architect",
     description:
       "High-level system design and planning. Focuses on architecture decisions, component boundaries, and technical specifications without writing implementation code.",
+    suggest_for: { filename: ["*.architecture.md"] },
     content: {
       mode: "primary",
       description: "Stress-test technical designs and produce implementation-ready plans",
@@ -269,7 +274,24 @@ const MOCK_AGENTS: AgentMarketplaceItem[] = [
   },
 ]
 
+const MOCK_PLUGINS: PluginMarketplaceItem[] = [
+  {
+    type: "plugin",
+    id: "@acme/kilo-deploy",
+    name: "Deploy Toolkit",
+    description: "Adds deployment commands and cloud provider integrations to Kilo.",
+    url: "https://github.com/acme/kilo-deploy",
+    content: "@acme/kilo-deploy",
+    author: "Acme",
+    category: "devops",
+  },
+]
+
 const EMPTY_METADATA: MarketplaceInstalledMetadata = { project: {}, global: {} }
+const RELEVANCE = {
+  "agent:architect": { filename: ["*.architecture.md"] },
+  "mcp:github-mcp": { vscodeExtension: ["github.vscode-pull-request-github"] },
+}
 
 const PARTIAL_INSTALLED_SKILLS: MarketplaceInstalledMetadata = {
   project: { "skill:nextjs-developer": { type: "skill" } },
@@ -306,11 +328,35 @@ export const MixedListWithItems: Story = {
     <StoryProviders>
       <div style={{ "max-height": "700px", overflow: "auto", padding: "12px" }}>
         <MarketplaceListView
-          items={[...MOCK_AGENTS, ...MOCK_MCPS, ...MOCK_SKILLS]}
+          items={[...MOCK_AGENTS, ...MOCK_MCPS, ...MOCK_SKILLS, ...MOCK_PLUGINS]}
           metadata={PARTIAL_INSTALLED_MIXED}
+          relevance={RELEVANCE}
           fetching={false}
           searchPlaceholder="Search marketplace..."
           emptyMessage="No items found"
+          relevantEmptyMessage="No relevant marketplace items found for this workspace."
+          onInstall={noop}
+          onRemove={noop}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+export const RelevantItems: Story = {
+  name: "Mixed list — relevant to workspace",
+  render: () => (
+    <StoryProviders>
+      <div style={{ "max-height": "700px", overflow: "auto", padding: "12px" }}>
+        <MarketplaceListView
+          items={[...MOCK_AGENTS, ...MOCK_MCPS, ...MOCK_SKILLS, ...MOCK_PLUGINS]}
+          metadata={PARTIAL_INSTALLED_MIXED}
+          relevance={RELEVANCE}
+          fetching={false}
+          searchPlaceholder="Search marketplace..."
+          emptyMessage="No items found"
+          relevantEmptyMessage="No relevant marketplace items found for this workspace."
+          initialRelevant
           onInstall={noop}
           onRemove={noop}
         />
@@ -327,9 +373,11 @@ export const EmptyList: Story = {
         <MarketplaceListView
           items={[]}
           metadata={EMPTY_METADATA}
+          relevance={{}}
           fetching={false}
           searchPlaceholder="Search marketplace..."
           emptyMessage="No items found"
+          relevantEmptyMessage="No relevant marketplace items found for this workspace."
           onInstall={noop}
           onRemove={noop}
         />
@@ -412,6 +460,19 @@ export const InstalledMcpCard: Story = {
   ),
 }
 
+export const InstallMcpModal: Story = {
+  name: "InstallModal — MCP explanation and destination",
+  render: () => (
+    <StoryProviders>
+      <MarketplaceSessionProvider>
+        <div style={{ "max-height": "700px", overflow: "auto", padding: "12px" }}>
+          <InstallModal item={MOCK_MCPS[0]} onClose={noop} onInstallResult={noop} />
+        </div>
+      </MarketplaceSessionProvider>
+    </StoryProviders>
+  ),
+}
+
 // ---------------------------------------------------------------------------
 // Mode Stories
 // ---------------------------------------------------------------------------
@@ -434,6 +495,36 @@ export const InstalledAgentCard: Story = {
       <div style={{ width: "420px", padding: "12px" }}>
         <ItemCard item={MOCK_AGENTS[0]} metadata={PARTIAL_INSTALLED_AGENTS} onInstall={noop} onRemove={noop} />
       </div>
+    </StoryProviders>
+  ),
+}
+
+export const SinglePluginCard: Story = {
+  name: "ItemCard — single plugin not installed",
+  render: () => (
+    <StoryProviders>
+      <div style={{ width: "420px", padding: "12px" }}>
+        <ItemCard
+          item={MOCK_PLUGINS[0]}
+          metadata={EMPTY_METADATA}
+          linkUrl={MOCK_PLUGINS[0].url}
+          onInstall={noop}
+          onRemove={noop}
+        />
+      </div>
+    </StoryProviders>
+  ),
+}
+
+export const InstallPluginModal: Story = {
+  name: "InstallModal — plugin permission warning and destination",
+  render: () => (
+    <StoryProviders>
+      <MarketplaceSessionProvider>
+        <div style={{ "max-height": "700px", overflow: "auto", padding: "12px" }}>
+          <InstallModal item={MOCK_PLUGINS[0]} onClose={noop} onInstallResult={noop} />
+        </div>
+      </MarketplaceSessionProvider>
     </StoryProviders>
   ),
 }

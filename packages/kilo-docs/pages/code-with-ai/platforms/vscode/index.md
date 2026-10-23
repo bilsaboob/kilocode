@@ -5,10 +5,7 @@ description: "Using Kilo Code in Visual Studio Code"
 
 # Kilo Code for VS Code
 
-Kilo Code is available as two VS Code extensions: the **VSCode (Legacy)** extension and the current **VSCode** version built on Kilo's shared agent runtime.
-
-{% tabs %}
-{% tab label="VSCode" %}
+The Kilo Code VS Code extension uses the shared Kilo agent runtime while integrating chat, agents, and automation into the editor.
 
 ## Installation
 
@@ -32,14 +29,56 @@ Key features include:
 - **[Workflows](/docs/customize/workflows)** — Repeatable prompt templates as `.md` files
 - **[Skills](/docs/customize/skills)** — Load specialized domain knowledge from SKILL.md files
 - **[Custom Subagents](/docs/customize/custom-subagents)** — Define specialized sub-agents for the `task` tool
+- **Charts** — Ask for a chart or plot and get an inline data visualization in the chat
 - **Open in Tab** — Pop the chat out into a full editor tab
+- **[Notifications](/docs/getting-started/settings/notifications)** - Choose sounds, VS Code alerts, or OS notifications when a session needs attention
+- **[Keep Awake](/docs/getting-started/settings/keep-awake)** - Optionally prevent system sleep while agents work in a local VS Code window
 - **Transcript export:** Save complete local session transcripts as Markdown files
 - **Sub-Agent Viewer** — Read-only panels for viewing child agent sessions
 - **Legacy Migration** — Automatic migration wizard for VSCode extension settings
 
+## Background agents
+
+When Kilo starts an agent in the background, a collapsible status strip appears in the chat header. The strip stays visible while the transcript scrolls, so you can check background work without searching the conversation. Click the strip to expand it and see each agent.
+
+Each agent shows one of these states:
+
+| State | Meaning |
+|---|---|
+| **Running** | The agent is still working. |
+| **Done** | The agent completed successfully. |
+| **Cancelled** | The agent was stopped before it completed. |
+| **Error** | The agent stopped because it encountered an error. |
+
+An agent can also show **Needs input** when it is waiting for a permission decision or an answer to a question. Open the agent row to inspect its read-only transcript and handle the request in the child-agent view. In the sidebar and Kilo tab, the transcript opens in a read-only editor tab. In Agent Manager, it opens in the right-hand inspector.
+
+Use these controls in the background-agent strip:
+
+- **Stop** cancels a running agent and its child session.
+- **Stop all (N)** cancels every running background agent for the current session without stopping the main session.
+- **Dismiss** hides one finished agent from the strip. It does not delete the transcript or the agent record.
+- **Clear finished** hides all agents that are no longer running.
+- **Continue in background** appears when a foreground subagent is running. It detaches that work so the parent session can continue while the subagent runs in the background.
+
+Stopping the main session with **Stop** or `Esc` ends its current response but leaves background agents running. Use **Stop all (N)** or an individual agent's **Stop** to cancel background work. Completed background results are available when you send the next message or use **Continue**.
+
+## Follow-up messages
+
+Send a message while Kilo is working to queue it for processing in order. To revise a queued message, clear the prompt input and click the message's edit icon. This removes it from the queue and restores its text, images, and file references to the input. Sending it again adds it to the end of the queue.
+
+After stopping a response, leave the input empty and click **Continue** to resume the interrupted turn with its original model and agent, without adding another user message. Continue starts a new model request; it does not undo tool actions already performed and is not available for completed responses.
+
+## Multi-root workspaces
+
+Kilo chat uses only the first folder in your VS Code workspace. When a window has more than one folder, the empty chat shows a dismissible hint naming the folder that chat uses, so a multi-root Explorer does not suggest the other folders are in scope. Dismissing the hint is remembered until the first folder changes. To work in a different folder, open it in its own VS Code window or add it as a project in [Agent Manager](/docs/automate/agent-manager-projects). Explicit project hosts, including Agent Manager, do not show the hint.
+
 ## Shared Settings
 
 Settings apply across extension surfaces, including the sidebar and Agent Manager. The standalone CLI uses the same `~/.config/kilo/kilo.jsonc` (global) and `./kilo.jsonc` (project) files when used directly.
+
+## Interface Language
+
+The extension UI follows VS Code's display language by default. Override it with the `kilo-code.new.language` setting (for example `en`, `de`, `ja`, or `fa`). Right-to-left languages such as Arabic and Persian switch the layout direction automatically.
 
 ## Proxy and Certificate Troubleshooting
 
@@ -63,26 +102,3 @@ Example user or workspace settings:
   "kilo-code.new.extraCaCerts": "/absolute/path/to/corporate-ca.pem"
 }
 ```
-
-{% /tab %}
-{% tab label="VSCode (Legacy)" %}
-
-## Installation
-
-{% partial file="install-vscode.md" /%}
-
-## Key Features
-
-- **Sidebar chat** — AI-powered chat panel in the VS Code activity bar
-- **[Autocomplete](/docs/code-with-ai/features/autocomplete)** — Inline code completions as you type
-- **[Code Actions](/docs/code-with-ai/features/code-actions)** — Explain, fix, and improve code from the editor context menu
-- **[Agents](/docs/code-with-ai/agents/using-agents)** — Code, Ask, Architect, Debug, Orchestrator, and Review modes
-- **[Custom Modes](/docs/customize/custom-modes)** — Define custom modes with `.kilocodemodes` YAML files
-- **[MCP](/docs/automate/mcp/overview)** — Connect to MCP servers for extended capabilities
-- **[Agent Manager](/docs/automate/agent-manager)** — Multi-session orchestration with git worktree isolation
-- **[Git Commit Generation](/docs/code-with-ai/features/git-commit-generation)** — AI-powered commit messages from the Source Control panel
-- **[Context Mentions](/docs/code-with-ai/agents/context-mentions)** — Reference files, URLs, diagnostics, and git changes with `@`
-- **[Checkpoints](/docs/code-with-ai/features/checkpoints)** — Git-based snapshots for undo/redo
-
-{% /tab %}
-{% /tabs %}

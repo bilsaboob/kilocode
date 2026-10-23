@@ -1,15 +1,18 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Context, Option, Schema } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
+import * as Invalidation from "../kilocode/mcp/invalidation" // kilocode_change
 
 export const Tokens = Schema.Struct({
   accessToken: Schema.mutableKey(Schema.String),
   refreshToken: Schema.mutableKey(Schema.optional(Schema.String)),
   expiresAt: Schema.mutableKey(Schema.optional(Schema.Number)),
   scope: Schema.mutableKey(Schema.optional(Schema.String)),
+  issuer: Schema.mutableKey(Schema.optional(Schema.String)), // kilocode_change - authorization server the MCP SDK bound these to
 })
 export type Tokens = Schema.Schema.Type<typeof Tokens>
 
@@ -18,6 +21,7 @@ export const ClientInfo = Schema.Struct({
   clientSecret: Schema.mutableKey(Schema.optional(Schema.String)),
   clientIdIssuedAt: Schema.mutableKey(Schema.optional(Schema.Number)),
   clientSecretExpiresAt: Schema.mutableKey(Schema.optional(Schema.Number)),
+  issuer: Schema.mutableKey(Schema.optional(Schema.String)), // kilocode_change - authorization server the MCP SDK bound this to
 })
 export type ClientInfo = Schema.Schema.Type<typeof ClientInfo>
 
@@ -49,17 +53,23 @@ export interface Interface {
   readonly updateOAuthState: (mcpName: string, oauthState: string) => Effect.Effect<void>
   readonly getOAuthState: (mcpName: string) => Effect.Effect<string | undefined>
   readonly clearOAuthState: (mcpName: string) => Effect.Effect<void>
-  readonly isTokenExpired: (mcpName: string) => Effect.Effect<boolean | null>
+  // kilocode_change start - atomic conditional automatic invalidation
+  readonly invalidate: (
+    mcpName: string,
+    type: "tokens" | "client",
+    expected: Invalidation.Expected,
+  ) => Effect.Effect<Invalidation.Outcome>
+  // kilocode_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/McpAuth") {}
 
 export const use = serviceUse(Service)
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const fs = yield* AppFileSystem.Service
+    const fs = yield* FSUtil.Service
     const flock = yield* EffectFlock.Service
 
     const read = Effect.fn("McpAuth.read")(function* () {
@@ -80,6 +90,19 @@ export const layer = Layer.effect(
         yield* fs.writeJson(filepath, next, 0o600).pipe(Effect.orDie)
       }).pipe(flock.withLock(lockKey), Effect.orDie)
     })
+
+    // kilocode_change start - read/modify/write with an atomic outcome, so automatic OAuth
+    // invalidation can compare the stored credential and clear it under one lock acquisition
+    const mutateWith = Effect.fn("McpAuth.mutateWith")(function* <A>(
+      update: (data: AuthData) => { next?: AuthData; result: A },
+    ) {
+      return yield* Effect.gen(function* () {
+        const { next, result } = update(yield* read())
+        if (next) yield* fs.writeJson(filepath, next, 0o600).pipe(Effect.orDie)
+        return result
+      }).pipe(flock.withLock(lockKey), Effect.orDie)
+    })
+    // kilocode_change end
 
     const get = Effect.fn("McpAuth.get")(function* (mcpName: string) {
       const data = yield* all()
@@ -141,12 +164,24 @@ export const layer = Layer.effect(
       return entry?.oauthState
     })
 
-    const isTokenExpired = Effect.fn("McpAuth.isTokenExpired")(function* (mcpName: string) {
-      const entry = yield* get(mcpName)
-      if (!entry?.tokens) return null
-      if (!entry.tokens.expiresAt) return false
-      return entry.tokens.expiresAt < Date.now() / 1000
+    // kilocode_change start - conditional automatic invalidation bound to the exact rejected
+    // credential. Clears the requested fields only when the stored entry still holds that
+    // credential, so a concurrent rotation that already saved newer tokens is never wiped.
+    const invalidate = Effect.fn("McpAuth.invalidate")(function* (
+      mcpName: string,
+      type: "tokens" | "client",
+      expected: Invalidation.Expected,
+    ) {
+      return yield* mutateWith<Invalidation.Outcome>((data) => {
+        const entry = data[mcpName]
+        if (!entry || !Invalidation.matches(entry, expected, type)) {
+          return { result: { _tag: entry ? "superseded" : "missing" } as Invalidation.Outcome }
+        }
+        const next = Invalidation.clear(entry, type)
+        return { next: { ...data, [mcpName]: next }, result: { _tag: "cleared", entry: next } as Invalidation.Outcome }
+      })
     })
+    // kilocode_change end
 
     return Service.of({
       all,
@@ -161,14 +196,11 @@ export const layer = Layer.effect(
       updateOAuthState,
       getOAuthState,
       clearOAuthState,
-      isTokenExpired,
+      invalidate, // kilocode_change
     })
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(EffectFlock.defaultLayer),
-  Layer.provide(AppFileSystem.defaultLayer),
-)
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node, EffectFlock.node] })
 
 export * as McpAuth from "./auth"

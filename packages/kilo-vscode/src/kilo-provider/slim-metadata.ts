@@ -38,6 +38,20 @@ function cap(v: unknown, limit = OUTPUT_CAP): string | undefined {
   return v.slice(0, limit) + `\n… (truncated, ${v.length - limit} chars omitted)`
 }
 
+/**
+ * Keep the end of a long output, dropping the partial first line so the
+ * first visible line is always a whole line. Bash streams a rolling tail
+ * preview, so keeping the tail shows the lines the user is waiting for.
+ */
+function tailCap(v: unknown, limit = OUTPUT_CAP): string | undefined {
+  if (typeof v !== "string") return undefined
+  if (v.length <= limit) return v
+  const tail = v.slice(-limit)
+  const nl = tail.indexOf("\n")
+  const whole = nl >= 0 ? tail.slice(nl + 1) : tail
+  return whole || tail
+}
+
 function patch(v: unknown): string | undefined {
   if (typeof v !== "string") return undefined
   if (v.length > PATCH_CAP) return undefined
@@ -73,6 +87,7 @@ function slimEdit(state: Record<string, unknown>): Record<string, unknown> {
     }
   }
   if (meta.diagnostics) result.diagnostics = meta.diagnostics
+  if (meta.approval) result.approval = meta.approval
   next.metadata = result
   return next
 }
@@ -84,6 +99,7 @@ function slimPatch(state: Record<string, unknown>): Record<string, unknown> {
   if (isObj(meta)) {
     const slim: Record<string, unknown> = {}
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     if (Array.isArray(meta.files)) {
       slim.files = (meta.files as Record<string, unknown>[]).map((f) => {
         const diff = patch(f.patch) ?? patch(f.diff)
@@ -115,6 +131,7 @@ function slimMultiedit(state: Record<string, unknown>): Record<string, unknown> 
   if (isObj(meta)) {
     const slim: Record<string, unknown> = {}
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     if (Array.isArray(meta.results)) {
       slim.results = (meta.results as Record<string, unknown>[]).map((r) => {
         const rs: Record<string, unknown> = {}
@@ -149,6 +166,7 @@ function slimWrite(state: Record<string, unknown>): Record<string, unknown> {
     if (meta.filepath) slim.filepath = meta.filepath
     if (meta.exists !== undefined) slim.exists = meta.exists
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     const fd = meta.filediff
     if (isObj(fd)) {
       slim.filediff = {
@@ -172,12 +190,15 @@ function slimOutput(state: Record<string, unknown>): Record<string, unknown> {
   return next
 }
 
-/** bash: truncate metadata.output and state.output. */
+/** bash: keep the end of metadata.output and state.output so live output shows the latest lines. */
 function slimBash(state: Record<string, unknown>): Record<string, unknown> {
-  const next = slimOutput(state)
+  const next = { ...state }
+  if (typeof state.output === "string" && state.output.length > OUTPUT_CAP) {
+    next.output = tailCap(state.output)
+  }
   const meta = state.metadata
   if (isObj(meta) && typeof meta.output === "string" && meta.output.length > OUTPUT_CAP) {
-    next.metadata = { ...meta, output: cap(meta.output) }
+    next.metadata = { ...meta, output: tailCap(meta.output) }
   }
   return next
 }
@@ -214,6 +235,7 @@ const slimmers: Record<string, (state: Record<string, unknown>) => Record<string
   multiedit: slimMultiedit,
   write: slimWrite,
   bash: slimBash,
+  task: slimOutput,
 }
 
 /** Strip provider metadata that the webview never reads from reasoning parts. */

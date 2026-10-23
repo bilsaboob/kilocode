@@ -2,8 +2,13 @@
 import { $ } from "bun"
 import { join } from "node:path"
 import { existsSync, mkdirSync, rmSync, chmodSync } from "node:fs"
-import { copySandboxResources, copyTreeSitterResources } from "../src/services/cli-backend/cli-resources"
+import {
+  copyKiloSandboxWorker,
+  copySandboxResources,
+  copyTreeSitterResources,
+} from "../src/services/cli-backend/cli-resources"
 import { ensureFfmpegForTarget } from "./ffmpeg-helper"
+import { evidence as sbom } from "./sbom"
 
 const packageJsonPath = join(import.meta.dir, "..", "package.json")
 const packageJson = await Bun.file(packageJsonPath).json()
@@ -78,6 +83,7 @@ for (const config of targets) {
   await $`cp ${sourceBinary} ${targetBinary}`
   await copyTreeSitterResources(sourceBinary, targetBinary)
   await copySandboxResources(sourceBinary, targetBinary)
+  await copyKiloSandboxWorker(sourceBinary, targetBinary)
 
   if (config.binary !== "kilo.exe") {
     chmodSync(targetBinary, 0o755)
@@ -98,5 +104,13 @@ for (const config of targets) {
   })
   console.log(`  ✅ Created ${vsixPath}`)
 }
+
+console.log("\n🧾 Generating CRA SBOM evidence...")
+const evidence = await sbom({
+  dir: outDir,
+  release: { version, channel: prerelease ? "rc" : "latest" },
+  expected: targets.length,
+})
+console.log(`  ✅ Described ${evidence.manifest.entries.length} VSIX package(s)`)
 
 console.log("\n✨ All VSIX packages built successfully!")

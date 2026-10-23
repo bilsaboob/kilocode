@@ -3,9 +3,10 @@ package ai.kilocode.client.session.views
 import ai.kilocode.client.session.model.Question
 import ai.kilocode.client.session.model.QuestionItem
 import ai.kilocode.client.session.model.QuestionOption
+import ai.kilocode.client.session.ui.SessionRootPanel
 import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
-import ai.kilocode.client.session.views.base.BaseQuestionView
+import ai.kilocode.client.session.views.base.DialogView
 import ai.kilocode.client.session.views.question.QuestionView
 import ai.kilocode.client.ui.HoverIcon
 import ai.kilocode.client.ui.UiStyle
@@ -17,6 +18,8 @@ import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBRadioButton
 import com.intellij.ui.components.JBTextArea
+import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Container
@@ -24,6 +27,7 @@ import kotlin.math.abs
 import javax.swing.AbstractButton
 import javax.swing.JButton
 import javax.swing.JComponent
+import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 
 @Suppress("UnstableApiUsage")
@@ -31,6 +35,7 @@ class QuestionViewTest : BasePlatformTestCase() {
 
     private val replies = mutableListOf<Triple<String, QuestionReplyDto, List<List<String>>>>()
     private val rejects = mutableListOf<String>()
+    private val roots = mutableListOf<SessionRootPanel>()
     private var scrolls = 0
     private lateinit var view: QuestionView
 
@@ -42,6 +47,15 @@ class QuestionViewTest : BasePlatformTestCase() {
             reject = { id -> rejects.add(id) },
             scroll = { scrolls++ },
         )
+    }
+
+    override fun tearDown() {
+        try {
+            roots.asReversed().forEach { it.removeNotify() }
+            roots.clear()
+        } finally {
+            super.tearDown()
+        }
     }
 
     // ------ empty question ------
@@ -258,7 +272,7 @@ class QuestionViewTest : BasePlatformTestCase() {
         )
     }
 
-    fun `test question title uses headerFont and hint uses hintFont`() {
+    fun `test question title uses headerFont and hint uses secondary font`() {
         view.show(singleSelectQuestion("q_fonts"))
 
         val style = SessionEditorStyle.current()
@@ -266,7 +280,58 @@ class QuestionViewTest : BasePlatformTestCase() {
         val hint = text(view, "Select one answer")
 
         assertEquals("title should use headerFont", style.headerFont, title.font)
-        assertEquals("hint should use hintFont", style.hintFont, hint.font)
+        assertEquals("hint should use secondary text font", SessionUiStyle.Text.Secondary.font(style), hint.font)
+    }
+
+    fun `test custom answer editor uses prompt text styling`() {
+        view.show(customSingleQuestion("q_custom_style"))
+
+        findAll<JBRadioButton>(view).first { it.actionCommand == "" }.doClick()
+        val field = findAll<EditorTextField>(view).first()
+        view.addNotify()
+        try {
+            layout(view)
+            UIUtil.dispatchAllInvocationEvents()
+            val editor = field.getEditor(true) ?: error("missing editor")
+            val style = SessionEditorStyle.current()
+
+            assertEquals(style.transcriptFont, field.font)
+            assertEquals(style.transcriptFont.fontName, editor.colorsScheme.editorFontName)
+            assertEquals(style.transcriptFont.size, editor.colorsScheme.editorFontSize)
+            assertEquals(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER, editor.scrollPane.horizontalScrollBarPolicy)
+            val ins = editor.scrollPane.viewportBorder.getBorderInsets(editor.scrollPane)
+            val pad = JBUI.scale(SessionUiStyle.View.Prompt.EDITOR_HORIZONTAL_INSET)
+            assertEquals(pad, ins.left)
+            assertEquals(pad, ins.right)
+            assertTrue(editor.settings.isUseSoftWraps)
+            assertFalse(editor.settings.isPaintSoftWraps)
+        } finally {
+            view.hideView()
+            view.removeNotify()
+        }
+    }
+
+    fun `test custom answer editor style updates use transcript font`() {
+        view.show(customSingleQuestion("q_custom_style_update"))
+
+        findAll<JBRadioButton>(view).first { it.actionCommand == "" }.doClick()
+        val field = findAll<EditorTextField>(view).first()
+        view.addNotify()
+        try {
+            layout(view)
+            UIUtil.dispatchAllInvocationEvents()
+            val editor = field.getEditor(true) ?: error("missing editor")
+            val style = SessionEditorStyle.create(family = "Courier New", size = 26)
+
+            view.applyStyle(style)
+
+            assertEquals(style.transcriptFont, field.font)
+            assertEquals(style.transcriptFont.fontName, editor.colorsScheme.editorFontName)
+            assertEquals(style.transcriptFont.size, editor.colorsScheme.editorFontSize)
+        } finally {
+            view.hideView()
+            view.removeNotify()
+        }
     }
 
     // ------ multi-question navigation ------
@@ -682,6 +747,33 @@ class QuestionViewTest : BasePlatformTestCase() {
         assertTrue("custom editor should grow when soft-wrapped text needs more lines", ed.preferredSize.height > initial)
     }
 
+    fun `test custom editor enables vertical scrollbar only after cap`() {
+        view.show(customSingleQuestion("q_custom_cap"))
+        val root = realize(view, 240, 600)
+
+        val customRadio = findAll<JBRadioButton>(view).first { it.actionCommand == "" }
+        customRadio.doClick()
+        layoutTree(root)
+
+        val ed = findAll<EditorTextField>(view).first()
+        val editor = ed.getEditor(false)!!
+        assertEquals(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER, editor.scrollPane.verticalScrollBarPolicy)
+
+        ed.text = (1..40).joinToString("\n") { "line $it" }
+        layoutTree(root)
+        UIUtil.dispatchAllInvocationEvents()
+
+        assertTrue(ed.preferredSize.height <= root.height / 3)
+        assertEquals(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, editor.scrollPane.verticalScrollBarPolicy)
+        assertEquals(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER, editor.scrollPane.horizontalScrollBarPolicy)
+
+        ed.text = "short"
+        layoutTree(root)
+        UIUtil.dispatchAllInvocationEvents()
+
+        assertEquals(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER, editor.scrollPane.verticalScrollBarPolicy)
+    }
+
     fun `test blank custom input does not enable submit`() {
         view.show(customSingleQuestion("q_custom_blank"))
 
@@ -906,6 +998,86 @@ class QuestionViewTest : BasePlatformTestCase() {
         assertEquals("Custom editor should have preserved text", "preserved text", editorAfterBack!!.text)
     }
 
+    // ------ re-show while already visible (hidden-session reveal resync) ------
+
+    fun `test re-showing same question preserves custom text and page position`() {
+        view.show(
+            Question(
+                id = "q_reveal_same",
+                items = listOf(
+                    QuestionItem(
+                        question = "How?",
+                        header = "H",
+                        options = listOf(QuestionOption("X", "")),
+                        multiple = false,
+                        custom = true,
+                    ),
+                    QuestionItem(
+                        question = "What?",
+                        header = "W",
+                        options = listOf(QuestionOption("Y", "")),
+                        multiple = false,
+                        custom = false,
+                    ),
+                ),
+            )
+        )
+        findAll<JBRadioButton>(view).first { it.actionCommand == "" }.doClick()
+        findAll<EditorTextField>(view).first().text = "typed answer"
+        button(view, "Next").doClick()
+
+        val before = scrolls
+        // Same question object arrives again — e.g. the containing session UI was hidden while the
+        // question was active and is now revealed.
+        view.show(
+            Question(
+                id = "q_reveal_same",
+                items = listOf(
+                    QuestionItem(
+                        question = "How?",
+                        header = "H",
+                        options = listOf(QuestionOption("X", "")),
+                        multiple = false,
+                        custom = true,
+                    ),
+                    QuestionItem(
+                        question = "What?",
+                        header = "W",
+                        options = listOf(QuestionOption("Y", "")),
+                        multiple = false,
+                        custom = false,
+                    ),
+                ),
+            )
+        )
+
+        assertTrue(view.isVisible)
+        assertTrue("Re-showing the same question should still request a scroll", scrolls > before)
+        assertLabelsContain(view, "What?")
+        navButton(view, "Back").doClick()
+        val editor = findAll<EditorTextField>(view).firstOrNull()
+        assertNotNull("Custom editor should still be present after reveal", editor)
+        assertEquals("Custom text should survive a same-question reveal", "typed answer", editor!!.text)
+    }
+
+    fun `test showing a different question after reveal resets state`() {
+        view.show(customSingleQuestion("q_reveal_a"))
+        findAll<JBRadioButton>(view).first { it.actionCommand == "" }.doClick()
+        findAll<EditorTextField>(view).first().text = "stale"
+
+        view.show(customSingleQuestion("q_reveal_b"))
+
+        assertTrue(view.isVisible)
+        assertFalse(
+            "A new request id must reset the custom radio selection",
+            findAll<JBRadioButton>(view).first { it.actionCommand == "" }.isSelected,
+        )
+        assertNull(
+            "A new request id must not retain the previous custom editor",
+            findAll<EditorTextField>(view).firstOrNull { it.text == "stale" },
+        )
+    }
+
     fun `test optionless custom question is answerable`() {
         view.show(
             Question(
@@ -960,9 +1132,9 @@ class QuestionViewTest : BasePlatformTestCase() {
     private fun text(root: Container, value: String): JBTextArea =
         findAll<JBTextArea>(root).first { it.text == value }
 
-    private fun card(): BaseQuestionView = findAll<BaseQuestionView>(view).distinct().single()
+    private fun card(): DialogView = findAll<DialogView>(view).distinct().single()
 
-    private fun spacer(card: BaseQuestionView): Component {
+    private fun spacer(card: DialogView): Component {
         val north = (card.layout as BorderLayout).getLayoutComponent(BorderLayout.NORTH) as Container
         return north.components.last()
     }
@@ -970,6 +1142,17 @@ class QuestionViewTest : BasePlatformTestCase() {
     private fun layout(root: Container, width: Int = 400) {
         root.setSize(width, root.preferredSize.height)
         layoutTree(root)
+    }
+
+    private fun realize(child: Component, width: Int, height: Int): SessionRootPanel {
+        val root = SessionRootPanel()
+        root.setSize(width, height)
+        root.content.add(child, BorderLayout.CENTER)
+        root.addNotify()
+        layoutTree(root)
+        UIUtil.dispatchAllInvocationEvents()
+        roots.add(root)
+        return root
     }
 
     private fun layoutTree(root: Container) {

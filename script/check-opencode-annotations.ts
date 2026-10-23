@@ -5,8 +5,9 @@
  * is annotated with a kilocode_change marker.
  *
  * Usage:
- *   bun run script/check-opencode-annotations.ts                  # diff against origin/main
- *   bun run script/check-opencode-annotations.ts --base <ref>     # diff against <ref>
+ *   bun run script/check-opencode-annotations.ts                  # diff origin/main...HEAD
+ *   bun run script/check-opencode-annotations.ts --base <ref>     # diff <ref>...HEAD
+ *   bun run script/check-opencode-annotations.ts --worktree       # diff HEAD..worktree plus untracked files
  *
  * A line is "covered" if it:
  *   - contains a kilocode_change marker comment           (inline annotation)
@@ -36,6 +37,12 @@ const ROOT = path.resolve(import.meta.dir, "..")
 const SOURCE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".yml", ".yaml", ".toml", ".sh", ".bash", ".zsh"])
 const SCOPES = [
   "packages/opencode",
+  "packages/core",
+  "packages/llm",
+  "packages/schema",
+  "packages/protocol",
+  "packages/server",
+  "packages/tui",
   "packages/extensions",
   "packages/ui",
   "packages/shared",
@@ -54,8 +61,24 @@ const EXEMPT_SCOPES = [
 ]
 
 const args = process.argv.slice(2)
+const unknown = args.find((arg, i) => arg !== "--base" && arg !== "--worktree" && args[i - 1] !== "--base")
+if (unknown) {
+  console.error(`Unknown argument: ${unknown}`)
+  process.exit(1)
+}
 const baseIdx = args.indexOf("--base")
-const base = baseIdx !== -1 ? args[baseIdx + 1] : "origin/main"
+const worktree = args.includes("--worktree")
+if (worktree && baseIdx !== -1) {
+  console.error("--base cannot be used with --worktree")
+  process.exit(1)
+}
+const base = (() => {
+  if (baseIdx === -1) return "origin/main"
+  const ref = args[baseIdx + 1]
+  if (ref && !ref.startsWith("--")) return ref
+  console.error("Missing value for --base")
+  process.exit(1)
+})()
 
 function run(cmd: string, args: string[]) {
   const result = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf8" })
@@ -67,9 +90,21 @@ function run(cmd: string, args: string[]) {
   return result.stdout?.trim() ?? ""
 }
 
-function changedFiles() {
-  const out = run("git", ["diff", "--name-only", "--diff-filter=AMRT", `${base}...HEAD`, "--", ...SCOPES])
+const ref = worktree ? "HEAD" : `${base}...HEAD`
+
+function lines(out: string) {
   return out ? out.split("\n").filter(Boolean) : []
+}
+
+function untracked(file?: string) {
+  if (!worktree) return []
+  const pathspec = file ? [file] : SCOPES
+  return lines(run("git", ["ls-files", "--others", "--exclude-standard", "--", ...pathspec]))
+}
+
+function changedFiles() {
+  const out = run("git", ["diff", "--name-only", "--diff-filter=AMRT", ref, "--", ...SCOPES])
+  return [...new Set([...lines(out), ...untracked()])]
 }
 
 function isUpstreamMerge() {
@@ -78,7 +113,13 @@ function isUpstreamMerge() {
     const [parents = "", subject = ""] = line.split("\t")
     if (!parents.includes(" ")) return false
     const s = subject.toLowerCase()
-    return s.startsWith("merge: upstream ") || s.startsWith("resolve merge conflict")
+    return (
+      s.startsWith("merge: upstream ") ||
+      s.startsWith("merge: opencode ") ||
+      s.startsWith("merge: record upstream ") ||
+      s.startsWith("resolve merge conflict") ||
+      /^merge (?:remote-tracking )?branch '(?:[^/']+\/)*opencode-v\d/.test(s)
+    )
   })
 }
 
@@ -100,8 +141,8 @@ function isSource(file: string) {
   return content(file).startsWith("#!") // kilocode_change
 }
 
-// Parses the unified=0 diff for `file` against `base` and returns:
-//   - added: every added line number on HEAD
+// Parses the unified=0 diff for `file` against the selected target and returns:
+//   - added: every added line number on the checked version
 //   - revert: true when the file's diff removes any kilocode_change marker.
 //     In that case the changes are reverting Kilo modifications back to the
 //     upstream baseline, so newly added lines (which are restoring upstream
@@ -110,8 +151,15 @@ function isSource(file: string) {
 //     hunks than the marker itself, so we use file-level detection rather
 //     than hunk-level to avoid false positives on legitimate reverts.
 function addedLines(file: string): { added: Set<number>; revert: boolean } {
-  const diff = run("git", ["diff", "--unified=0", "--diff-filter=AMRT", `${base}...HEAD`, "--", file])
   const added = new Set<number>()
+  if (untracked(file).includes(file)) {
+    const text = content(file)
+    const count = text.split(/\r?\n/).length
+    for (const n of Array.from({ length: count }, (_, i) => i + 1)) added.add(n)
+    return { added, revert: false }
+  }
+
+  const diff = run("git", ["diff", "--unified=0", "--diff-filter=AMRT", ref, "--", file])
   let revert = false
   const all = diff.split("\n")
 
@@ -148,7 +196,15 @@ function addedLines(file: string): { added: Set<number>; revert: boolean } {
 // kilocode_change start
 function content(file: string) {
   const abs = path.join(ROOT, file)
-  if (existsSync(abs)) return readFileSync(abs, "utf8")
+  // The content must come from the SAME revision the added-line numbers come
+  // from. In `--worktree` mode that revision is the working tree; every other
+  // mode diffs `<base>...HEAD`, so it is HEAD. Reading the working tree while
+  // numbering its lines from HEAD mixes two revisions: a worktree dirty with the
+  // round's own edits (the driver commits the slice after the round) shifts the
+  // lines, and a properly marked added line then collides with an untouched
+  // upstream line and reports it as unannotated. Default mode is documented to
+  // ignore local edits; it must do so for the file content too.
+  if (worktree && existsSync(abs)) return readFileSync(abs, "utf8")
 
   const out = run("git", ["show", `HEAD:${file}`])
   const target = out.trim()
@@ -206,7 +262,25 @@ function coveredLines(text: string): { lines: string[]; covered: Set<number> } {
 
 // --- main ---
 
-if (isUpstreamMerge()) {
+// CI only runs this check when a changed file matches the workflow's `paths:` filter, so a scope
+// missing there means PRs touching only that scope never get checked. Fail fast on that drift.
+const workflow = path.join(ROOT, ".github/workflows/check-opencode-annotations.yml")
+const filter = existsSync(workflow) ? readFileSync(workflow, "utf8") : undefined
+const unwatched = filter == null ? [] : SCOPES.filter((scope) => !filter.includes(`- "${scope}/**"`))
+if (unwatched.length > 0) {
+  console.error(
+    [
+      "Checked scopes missing from the `paths:` filter in .github/workflows/check-opencode-annotations.yml:",
+      "",
+      ...unwatched.map((scope) => `  - "${scope}/**"`),
+      "",
+      "Add them so pull requests touching these scopes run this check in CI.",
+    ].join("\n"),
+  )
+  process.exit(1)
+}
+
+if (!worktree && isUpstreamMerge()) {
   console.log("Skipping shared upstream annotation check — upstream merge detected.")
   process.exit(0)
 }

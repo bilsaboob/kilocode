@@ -1,10 +1,14 @@
-import { Config } from "@/config/config"
-import { BusEvent } from "@/bus/bus-event"
-import { SyncEvent } from "@/sync"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { EventV2 } from "@opencode-ai/core/event"
+import { EventManifest } from "@/event-manifest"
+import { InstanceDisposed } from "@/server/event"
+import { BusEvent } from "@/bus/bus-event" // kilocode_change - include legacy Kilo events until they migrate to EventV2
+import "@opencode-ai/core/account"
 import "@/server/event"
 import "@/kilocode/indexing-event" // kilocode_change - register indexing.status before HttpApi event schemas
 import { Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
+import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi" // kilocode_change - HttpApiSchema for the bodyless upgrade payload
+import semver from "semver"
 import { described } from "./metadata"
 
 const GlobalHealth = Schema.Struct({
@@ -12,15 +16,49 @@ const GlobalHealth = Schema.Struct({
   version: Schema.String,
 })
 
+const SyncEventSchemas = EventManifest.Latest.values()
+  .flatMap((definition) => {
+    if (!definition.durable) return []
+    return [
+      Schema.Struct({
+        type: Schema.Literal("sync"),
+        id: EventV2.ID,
+        syncEvent: Schema.Struct({
+          type: Schema.Literal(EventV2.versionedType(definition.type, definition.durable.version)),
+          id: EventV2.ID,
+          seq: Schema.Finite,
+          aggregateID: Schema.String,
+          data: definition.data,
+        }),
+      }).annotate({ identifier: `SyncEvent.${definition.type}` }),
+    ]
+  })
+  .toArray()
+
 const GlobalEventSchema = Schema.Struct({
   directory: Schema.String,
   project: Schema.optional(Schema.String),
   workspace: Schema.optional(Schema.String),
-  payload: Schema.Union([...BusEvent.effectPayloads(), ...SyncEvent.effectPayloads()]),
+  payload: Schema.Union([
+    ...BusEvent.effectPayloads(), // kilocode_change
+    ...EventManifest.Latest.values()
+      .map((definition) =>
+        Schema.Struct({ id: EventV2.ID, type: Schema.Literal(definition.type), properties: definition.data }),
+      )
+      .toArray(),
+    InstanceDisposed,
+    ...SyncEventSchemas,
+  ]),
 }).annotate({ identifier: "GlobalEvent" })
 
 export const GlobalUpgradeInput = Schema.Struct({
-  target: Schema.optional(Schema.String),
+  // kilocode_change start - an omitted target upgrades to the latest version
+  target: Schema.optional(
+    Schema.String.check(
+      Schema.makeFilter((value) => (semver.valid(value) === null ? "Expected a semantic version" : undefined)),
+    ),
+  ),
+  // kilocode_change end
 })
 
 const GlobalUpgradeResult = Schema.Union([
@@ -64,7 +102,7 @@ export const GlobalApi = HttpApi.make("global").add(
         }),
       ),
       HttpApiEndpoint.get("configGet", GlobalPaths.config, {
-        success: described(Config.Info, "Get global config info"),
+        success: described(ConfigV1.Info, "Get global config info"),
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "global.config.get",
@@ -73,8 +111,8 @@ export const GlobalApi = HttpApi.make("global").add(
         }),
       ),
       HttpApiEndpoint.patch("configUpdate", GlobalPaths.config, {
-        payload: Config.Info,
-        success: described(Config.Info, "Successfully updated global config"),
+        payload: ConfigV1.Info,
+        success: described(ConfigV1.Info, "Successfully updated global config"),
         error: HttpApiError.BadRequest,
       }).annotateMerge(
         OpenApi.annotations({
@@ -93,7 +131,9 @@ export const GlobalApi = HttpApi.make("global").add(
         }),
       ),
       HttpApiEndpoint.post("upgrade", GlobalPaths.upgrade, {
+        // kilocode_change start - a bodyless request upgrades to the latest version
         payload: [HttpApiSchema.NoContent, GlobalUpgradeInput],
+        // kilocode_change end
         success: described(GlobalUpgradeResult, "Upgrade result"),
         error: HttpApiError.BadRequest,
       }).annotateMerge(

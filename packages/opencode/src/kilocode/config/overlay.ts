@@ -1,18 +1,27 @@
 import path from "path"
 import { existsSync } from "fs"
+import { access, realpath } from "fs/promises"
+import { constants } from "fs"
+import { createHash } from "crypto"
 import { Schema } from "effect"
+import { parse } from "jsonc-parser"
 import z from "zod"
+import * as Log from "@opencode-ai/core/util/log"
 import { Global } from "@opencode-ai/core/global"
 import { ConfigAgent } from "@/config/agent"
 import { Config } from "@/config/config"
 import { ConfigParse } from "@/config/parse"
+import { ConfigV2Compat } from "@/config/v2-compat"
 import { ConfigVariable } from "@/config/variable"
 import { Filesystem } from "@/util/filesystem"
 import { isRecord } from "@/util/record"
 import { KilocodeConfig } from "./config"
+import { sanitizeProjectMcpHeaders } from "./mcp-headers"
 import { KilocodeConfigSources } from "./sources"
 
 export namespace KilocodeConfigOverlay {
+  const log = Log.create({ service: "kilocode.config.overlay" })
+
   export const Scope = z.enum(["global", "project"])
   export type Scope = z.infer<typeof Scope>
 
@@ -51,15 +60,20 @@ export namespace KilocodeConfigOverlay {
     global: z.custom<Config.Info>(Schema.is(Config.Info)),
     project: z.custom<Config.Info>(Schema.is(Config.Info)),
     sources: z.array(KilocodeConfigSources.Source),
-    targets: z.object({
-      global: z.string().optional(),
-      project: z.string().optional(),
-      active: z.string().optional(),
-    }),
+    targets: z.object({ global: z.custom<Target>(), project: z.custom<Target>(), active: z.custom<Target>() }),
     fields: z.record(z.string(), Resolved),
     collections: z.record(z.string(), z.array(Resolved)),
   })
   export type Result = z.infer<typeof Result>
+
+  export type Target = {
+    scope: Scope
+    path: string
+    revision: string
+    exists: boolean
+    writable: boolean
+    raw: Record<string, unknown>
+  }
 
   export type Input = {
     directory: string
@@ -71,12 +85,13 @@ export namespace KilocodeConfigOverlay {
   }
 
   const files = ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json"] as const
-  const dirs = [".kilo", ".kilocode", ".opencode"] as const
+  const dirs = [".kilocode", ".kilo"] as const
 
   const fieldPaths = [
     ["model"],
     ["small_model"],
     ["hide_prompt_training_models"],
+    ["privacy_mode"],
     ["default_agent"],
     ["snapshot"],
     ["share"],
@@ -85,6 +100,7 @@ export namespace KilocodeConfigOverlay {
     ["disabled_providers"],
     ["watcher", "ignore"],
     ["instructions"],
+    ["web_search"],
     ["indexing", "enabled"],
     ["indexing", "provider"],
     ["indexing", "model"],
@@ -112,6 +128,7 @@ export namespace KilocodeConfigOverlay {
     ["indexing", "searchMaxResults"],
     ["indexing", "embeddingBatchSize"],
     ["indexing", "scannerMaxBatchRetries"],
+    ["indexing", "fileExtensions"],
   ] as const
 
   const collectionPaths = ["provider", "mcp", "permission", "agent", "formatter", "lsp"] as const
@@ -119,12 +136,14 @@ export namespace KilocodeConfigOverlay {
 
   export async function project(input: { directory: string; worktree?: string }): Promise<Config.Info> {
     const found = await projectFiles(input)
-    const configs = await Promise.all(found.map(load))
+    // kilocode_change - project config is untrusted; confine {file:} reads to the project root
+    const root = input.worktree && input.worktree !== "/" ? input.worktree : input.directory
+    const configs = await Promise.all(found.map((file) => load(file, { root, source: file })))
     return configs.reduce((result, cfg) => KilocodeConfig.mergeConfig(result, cfg), {} as Config.Info)
   }
 
   export async function projectTarget(input: { directory: string; worktree?: string }) {
-    const found = await Filesystem.findUp([...dirs], input.directory, input.worktree)
+    const found = await Filesystem.findUp(dirs.toReversed(), input.directory, input.worktree)
     const roots = await Filesystem.findUp([...files], input.directory, input.worktree)
     const candidates = [...found.flatMap((dir) => files.map((file) => path.join(dir, file))), ...roots]
     return candidates.find((file) => existsSync(file)) ?? path.join(input.directory, ".kilo", "kilo.jsonc")
@@ -137,13 +156,54 @@ export namespace KilocodeConfigOverlay {
     return candidates.find((file) => existsSync(file)) ?? candidates[0]
   }
 
+  export async function target(input: { scope: Scope; directory: string; worktree?: string }): Promise<Target> {
+    const file = input.scope === "global" ? globalTarget() : await projectTarget(input)
+    const root =
+      input.scope === "global"
+        ? Global.Path.config
+        : input.worktree && input.worktree !== "/"
+          ? input.worktree
+          : input.directory
+    const [canonical, boundary] = await Promise.all([canonicalize(file), canonicalize(root)])
+    const exists = await Bun.file(file).exists()
+    const bytes = exists ? await Bun.file(file).text() : ""
+    const relative = path.relative(boundary, canonical)
+    const inside = relative === "" || (!path.isAbsolute(relative) && relative.split(path.sep)[0] !== "..")
+    const raw = exists ? ConfigParse.jsonc(bytes, canonical) : {}
+    return {
+      scope: input.scope,
+      path: canonical,
+      revision: revision(canonical, exists, bytes),
+      exists,
+      writable: inside && (await canWrite(exists ? canonical : path.dirname(canonical))),
+      raw: isRecord(raw) ? raw : {},
+    }
+  }
+
+  export function revision(file: string, exists: boolean, bytes: string) {
+    return createHash("sha256")
+      .update(file)
+      .update("\0")
+      .update(exists ? "exists" : "missing")
+      .update("\0")
+      .update(bytes)
+      .digest("hex")
+  }
+
   export async function resolve(input: Input): Promise<Result> {
-    const local = await withAgents(await project(input), await projectDirs(input))
-    const global = await withAgents(input.global, globalDirs())
+    // kilocode_change start - project agents untrusted, {file:} confined to the project root; global agents trusted
+    const root = input.worktree && input.worktree !== "/" ? input.worktree : input.directory
+    const local = await withAgents(await project(input), await projectDirs(input), false, root)
+    const global = await withAgents(input.global, globalDirs(), true)
+    // kilocode_change end
+    const [globalTarget, projectTarget] = await Promise.all([
+      target({ ...input, scope: "global" }),
+      target({ ...input, scope: "project" }),
+    ])
     const targets = {
-      global: globalTarget(),
-      project: await projectTarget(input),
-      active: input.scope === "global" ? globalTarget() : await projectTarget(input),
+      global: globalTarget,
+      project: projectTarget,
+      active: input.scope === "global" ? globalTarget : projectTarget,
     }
     return {
       scope: input.scope,
@@ -167,6 +227,40 @@ export namespace KilocodeConfigOverlay {
     return base as Config.Info
   }
 
+  // A later config file that already defines a patched value wins the merge, so a write would not
+  // change the effective setting. Returns the highest-priority such file. Values are compared
+  // structurally, not via the schema, because a shadowing file may use another shape.
+  export async function shadow(input: { scope: Scope; directory: string; worktree?: string; patch: Config.Info }) {
+    const [{ sources }, { path: target }] = await Promise.all([
+      KilocodeConfigSources.list(input),
+      KilocodeConfigOverlay.target(input),
+    ])
+    const files = sources.flatMap((item) =>
+      item.path && shadowKinds.has(item.kind) ? [{ ...item, path: item.path }] : [],
+    )
+    const paths = await Promise.all(files.map((item) => canonicalize(item.path)))
+    const at = paths.lastIndexOf(target)
+    // A target that is not created yet is not listed; managed files still outrank it.
+    const later = at < 0 ? files.filter((item) => item.kind === "managed-file") : files.slice(at + 1)
+    for (const item of later.reverse()) {
+      if (!item.exists) continue
+      const text = await Bun.file(item.path).text()
+      if (clashes(parse(text), input.patch)) return { target, path: item.path }
+    }
+    return undefined
+  }
+
+  const shadowKinds = new Set(["global-file", "env-file", "project-file", "config-dir-file", "managed-file"])
+
+  // Nulls in the patch are unsets, which inherit the later value on purpose.
+  function clashes(file: unknown, patch: Record<string, unknown>): boolean {
+    if (!isRecord(file)) return false
+    return Object.entries(patch).some(([key, value]) => {
+      if (value === null || file[key] === undefined) return false
+      return isRecord(value) ? !isRecord(file[key]) || clashes(file[key], value) : true
+    })
+  }
+
   async function projectFiles(input: { directory: string; worktree?: string }) {
     const roots = await Filesystem.findUp([...files], input.directory, input.worktree, { rootFirst: true })
     const found = await Filesystem.findUp([...dirs], input.directory, input.worktree)
@@ -182,30 +276,50 @@ export namespace KilocodeConfigOverlay {
   }
 
   function globalDirs() {
-    return [
-      Global.Path.config,
-      path.join(Global.Path.home, ".kilocode"),
-      path.join(Global.Path.home, ".kilo"),
-      path.join(Global.Path.home, ".opencode"),
-    ]
+    return [Global.Path.config, path.join(Global.Path.home, ".kilocode"), path.join(Global.Path.home, ".kilo")]
   }
 
-  async function withAgents(input: Config.Info, dirs: string[]): Promise<Config.Info> {
+  // kilocode_change start - root confines untrusted agent {file:} reads
+  async function withAgents(input: Config.Info, dirs: string[], trusted: boolean, root?: string): Promise<Config.Info> {
     const [dir, ...rest] = dirs
     if (!dir) return input
-    if (!existsSync(dir)) return withAgents(input, rest)
-    const agent = await ConfigAgent.load(dir)
-    const mode = await ConfigAgent.loadMode(dir)
+    if (!existsSync(dir)) return withAgents(input, rest, trusted, root)
+    const fileScope = trusted || !root ? undefined : { root, source: dir }
+    const agent = await ConfigAgent.load(dir, undefined, trusted, fileScope, fileScope)
+    const mode = await ConfigAgent.loadMode(dir, undefined, trusted, fileScope, fileScope)
     const next = KilocodeConfig.mergeConfig(KilocodeConfig.mergeConfig(input, { agent }), { agent: mode })
-    return withAgents(next, rest)
+    return withAgents(next, rest, trusted, root)
+  }
+  // kilocode_change end
+
+  async function load(file: string, fileScope?: ConfigVariable.FileScope): Promise<Config.Info> {
+    // kilocode_change start - a single unsafe/invalid project config file must not break the settings overlay;
+    // untrusted {env:} and out-of-scope {file:} throw InvalidError here, so skip the offending file like the
+    // main config loader does rather than failing the whole overlay.
+    return await loadUnsafe(file, fileScope).catch((err) => {
+      log.warn("skipping unreadable project config in overlay", { file, err })
+      return {} as Config.Info
+    })
   }
 
-  async function load(file: string): Promise<Config.Info> {
+  async function loadUnsafe(file: string, fileScope?: ConfigVariable.FileScope): Promise<Config.Info> {
+    // kilocode_change end
     const text = await Bun.file(file).text()
-    const expanded = await ConfigVariable.substitute({ text, type: "path", path: file })
+    // kilocode_change start - remove variable-bearing MCP headers before resolving other project file references
+    const sanitized = sanitizeProjectMcpHeaders(ConfigParse.jsonc(text, file), file)
+    const content = JSON.stringify(sanitized.config) ?? text
+    const expanded = await ConfigVariable.substitute({
+      text: content,
+      type: "path",
+      path: file,
+      trusted: false,
+      fileScope,
+    })
     const parsed = ConfigParse.jsonc(expanded, file)
     if (!isRecord(parsed)) return {}
-    return ConfigParse.schema(Config.Info, parsed, file) as Config.Info
+    for (const warning of sanitized.warnings) log.warn(warning.message, { path: warning.path })
+    // kilocode_change end
+    return ConfigParse.schema(Config.Info, ConfigV2Compat.lower(parsed, file).value, file) as Config.Info
   }
 
   function field(
@@ -346,5 +460,25 @@ export namespace KilocodeConfigOverlay {
   function record(input: unknown) {
     if (isRecord(input)) return input
     return {}
+  }
+
+  async function canonicalize(file: string): Promise<string> {
+    const resolved = path.resolve(file)
+    const found = await realpath(resolved).catch(() => undefined)
+    if (found) return path.normalize(found)
+    const parent = path.dirname(resolved)
+    if (parent === resolved) return resolved
+    return path.join(await canonicalize(parent), path.basename(resolved))
+  }
+
+  async function canWrite(file: string): Promise<boolean> {
+    return access(file, constants.W_OK).then(
+      () => true,
+      async () => {
+        const parent = path.dirname(file)
+        if (parent === file) return false
+        return canWrite(parent)
+      },
+    )
   }
 }

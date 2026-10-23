@@ -2,7 +2,8 @@ import { $ } from "bun"
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
-const packages: Record<string, string> = {
+/** Exported so SBOM generation can model the exact helper each VSIX ships. */
+export const packages: Record<string, string> = {
   "darwin-x64": "@ffmpeg-installer/darwin-x64@4.1.0",
   "darwin-arm64": "@ffmpeg-installer/darwin-arm64@4.1.5",
   "linux-x64": "@ffmpeg-installer/linux-x64@4.1.0",
@@ -23,7 +24,8 @@ export async function ensureFfmpegForTarget(target: string, bin: string): Promis
 
   const exe = target.startsWith("win32") ? "ffmpeg.exe" : "ffmpeg"
   const dest = join(bin, exe)
-  if (existsSync(dest)) return
+  const marker = join(bin, "..", "node_modules", ".kilo-ffmpeg-target")
+  if (existsSync(dest) && existsSync(marker) && (await Bun.file(marker).text()).trim() === target) return
 
   const tmp = join(bin, ".ffmpeg-tmp")
   rmSync(tmp, { recursive: true, force: true })
@@ -37,6 +39,7 @@ export async function ensureFfmpegForTarget(target: string, bin: string): Promis
     await $`tar -xzf ${join(tmp, name)} -C ${tmp}`.quiet()
     copyFileSync(join(tmp, "package", exe), dest)
     if (!target.startsWith("win32")) chmodSync(dest, 0o755)
+    await Bun.write(marker, `${target}\n`)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

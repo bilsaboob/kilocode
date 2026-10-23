@@ -1,22 +1,47 @@
 package ai.kilocode.client.session.views
 
+import ai.kilocode.client.session.SessionFileLinks
+import ai.kilocode.client.session.SessionFileOpener
+import ai.kilocode.client.session.anchor
 import ai.kilocode.client.session.model.Text
 import ai.kilocode.client.session.model.FileAttachment
 import ai.kilocode.client.session.ui.selection.SessionSelection
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
+import ai.kilocode.client.session.ui.prompt.collapsible
+import ai.kilocode.client.session.ui.prompt.placeholder
 import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.session.model.Content
+import ai.kilocode.client.ui.md.MdCodeBlockFactory
+import ai.kilocode.client.ui.md.MdCodeBlockOptions
+import ai.kilocode.client.ui.md.MdView
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
 import com.intellij.util.ui.JBUI
+import javax.swing.ScrollPaneConstants
 
 class PromptView(
     text: Text,
-    private val openFile: (String) -> Unit = {},
+    private val openFile: SessionFileOpener = { _, _ -> },
     private val openAttachment: (FileAttachment) -> Unit = {},
     openUrl: (String) -> Unit = {},
     selection: SessionSelection? = null,
     mentions: List<PromptMention> = emptyList(),
-) : TextView(text, transparent = true, openUrl = openUrl, selection = selection) {
+) : TextView(
+    text,
+    transparent = true,
+    openFile = openFile,
+    openUrl = openUrl,
+    selection = selection,
+    code = MdCodeBlockFactory(
+        MdCodeBlockOptions(
+            maxLines = SessionUiStyle.View.Prompt.PASTE_BLOCK_LINES,
+            verticalPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+            horizontalPadding = 0,
+            // A block big enough to have been folded in the input is folded here too, behind the
+            // same placeholder, so a sent message reads the same way it was composed.
+            fold = { if (collapsible(it)) placeholder(it) else null },
+        )
+    ),
+) {
 
     private var mentions = mentions
     private val buffer = StringBuilder(text.content)
@@ -48,17 +73,17 @@ class PromptView(
         sync()
     }
 
-    override fun onLink(href: String) {
-        val mention = mentions.firstOrNull { it.path == href || path(it.path) == href }
+    override fun onLink(event: MdView.LinkEvent) {
+        val mention = mentions.firstOrNull { it.path == event.href || path(it.path) == event.href }
         if (mention != null) {
             mention.attachment?.let {
                 openAttachment(it)
                 return
             }
-            openFile(mention.path)
+            openFile(mention.path, event.anchor())
             return
         }
-        super.onLink(href)
+        super.onLink(event)
     }
 
     override fun applyStyle(style: SessionEditorStyle) {
@@ -68,9 +93,9 @@ class PromptView(
         md.linkColor = color
     }
 
-    override fun styleFont(style: SessionEditorStyle) = style.editorFont
+    override fun styleFont(style: SessionEditorStyle) = style.transcriptFont
 
-    override fun styleBackground(style: SessionEditorStyle) = style.editorBackground
+    override fun styleBackground(style: SessionEditorStyle) = SessionUiStyle.View.Prompt.bgColor(style)
 
     private fun sync() {
         md.set(linkifyMentions(buffer.toString(), mentions))

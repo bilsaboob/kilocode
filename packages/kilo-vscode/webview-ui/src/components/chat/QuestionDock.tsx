@@ -20,6 +20,7 @@ import {
   tr,
 } from "./question-dock-utils"
 import { isEnterKeyCommitNotIme } from "../../utils/ime-enter"
+import { isTextControl } from "../../utils/focus"
 
 export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => {
   const session = useSession()
@@ -30,7 +31,10 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
 
   const [store, setStore] = createStore({
     tab: 0,
-    answers: [] as string[][],
+    answers: questions().map((q) => {
+      const option = !q.multiple && q.options.find((opt) => opt.label === q.default)
+      return option ? [option.label] : []
+    }),
     custom: [] as string[],
     kinds: [] as Record<string, "option" | "custom">[],
     editing: false,
@@ -115,6 +119,8 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
   }
 
   const submit = () => {
+    if (store.sending) return
+    syncAgent(store.answers)
     reply(questions().map((_, i) => [...(store.answers[i] ?? [])]))
   }
 
@@ -152,6 +158,13 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
     }
 
     syncAgent(answers, kinds)
+
+    // Cost alerts use a single affirmative option and should respond on click.
+    // Normal questions keep the explicit Submit flow.
+    if (single() && props.request.autoSubmit) {
+      reply(answers)
+      return
+    }
 
     const outcome = pickOutcome({ single: single(), multi: multi(), custom })
     if (outcome.kind === "advance") {
@@ -215,6 +228,19 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
   }
 
   const onKey = (e: KeyboardEvent) => {
+    if (
+      single() &&
+      question()?.options.some((opt) => opt.label === question()?.default) &&
+      isEnterKeyCommitNotIme(e) &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      (e.target as HTMLElement).matches("button[data-picked='true']:not([data-custom])")
+    ) {
+      e.preventDefault()
+      e.stopPropagation()
+      submit()
+      return
+    }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
     if ((e.target as HTMLElement).tagName === "INPUT") return
     e.preventDefault()
@@ -286,6 +312,10 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
         close()
         return
       }
+      if (props.request.dismissResponse === "continue") {
+        session.closeQuestion(props.request.id)
+        return
+      }
       reject()
       return
     }
@@ -308,8 +338,10 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
     void store.tab
     if (store.collapsed || store.editing || confirm()) return
     requestAnimationFrame(() => {
-      if (!document.hasFocus()) return
-      const btn = root?.querySelector<HTMLButtonElement>("button[data-slot='question-option']:not(:disabled)")
+      if (!document.hasFocus() || isTextControl(document.activeElement) || !root?.isConnected) return
+      const selector = "button[data-slot='question-option']:not(:disabled)"
+      const picked = root?.querySelector<HTMLButtonElement>(`${selector}[data-picked='true']`)
+      const btn = picked ?? root?.querySelector<HTMLButtonElement>(selector)
       btn?.focus({ preventScroll: true })
     })
   })
@@ -319,6 +351,7 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
       ref={root}
       data-component="question-dock"
       data-collapsed={store.collapsed ? "true" : "false"}
+      data-tone={props.request.tone}
       onClick={(e: MouseEvent) => e.stopPropagation()}
       onKeyDown={onRoot}
     >
@@ -327,7 +360,9 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
         <div data-slot="question-dock-header-content">
           <div data-slot="question-header-title">{summary()}</div>
           <Show when={store.collapsed}>
-            <div data-slot="question-collapsed-preview">{questionText()}</div>
+            <div data-slot="question-collapsed-preview" dir="auto">
+              {questionText()}
+            </div>
           </Show>
         </div>
         <div data-slot="question-header-actions" onClick={(e: MouseEvent) => e.stopPropagation()}>
@@ -370,7 +405,9 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
       <div data-slot="question-dock-body" inert={store.collapsed || undefined}>
         <div data-slot="question-dock-body-inner">
           <Show when={!confirm()}>
-            <div data-slot="question-text">{questionText()}</div>
+            <div data-slot="question-text" dir="auto">
+              {questionText()}
+            </div>
             <Show when={multi()} fallback={<div data-slot="question-hint">{language.t("ui.question.singleHint")}</div>}>
               <div data-slot="question-hint">{language.t("ui.question.multiHint")}</div>
             </Show>
@@ -398,9 +435,13 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
                         </span>
                       </span>
                       <span data-slot="question-option-main">
-                        <span data-slot="option-label">{localized.label()}</span>
+                        <span data-slot="option-label" dir="auto">
+                          {localized.label()}
+                        </span>
                         <Show when={localized.description()}>
-                          <span data-slot="option-description">{localized.description()}</span>
+                          <span data-slot="option-description" dir="auto">
+                            {localized.description()}
+                          </span>
                         </Show>
                       </span>
                     </button>
@@ -477,8 +518,10 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
                   const answered = () => Boolean(value())
                   return (
                     <div data-slot="review-item">
-                      <span data-slot="review-label">{tr(language.t, q.questionKey, q.question)}</span>
-                      <span data-slot="review-value" data-answered={answered()}>
+                      <span data-slot="review-label" dir="auto">
+                        {tr(language.t, q.questionKey, q.question)}
+                      </span>
+                      <span data-slot="review-value" data-answered={answered()} dir="auto">
                         {answered() ? value() : language.t("ui.question.review.notAnswered")}
                       </span>
                     </div>
@@ -491,7 +534,7 @@ export const QuestionDock: Component<{ request: QuestionRequest }> = (props) => 
           {/* Footer row — inside the same box */}
           <div data-slot="question-dock-footer">
             <Button variant="ghost" size="small" onClick={reject} disabled={store.sending}>
-              {language.t("ui.common.dismiss")}
+              {props.request.rejectLabel ?? language.t("ui.common.dismiss")}
             </Button>
             <Show when={!store.editing}>
               <div data-slot="question-footer-actions">

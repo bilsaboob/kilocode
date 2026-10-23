@@ -23,7 +23,16 @@ Plugins extend Kilo by hooking into events, adding custom tools, registering aut
 
 ## Use a plugin
 
-There are three ways to load plugins.
+You can load plugins in several ways.
+
+### Install from the Marketplace
+
+Plugins appear in the **Marketplace** panel in the VS Code extension. Select a plugin, then choose a scope:
+
+- **Project** adds the plugin to the `plugin` array in the project config file.
+- **Global** adds the plugin to the `plugin` array in your user config file.
+
+The install dialog shows the destination before it changes anything. You can install registry plugins and git-hosted plugins in the same way.
 
 ### From a config file
 
@@ -58,7 +67,7 @@ Config files live in the same locations as the rest of your CLI configuration �
 Drop TypeScript or JavaScript files into a `plugin/` or `plugins/` folder inside any config directory:
 
 - Global: `~/.config/kilo/plugin/`
-- Project: `.kilo/plugin/`, `.kilocode/plugin/`, or `.opencode/plugin/`
+- Project: `.kilo/plugin/` or legacy `.kilocode/plugin/`
 
 Every `.ts` or `.js` file in those directories is auto-registered at startup — no need to list them in the config file.
 
@@ -86,7 +95,7 @@ kilo plugin my-plugin --global
 kilo plugin my-plugin --force
 ```
 
-The command resolves the package, reads its `package.json` for plugin entrypoints, and writes the entry into the appropriate config file (currently `.opencode/opencode.jsonc` / `.opencode/tui.jsonc` for local installs, or `~/.config/kilo/opencode.jsonc` / `~/.config/kilo/tui.jsonc` for `--global`) while preserving JSONC comments.
+The command resolves the package, reads its `package.json` for plugin entrypoints, and writes the entry into the appropriate config file (`.kilo/opencode.jsonc` / `.kilo/tui.jsonc` for local installs, or `~/.config/kilo/opencode.jsonc` / `~/.config/kilo/tui.jsonc` for `--global`) while preserving JSONC comments.
 
 ### How plugins are installed
 
@@ -305,6 +314,45 @@ const EscapeBash: Plugin = async () => ({
 export default { id: "escape-bash", server: EscapeBash }
 ```
 
+## Publish your plugin to the Marketplace
+
+The [Kilo Marketplace](https://github.com/Kilo-Org/kilo-marketplace) lists plugins from two sources:
+
+- **Registry plugins** are published to npm. Set the catalog `content` to the package name, for example `my-plugin` or `my-plugin@^1.2.0`.
+- **Git-hosted plugins** live in a public git repository. Set the catalog `content` to a git spec.
+
+A git spec uses this grammar:
+
+```text
+git:<repo>[@ref][#subpath]
+```
+
+- `repo` is `github.com/owner/repo` or a full URL with an `https`, `http`, `git`, or `ssh` scheme. The repo must not contain `@`.
+- `ref` (optional) is a branch, tag, or commit after the last `@`.
+- `subpath` (optional) is the plugin directory inside the repository, after the first `#`.
+
+The catalog `id` must equal the plugin identity. For a registry plugin, use the npm package name. For a git plugin, use the normalized git identity: `git/` plus the repo without its scheme and without a trailing `.git`, plus the subpath when present. For example, `git:github.com/owner/repo@v1` has the id `git/github.com/owner/repo`.
+
+Git plugins must be self-contained. Kilo clones the repository at the given ref and loads the plugin directly. It does not install npm dependencies for git plugins, so vendor any runtime dependencies into the repository.
+
+The repository or package must contain a `package.json` that declares at least one supported target:
+
+| Target | Manifest entry | Config |
+|---|---|---|
+| Server | `exports["./server"]`, or the legacy `main` entry | `opencode.json` |
+| TUI | `exports["./tui"]`, or `oc-themes` for theme packages | `tui.json` |
+
+For a plugin that supports both targets, use separate `./server` and `./tui` entry modules.
+
+### Submit your plugin
+
+1. Choose the source. Publish and test a registry plugin, or host a self-contained plugin in a public git repository.
+2. Add a `PLUGIN.yaml` entry under `plugins/<id>/PLUGIN.yaml` in the [Kilo Marketplace repository](https://github.com/Kilo-Org/kilo-marketplace). The directory path must equal `id`.
+3. Regenerate `plugins/marketplace.yaml` with the generator in the marketplace repository. Do not edit it manually.
+4. Submit a pull request with the manifest and the regenerated catalog. Describe what the plugin does, its source, and which targets you tested.
+
+See the [plugin README](https://github.com/Kilo-Org/kilo-marketplace/blob/main/plugins/README.md) for the `PLUGIN.yaml` fields and the generator commands, and the [contribution guidelines](https://github.com/Kilo-Org/kilo-marketplace/blob/main/CONTRIBUTING.md) for the review process.
+
 ---
 
 ## Hooks reference
@@ -315,7 +363,7 @@ Every hook is optional. Return only the ones you care about.
 
 | Hook | Description |
 |---|---|
-| `config` | Receives the fully-resolved config at startup. Read-only — useful for inspection. |
+| `config` | Receives the fully-resolved config at startup. Mutate it in place to add or change agents, commands, providers, and other config — this is how a plugin contributes its own slash commands. A command named `goal` is reserved for [session goals](/docs/code-with-ai/agents/goals): Kilo ignores it under that name, warns, and exposes it as `/goal:command` instead. |
 | `event` | Called for **every** event on the internal bus (see [Events](#events)). |
 
 ### Tools
@@ -446,7 +494,7 @@ If a custom tool uses the same name as a built-in tool, **the custom tool wins**
 
 ### Alternative: standalone tool files
 
-For tools that don't need the full plugin context, drop them in a `tool/` or `tools/` folder inside any config directory — for example `.kilo/tool/database.ts` or `~/.config/kilo/tool/database.ts`. The filename becomes the tool name, and each file exports a `tool()` definition directly. The layout is identical to the [OpenCode custom tools guide](https://opencode.ai/docs/custom-tools); substitute `.kilo/` (or `.kilocode/` / `.opencode/`) for `.opencode/`.
+For tools that don't need the full plugin context, drop them in a `tool/` or `tools/` folder inside any config directory — for example `.kilo/tool/database.ts` or `~/.config/kilo/tool/database.ts`. The filename becomes the tool name, and each file exports a `tool()` definition directly. The layout is identical to the [OpenCode custom tools guide](https://opencode.ai/docs/custom-tools); use `.kilo/`, or legacy `.kilocode/`, instead of `.opencode/`.
 
 ---
 
@@ -456,7 +504,7 @@ For tools that don't need the full plugin context, drop them in a `tool/` or `to
 
 The CLI has built-in attention alerts for session completion, errors, and prompts that need input. You do not need a plugin or platform-specific notification command.
 
-Enable notifications and sounds in `kilo console` under **Settings > CLI > Notifications**, or configure the `attention` section of `tui.json`. See [CLI Notifications and Sounds](/docs/code-with-ai/platforms/cli#cli-notifications-and-sounds) for configuration and custom sound overrides.
+Configure the `attention` section of `tui.json` or `tui.jsonc` to enable notifications and sounds. See [CLI Notifications and Sounds](/docs/code-with-ai/platforms/cli#cli-notifications-and-sounds) for configuration and custom sound overrides.
 
 ### Block reads of `.env` files
 

@@ -12,11 +12,13 @@ There are lots of ways to contribute to the project:
 - **Feature Requests:** Suggest new features or improvements
 - **Community Support:** Help other users in the community
 
+Community pull requests are triaged twice a week. See [Community triage](docs/community-triage.md) for what to expect and how long we wait for replies.
+
 The Kilo Community is [on Discord](https://kilo.ai/discord).
 
 ## Prerequisites
 
-- **Bun 1.3.14+** — required for all packages.
+- **Bun `1.4.4`** - The exact official npm package is required for all packages. Install it as shown below.
 - **Java 21** — required by the JetBrains plugin. The root `bun turbo typecheck` and `bun turbo test:ci` commands include `@kilocode/kilo-jetbrains` and will fail without Java 21.
 
   The preferred way to install Java is via [SDKMAN](https://sdkman.io/install):
@@ -39,9 +41,21 @@ The Kilo Community is [on Discord](https://kilo.ai/discord).
   bun turbo typecheck --filter=!@kilocode/kilo-jetbrains
   ```
 
+Use Node.js 24.22.1 or newer with npm from a trusted source to install the pinned Bun release:
+
+```bash
+npm install --global bun@1.4.4
+bun --version
+bun --print "Bun.revision"
+```
+
+The expected `Bun.revision` is `38afee6c84fcf48c0edb2466aa4b27d287a59c30`. The CLI build rejects other revisions. The root `package.json` pins the npm package version, and `script/kilocode/bun.json` records the exact revision and target artifact checksums.
+
+The first CLI build needs access to the npm registry. The build caches verified Bun archives in a private, user-scoped temporary directory. Each build extracts a fresh executable before compilation.
+
 ## Developing Kilo CLI
 
-- **Requirements:** Bun 1.3.14+, Java 21 (see [Prerequisites](#prerequisites) above)
+- **Requirements:** Bun `1.4.4` at the exact revision above, Java 21 (see [Prerequisites](#prerequisites) above)
 - Install dependencies and start the CLI from the repo root:
 
   ```bash
@@ -90,6 +104,8 @@ bun run compile
 bun run package
 ```
 
+Linux visual CI prefers Ubuntu's official HTTPS archive for Playwright system packages and retains the Azure mirror as a fallback.
+
 ### Documentation checks
 
 From the repo root:
@@ -114,10 +130,19 @@ For manual docs validation, run the docs site locally, preview the affected page
 Build and launch the extension in an isolated VS Code instance:
 
 ```bash
-bun run extension        # Build + launch in dev mode
+bun run extension                  # Build + launch in dev mode
+bun run extension:isolated         # Build + launch with persistent isolated IDE + Kilo state
+bun run extension:isolated:clean   # Clear isolated state, then build + launch
 ```
 
-This auto-detects VS Code on macOS, Linux, and Windows. Override with `--app-path PATH` or `VSCODE_EXEC_PATH`. Use `--insiders` to prefer Insiders, `--workspace PATH` to open a specific folder, or `--clean` to reset cached state.
+This auto-detects VS Code on macOS, Linux, and Windows. Override with `--app-path PATH` or `VSCODE_EXEC_PATH`. Use `--insiders` to prefer Insiders, pass a directory argument to open a specific folder, or use `--workspace PATH` for the same behavior.
+
+The isolated modes are for testing the extension without touching your primary VS Code profile or real Kilo config. `extension:isolated` reuses `.kilo-dev/` on each run, so installed extensions, VS Code settings, Kilo auth, sessions, config, state, and cache persist across launches. `extension:isolated:clean` deletes `.kilo-dev/` before launching, which simulates a fresh install while still keeping all state inside this repo checkout.
+
+```bash
+bun run extension:isolated -- ../sample-project
+bun run extension:isolated:clean -- ../sample-project
+```
 
 ### Developing the JetBrains Plugin
 
@@ -126,8 +151,10 @@ Requires Java 21 (see [Prerequisites](#prerequisites)). From `packages/kilo-jetb
 ```bash
 ./gradlew typecheck    # Compile-check all Kotlin sources
 ./gradlew test         # Run all tests (backend + frontend)
-./gradlew runIde       # Launch sandboxed IntelliJ with the plugin
+./gradlew --no-configuration-cache runIdeSplitMode  # Launch local split-mode sandbox; backend downloads the pinned CLI
 ```
+
+Use `./gradlew runIde` only for a monolithic sandbox. JetBrains dev runs do not build or bundle CLI binaries; the backend downloads the pinned release at connect time.
 
 Or via the root turbo filter to run only JetBrains checks from the repo root:
 
@@ -222,13 +249,20 @@ To point the CLI at a local backend (e.g., a locally running Kilo API server on 
 KILO_API_URL=http://localhost:3000 bun dev
 ```
 
-This redirects all gateway traffic (auth, model listing, provider routing, profile, etc.) to your local server. The default is `https://api.kilo.ai`.
+This redirects Kilo API traffic (auth, profile, etc.) to your local server. The default is `https://api.kilo.ai`. When only `KILO_API_URL` is set, AI gateway traffic (chat, model listing, embeddings, autocomplete, transcription) also goes to this server under `/api/gateway/v1`, which the web app rewrites to the AI gateway.
+
+To point AI gateway traffic at a separate server, such as a locally running `ai-gateway` app, set `KILO_AI_GATEWAY_URL` to its `/api/v1` base. It takes precedence over `KILO_API_URL` for gateway traffic only:
+
+```bash
+KILO_API_URL=http://localhost:3000 KILO_AI_GATEWAY_URL=http://localhost:3010/api/v1 bun dev
+```
 
 There are also optional overrides for other services:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KILO_API_URL` | `https://api.kilo.ai` | Kilo API (gateway, auth, models, profile) |
+| `KILO_API_URL` | `https://api.kilo.ai` | Kilo API (auth, profile, defaults); when set without `KILO_AI_GATEWAY_URL`, also gateway traffic via `${KILO_API_URL}/api/gateway/v1` |
+| `KILO_AI_GATEWAY_URL` | `https://ai-gateway.kilo.ai/api/v1` | AI gateway (chat, models, embeddings, autocomplete, transcription) |
 | `KILO_SESSION_INGEST_URL` | `https://ingest.kilosessions.ai` | Session export / cloud sync |
 | `KILO_MODELS_URL` | `https://models.dev` | Model metadata |
 
@@ -265,7 +299,7 @@ Maintainers may close PRs that appear to be submitted without credible contribut
 
 Do not submit batches of agent-generated, untested, or weakly reviewed PRs.
 
-Please keep concurrent PRs focused and limited. As a rule, open no more than three PRs at a time, especially if you are a new contributor. Prioritize high-impact or high-priority issues first instead of opening many speculative fixes. If a contributor opens a large batch of low-value or duplicative PRs, maintainers may close the batch and ask the contributor to choose one PR to reopen, focus, and bring up to the documented review bar before submitting more.
+Prioritize high-impact or high-priority issues first instead of opening many speculative fixes. If a contributor opens a large batch of low-value or duplicative PRs, maintainers may close the batch and ask the contributor to choose one PR to reopen, focus, and bring up to the documented review bar before submitting more.
 
 For issues, do not mass-create tickets through automation or agents. Search existing issues first, open issues only when you have enough context for someone to act, and prioritize the most important reports instead of filing every possible finding. Maintainers may close duplicate, low-signal, automated, or weakly reviewed issues without action.
 

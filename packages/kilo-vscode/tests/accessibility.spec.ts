@@ -10,9 +10,15 @@ const STORIES = [
   { id: "profile--not-logged-in", name: "Profile / not logged in" },
   { id: "profile--logged-in-personal", name: "Profile / personal account" },
   { id: "profile--logged-in", name: "Profile / organization account" },
+  { id: "profile--organization-context", name: "Profile / selected organization" },
+  { id: "profile--stale-and-unavailable", name: "Profile / stale usage" },
+  { id: "profile--empty-usage", name: "Profile / empty usage" },
   { id: "settings--providers-configure", name: "Settings / providers empty state" },
   { id: "marketplace--empty-list", name: "Marketplace / empty state" },
   { id: "agentmanager--sidebar-search-open", name: "Agent Manager / sidebar search" },
+  { id: "agentmanager--side-terminal-panel-empty", name: "Agent Manager / side terminal" },
+  { id: "session-tabs--switcher-open", name: "Session tabs / switcher" },
+  { id: "iconbutton--states", name: "IconButton / shared states" },
 ]
 
 function url(id: string) {
@@ -47,6 +53,40 @@ test.describe("webview accessibility ratchet", () => {
       await scan(page)
     })
   }
+
+  test("IconButton states expose labels, keyboard state, disabled state, and tooltips", async ({ page }) => {
+    await open(page, "iconbutton--states")
+
+    const create = page.getByRole("button", { name: "Create item", exact: true })
+    const disabled = page.getByRole("button", { name: "Delete item", exact: true })
+    const loading = page.getByRole("button", { name: "Refresh item", exact: true })
+    const toggle = page.getByRole("button", { name: "Toggle changes", exact: true })
+    const content = page.getByTestId("icon-button-with-content")
+    const indexing = page.getByRole("button", { name: "Indexing", exact: true })
+
+    await expect(create).toBeVisible()
+    await expect(disabled).toBeDisabled()
+    await expect(disabled).toHaveAttribute("aria-label", "Delete item")
+    await expect(loading).toBeDisabled()
+    await expect(loading).toHaveAttribute("aria-busy", "true")
+    const contentBox = await content.boundingBox()
+    const iconBox = await content.locator('[data-slot="icon-svg"]').boundingBox()
+    expect(contentBox?.width).toBeGreaterThan(20)
+    expect(iconBox?.x).toBeGreaterThanOrEqual((contentBox?.x ?? 0) - 1)
+    await expect(indexing.locator('[data-slot="icon-svg"]')).toHaveAttribute("viewBox", "0 0 24 24")
+    expect(await indexing.locator('[data-slot="icon-svg"]').evaluate((el) => getComputedStyle(el).strokeWidth)).toBe(
+      "1.5px",
+    )
+    await expect(toggle).toHaveAttribute("aria-pressed", "false")
+
+    await reach(page, toggle)
+    await expect(toggle).toBeFocused()
+    await page.keyboard.press("Enter")
+    await expect(toggle).toHaveAttribute("aria-pressed", "true")
+
+    await create.hover()
+    await expect(page.locator('[data-component="tooltip"]')).toContainText("Create item")
+  })
 
   test("Agent Manager keeps virtualized transcript fragments laid out", async ({ page }) => {
     await open(page, "agentmanager--sidebar-search-open")
@@ -177,5 +217,77 @@ test.describe("webview accessibility ratchet", () => {
       page.getByText("Searches the local workspace, local sessions, worktrees, and their sessions", { exact: true }),
     ).toBeVisible()
     await expect(page.getByText("⌘F", { exact: true })).toBeVisible()
+  })
+
+  test("Search lists do not select an unhighlighted result on Enter by default", async ({ page }) => {
+    await open(page, "agentmanager--sidebar-search-open")
+
+    const input = page.getByPlaceholder("Search worktrees and sessions", { exact: true })
+    const row = page.locator('[data-slot="list-item"]').first()
+    const selected = page.locator('[data-slot="sidebar-search-selection"]')
+
+    await input.fill("Render")
+    await expect(row).toContainText("Render images in diff viewer")
+    await row.dispatchEvent("mousemove", { movementX: 1 })
+    await expect(row).toHaveAttribute("data-active", "true")
+    await row.dispatchEvent("mouseleave")
+    await expect(page.locator('[data-slot="list-item"][data-active="true"]')).toHaveCount(0)
+
+    await input.press("Enter")
+    await expect(selected).toHaveText("worktree:wt-search")
+    await expect(input).toBeFocused()
+  })
+
+  test("Session tab switcher restores chat focus after keyboard and mouse selection", async ({ page }) => {
+    await open(page, "session-tabs--switcher-open")
+
+    const input = page.getByPlaceholder("Search open tabs")
+    const prompt = page.getByRole("textbox", { name: "Chat input" })
+    await expect(page.locator('[data-slot="list-item"][data-active="true"]')).toHaveCount(0)
+    await expect(page.locator('[data-slot="list-item"][data-key="current"]')).toHaveAttribute("data-selected", "true")
+    await expect(page.locator('[data-slot="list-item"][data-key="refactor"]')).toHaveAttribute("data-selected", "false")
+    await input.press("ArrowDown")
+    await input.press("Enter")
+    await expect(prompt).toBeFocused()
+
+    await page.getByRole("button", { name: "Show open tabs" }).click()
+    await page.locator('[data-slot="list-item"][data-key="current"]').click()
+    await expect(prompt).toBeFocused()
+
+    // Enter without prior ArrowDown selects the first filtered result (noInitialSelection)
+    await page.getByRole("button", { name: "Show open tabs" }).click()
+    await input.fill("Review")
+    await input.press("Enter")
+    await expect(prompt).toBeFocused()
+  })
+
+  test("Search popovers expose accessible dialog names", async ({ page }) => {
+    for (const id of ["agentmanager--sidebar-search-open", "session-tabs--switcher-open"]) {
+      await open(page, id)
+      await expect(page.getByRole("dialog")).toHaveAccessibleName(/.+/)
+    }
+  })
+
+  test("To-do cards render read-only checkboxes with labeled states", async ({ page }) => {
+    await open(page, "composite-webview--todo-write-completed")
+
+    const card = page.locator('[data-component="todos"]')
+    const done = card.getByRole("checkbox", { name: "Create a haiku about Jan" })
+    const active = card.getByRole("checkbox", { name: "Create a poem about Henk" })
+
+    await expect(done).toBeChecked()
+    await expect(active).not.toBeChecked()
+    await expect(done).toHaveAttribute("aria-readonly", "true")
+    await expect(active).toHaveAttribute("aria-readonly", "true")
+    await expect(card.locator('[data-component="checkbox"][data-readonly]')).toHaveCount(2)
+    await expect(card.locator('[data-slot="checkbox-checkbox-indicator"]')).toHaveCount(1)
+    await expect(card.locator('[data-slot="message-part-todo-content"][data-completed="completed"]')).toHaveText(
+      "Create a haiku about Jan",
+    )
+
+    await active.focus()
+    await page.keyboard.press("Space")
+    await expect(active).not.toBeChecked()
+    await expect(done).toBeChecked()
   })
 })

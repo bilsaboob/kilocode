@@ -5,9 +5,15 @@ import ai.kilocode.backend.app.KiloBackendAppService
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.rpc.dto.CustomModelDto
+import ai.kilocode.rpc.dto.CustomModelFetchDto
+import ai.kilocode.rpc.dto.CustomProviderSaveDto
+import ai.kilocode.rpc.dto.ProviderConnectDto
 import ai.kilocode.rpc.dto.ProviderDisconnectDto
 import ai.kilocode.rpc.dto.ProviderEnableDto
 import kotlinx.coroutines.async
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -56,6 +62,32 @@ class KiloBackendProviderSettingsManagerTest {
         assertNull(mock.lastConfigPatchBody)
         assertNull(mock.lastAuthDeletePath)
         assertEquals(0, mock.requestCount("/global/dispose"))
+    }
+
+    @Test
+    fun `connecting provider stores credentials and reloads connected state`() = runBlocking {
+        mock.providers = """{
+            "all":[{"id":"openai","name":"OpenAI","source":"custom","models":{}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        mock.providersAfterAuthPut = """{
+            "all":[{"id":"openai","name":"OpenAI","source":"custom","models":{}}],
+            "default":{},
+            "connected":["openai"],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.connect(ProviderConnectDto("/test", "openai", "sk-test", mapOf("baseURL" to "https://api.openai.com/v1")))
+
+        assertNull(result.error)
+        assertContains(mock.lastAuthPutBody.orEmpty(), "\"key\":\"sk-test\"")
+        assertContains(mock.lastAuthPutBody.orEmpty(), "\"baseURL\":\"https://api.openai.com/v1\"")
+        assertEquals(listOf("openai"), result.state.connected)
+        assertEquals(1, mock.requestCount("/global/dispose"))
     }
 
     @Test
@@ -189,6 +221,513 @@ class KiloBackendProviderSettingsManagerTest {
         assertFalse(mock.lastWorkspaceConfigPatchBody.orEmpty().contains("anthropic"))
         assertFalse(mock.lastWorkspaceConfigPatchBody.orEmpty().contains("global-disabled"))
         assertEquals(1, mock.requestCount("/global/dispose"))
+    }
+
+    @Test
+    fun `saving custom provider without models returns error and does not patch config`() = runBlocking {
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto("/test", "my-openai", "My OpenAI", "https://api.example.com/v1"),
+        )
+
+        assertEquals("At least one model ID is required.", result.error)
+        assertNull(mock.lastConfigPatchBody)
+        assertEquals(0, mock.requestCount("/global/dispose"))
+    }
+
+    @Test
+    fun `saving custom provider with a model patches config and reloads provider`() = runBlocking {
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"my-openai\"")
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"@ai-sdk/openai-compatible\"")
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"gpt-4o\"")
+        assertContains(mock.lastAuthPutBody.orEmpty(), "\"key\":\"sk-test\"")
+        assertTrue(result.state.providers.any { it.id == "my-openai" })
+        assertEquals(1, mock.requestCount("/global/dispose"))
+    }
+
+    @Test
+    fun `saving custom provider with blank env var clears existing env from config`() = runBlocking {
+        // The config schema only allows nulling a whole provider entry, not a single field inside
+        // one, so clearing "env" requires deleting and recreating the entry. This exercises that
+        // two-step flow through MockCliServer's own JSON-merge-patch simulation of the real config
+        // endpoint, rather than asserting on a single "env":null patch body the real CLI would 400 on.
+        mock.config = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"env":["OLD_VAR"]}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                envVar = null,
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"my-openai\"")
+        assertFalse(mock.lastConfigPatchBody.orEmpty().contains("\"env\""))
+        assertContains(mock.lastAuthPutBody.orEmpty(), "\"key\":\"sk-test\"")
+        val state = manager.state("/test")
+        assertEquals(emptyList<String>(), state.config["my-openai"]?.env.orEmpty())
+    }
+
+    @Test
+    fun `clearing an env var keeps hand-authored headers on the provider entry`() = runBlocking {
+        // Deleting the entry to clear "env" also drops every other key on it. The dialog has no
+        // headers field, so headers only ever come from a hand-edited kilo.json and must survive
+        // the recreate patch instead of being silently wiped by an unrelated env var change.
+        mock.config = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"env":["OLD_VAR"],"headers":{"X-Custom":"abc-123"}}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                envVar = null,
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        val state = manager.state("/test")
+        assertEquals(emptyList<String>(), state.config["my-openai"]?.env.orEmpty())
+        assertEquals(mapOf("X-Custom" to "abc-123"), state.config["my-openai"]?.headers)
+    }
+
+    @Test
+    fun `saving custom provider with a deselected model removes only that model from the reloaded config`() = runBlocking {
+        // Regression test: the JetBrains plugin could add models to a custom OpenAI-compatible
+        // provider but never remove them. The save only ever sent the surviving models, and the
+        // config PATCH endpoint deep-merges provider objects, so a deselected model key silently
+        // stuck around in kilo.json and reappeared after every restart.
+        mock.config = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"headers":{"X-Custom":"abc-123"},"models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"},"gpt-3.5-turbo":{"id":"gpt-3.5-turbo","name":"gpt-3.5-turbo"}}}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"gpt-3.5-turbo\":null")
+        val state = manager.state("/test")
+        assertEquals(setOf("gpt-4o"), state.config["my-openai"]?.models?.keys)
+        // The provider entry itself was patched in place (not deleted+recreated), so unrelated
+        // hand-authored fields survive the model removal.
+        assertEquals(mapOf("X-Custom" to "abc-123"), state.config["my-openai"]?.headers)
+    }
+
+    @Test
+    fun `saving custom provider can remove one model and add another in the same save`() = runBlocking {
+        mock.config = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"},"gpt-3.5-turbo":{"id":"gpt-3.5-turbo","name":"gpt-3.5-turbo"}}}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o"), CustomModelDto("gpt-4o-mini", "gpt-4o-mini")),
+            ),
+        )
+
+        assertNull(result.error)
+        val state = manager.state("/test")
+        assertEquals(setOf("gpt-4o", "gpt-4o-mini"), state.config["my-openai"]?.models?.keys)
+    }
+
+    @Test
+    fun `saving a workspace-scoped custom provider removes a deselected model from the workspace config`() = runBlocking {
+        mock.workspaceConfig = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"},"gpt-3.5-turbo":{"id":"gpt-3.5-turbo","name":"gpt-3.5-turbo"}}}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test project",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        // The removal patch must target the same scope the provider was originally saved in;
+        // writing it to /global/config would silently fail to remove the workspace-scoped model.
+        assertNull(mock.lastConfigPatchBody)
+        assertEquals("/config?directory=%2Ftest+project", mock.lastWorkspaceConfigPatchPath)
+        assertContains(mock.lastWorkspaceConfigPatchBody.orEmpty(), "\"gpt-3.5-turbo\":null")
+        val state = manager.state("/test project")
+        assertEquals(setOf("gpt-4o"), state.config["my-openai"]?.models?.keys)
+    }
+
+    @Test
+    fun `saving custom provider duplicated identically in both scopes also nulls the removed model in the other scope`() = runBlocking {
+        // Regression test for a duplicate-provider edge case: if the same custom provider id is
+        // hand-authored identically into both the global and workspace config files, the merged
+        // view treats it as "global" scoped (the two entries match). Removing a model must still
+        // null it out of the workspace's independent copy too, or that stale duplicate resurrects
+        // the model in the merged config the next time settings load.
+        val duplicated = """{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"},"gpt-3.5-turbo":{"id":"gpt-3.5-turbo","name":"gpt-3.5-turbo"}}}"""
+        mock.config = """{"provider":{"my-openai":$duplicated}}"""
+        mock.workspaceConfig = """{"provider":{"my-openai":$duplicated}}"""
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"gpt-3.5-turbo\":null")
+        assertContains(mock.lastWorkspaceConfigPatchBody.orEmpty(), "\"gpt-3.5-turbo\":null")
+        val state = manager.state("/test")
+        assertEquals(setOf("gpt-4o"), state.config["my-openai"]?.models?.keys)
+    }
+
+    @Test
+    fun `clearing an env var still nulls a removed model in a duplicated other-scope entry`() = runBlocking {
+        // The env-var clear forces the primary (global) scope through delete-then-recreate, which
+        // only touches that one scope. A model removed on the same save must still be nulled out
+        // of an independent duplicate entry in the other (workspace) scope, or that untouched
+        // duplicate resurrects the model once the two scopes' entries diverge (recreate drops the
+        // env from global) and scopedConfig picks the workspace duplicate as effective again.
+        val duplicated = """{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"env":["OLD_VAR"],"models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"},"gpt-3.5-turbo":{"id":"gpt-3.5-turbo","name":"gpt-3.5-turbo"}}}"""
+        mock.config = """{"provider":{"my-openai":$duplicated}}"""
+        mock.workspaceConfig = """{"provider":{"my-openai":$duplicated}}"""
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                envVar = null,
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastWorkspaceConfigPatchBody.orEmpty(), "\"gpt-3.5-turbo\":null")
+        val state = manager.state("/test")
+        assertEquals(setOf("gpt-4o"), state.config["my-openai"]?.models?.keys)
+    }
+
+    @Test
+    fun `saving custom provider without an existing env var does not delete the entry first`() = runBlocking {
+        // Deleting first is only needed to clear a previously-set env var. Doing it unconditionally
+        // would risk wiping fields the save patch doesn't set (e.g. a hand-authored
+        // whitelist/blacklist) on every ordinary save, and would leave the provider entry missing
+        // if the recreate patch failed, so this must stay a no-op when there is nothing to clear.
+        mock.config = """{
+            "provider":{
+                "my-openai":{"name":"My OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"}}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"config","models":{"gpt-4o":{"id":"gpt-4o","name":"gpt-4o"}}}],
+            "default":{},
+            "connected":[],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.saveCustom(
+            CustomProviderSaveDto(
+                "/test",
+                "my-openai",
+                "My OpenAI",
+                "https://api.example.com/v1",
+                apiKey = "sk-test",
+                envVar = null,
+                models = listOf(CustomModelDto("gpt-4o", "gpt-4o")),
+            ),
+        )
+
+        assertNull(result.error)
+        assertContains(mock.lastAuthPutBody.orEmpty(), "\"key\":\"sk-test\"")
+        // Exactly one GET (the pre-check) + one PATCH (the recreate) + one GET (the trailing
+        // reload) hit /global/config; a fourth request would mean a delete patch also fired.
+        assertEquals(3, mock.requestCount("/global/config"))
+    }
+
+    @Test
+    fun `disconnecting env backed openai compatible custom provider deletes config and auth`() = runBlocking {
+        mock.config = """{
+            "provider":{
+                "local-openai":{"name":"Local OpenAI","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:11434"},"env":["API_KEY"]}
+            }
+        }""".trimIndent()
+        mock.providers = """{
+            "all":[{"id":"local-openai","name":"Local OpenAI","source":"env","key":"sk-env","models":{}}],
+            "default":{},
+            "connected":["local-openai"],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.disconnect(ProviderDisconnectDto("/test", "local-openai"))
+
+        assertNull(result.error)
+        assertContains(mock.lastConfigPatchBody.orEmpty(), "\"local-openai\":null")
+        assertEquals("/auth/local-openai", mock.lastAuthDeletePath)
+    }
+
+    @Test
+    fun `disconnecting env only catalog provider still returns configured by environment error`() = runBlocking {
+        mock.providers = """{
+            "all":[{"id":"anthropic","name":"Anthropic","source":"env","key":"sk-env","models":{}}],
+            "default":{},
+            "connected":["anthropic"],
+            "failed":[]
+        }""".trimIndent()
+        val manager = manager()
+
+        mock.resetCounts()
+        val result = manager.disconnect(ProviderDisconnectDto("/test", "anthropic"))
+
+        assertEquals("Provider is configured by environment variables.", result.error)
+        assertNull(mock.lastConfigPatchBody)
+    }
+
+    @Test
+    fun `fetch uses env var value for authorization when no key is typed`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"data":[{"id":"gpt-4o"}]}"""))
+        server.start()
+        val manager = manager()
+
+        try {
+            val result = manager.fetch(
+                CustomModelFetchDto(baseUrl = server.url("/v1").toString(), directory = "/test", env = "API_KEY"),
+                env = mapOf("API_KEY" to "sk-env"),
+            )
+
+            assertEquals(listOf("gpt-4o"), result.models)
+            assertNull(result.error)
+            assertFalse(result.envMissing)
+            assertEquals("Bearer sk-env", server.takeRequest().getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetch falls back to stored provider key when key and env are absent`() = runBlocking {
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"api","key":"sk-stored","models":{}}],
+            "default":{},
+            "connected":["my-openai"],
+            "failed":[]
+        }""".trimIndent()
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"data":[{"id":"gpt-4o"}]}"""))
+        server.start()
+        val manager = manager()
+
+        try {
+            val result = manager.fetch(
+                CustomModelFetchDto(baseUrl = server.url("/v1").toString(), directory = "/test", providerId = "my-openai"),
+                env = emptyMap(),
+            )
+
+            assertEquals(listOf("gpt-4o"), result.models)
+            assertEquals("Bearer sk-stored", server.takeRequest().getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetch marks env missing and sends request without authorization when env var is unset`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"data":[{"id":"local-model"}]}"""))
+        server.start()
+        val manager = manager()
+
+        try {
+            val result = manager.fetch(
+                CustomModelFetchDto(baseUrl = server.url("/v1").toString(), directory = "/test", env = "MISSING_KEY"),
+                env = emptyMap(),
+            )
+
+            assertEquals(listOf("local-model"), result.models)
+            assertTrue(result.envMissing)
+            assertNull(server.takeRequest().getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetch forwards custom headers to the models request`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"data":[]}"""))
+        server.start()
+        val manager = manager()
+
+        try {
+            manager.fetch(
+                CustomModelFetchDto(
+                    baseUrl = server.url("/v1").toString(),
+                    directory = "/test",
+                    headers = mapOf("X-Custom" to "abc-123"),
+                ),
+                env = emptyMap(),
+            )
+
+            assertEquals("abc-123", server.takeRequest().getHeader("X-Custom"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetch prefers typed api key over env var and stored key`() = runBlocking {
+        mock.providers = """{
+            "all":[{"id":"my-openai","name":"My OpenAI","source":"api","key":"sk-stored","models":{}}],
+            "default":{},
+            "connected":["my-openai"],
+            "failed":[]
+        }""".trimIndent()
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"data":[]}"""))
+        server.start()
+        val manager = manager()
+
+        try {
+            manager.fetch(
+                CustomModelFetchDto(
+                    baseUrl = server.url("/v1").toString(),
+                    directory = "/test",
+                    providerId = "my-openai",
+                    apiKey = "sk-typed",
+                    env = "API_KEY",
+                ),
+                env = mapOf("API_KEY" to "sk-env"),
+            )
+
+            assertEquals("Bearer sk-typed", server.takeRequest().getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

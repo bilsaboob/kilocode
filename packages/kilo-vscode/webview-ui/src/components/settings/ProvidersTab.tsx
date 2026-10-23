@@ -1,6 +1,8 @@
 import { Button } from "@kilocode/kilo-ui/button"
 import { Card } from "@kilocode/kilo-ui/card"
+import { Collapsible } from "@kilocode/kilo-ui/collapsible"
 import { useDialog } from "@kilocode/kilo-ui/context/dialog"
+import { Icon } from "@kilocode/kilo-ui/icon"
 import { ProviderIcon } from "@kilocode/kilo-ui/provider-icon"
 import { Select } from "@kilocode/kilo-ui/select"
 import { Tag } from "@kilocode/kilo-ui/tag"
@@ -15,8 +17,21 @@ import type { Provider } from "../../types/messages"
 import CustomProviderDialog from "./CustomProviderDialog"
 import ProviderConnectDialog from "./ProviderConnectDialog"
 import ProviderSelectDialog from "./ProviderSelectDialog"
-import { CUSTOM_PROVIDER_ID, isPopularProvider, providerIcon, providerNoteKey, sortProviders } from "./provider-catalog"
-import { disabledProviderOptions, providersWithKiloFallback, visibleConnectedIds } from "./provider-visibility"
+import {
+  isPopularProvider,
+  providerFailure,
+  providerFailureMessageKey,
+  providerFailureNeedsSignIn,
+  providerIcon,
+  providerNoteKey,
+  sortProviders,
+} from "./provider-catalog"
+import {
+  canChangeProviderKey,
+  disabledProviderOptions,
+  providersWithKiloFallback,
+  visibleConnectedIds,
+} from "./provider-visibility"
 import { isCustomProviderPackage, KILO_PROVIDER_ID } from "../../../../src/shared/provider-model"
 import { createProviderAction } from "../../utils/provider-action"
 
@@ -36,6 +51,7 @@ const ProvidersTab: Component = () => {
   onCleanup(action.dispose)
 
   const kiloLoggedIn = createMemo(() => !!provider.authStates()[KILO_PROVIDER_ID])
+  const kiloFailure = createMemo(() => providerFailure(KILO_PROVIDER_ID, provider.failures()))
 
   const connectedProviders = createMemo(() => {
     const ids = visibleConnectedIds(provider.connected(), provider.authStates())
@@ -71,6 +87,7 @@ const ProvidersTab: Component = () => {
   }
 
   function sourceTag(item: Provider) {
+    if (item.id === "anaconda-desktop") return language.t("settings.providers.tag.local")
     const current = source(item)
     if (current === "env") return language.t("settings.providers.tag.environment")
     if (current === "api") return language.t("provider.connect.method.apiKey")
@@ -165,31 +182,56 @@ const ProvidersTab: Component = () => {
           <div
             style={{
               display: "flex",
-              "align-items": "center",
-              gap: "12px",
+              "flex-direction": "column",
+              gap: "4px",
               "min-height": "56px",
               padding: "12px 0",
             }}
           >
-            <ProviderIcon id={providerIcon(KILO_PROVIDER_ID)} width={20} height={20} />
-            <span
-              style={{
-                "font-size": "var(--kilo-font-size-14)",
-                "font-weight": "500",
-                color: "var(--vscode-foreground)",
+            <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
+              <ProviderIcon id={providerIcon(KILO_PROVIDER_ID)} width={20} height={20} />
+              <span
+                style={{
+                  "font-size": "var(--kilo-font-size-14)",
+                  "font-weight": "500",
+                  color: "var(--vscode-foreground)",
+                }}
+              >
+                Kilo Gateway
+              </span>
+              <Show
+                when={kiloLoggedIn() && !(kiloFailure() && providerFailureNeedsSignIn(kiloFailure()!))}
+                fallback={
+                  <Button size="small" variant="secondary" onClick={() => server.goToLogin()}>
+                    {language.t("common.signIn")}
+                  </Button>
+                }
+              >
+                <Tag>{language.t("settings.providers.tag.gateway")}</Tag>
+              </Show>
+            </div>
+            <Show when={kiloFailure()}>
+              {(failure) => {
+                // Read the failure inside a tracked call so a changed reason
+                // (e.g. network -> unauthorized) re-renders instead of keeping
+                // the previous text. A non-keyed Show does not re-run its
+                // render function when one truthy value replaces another.
+                const message = createMemo(() => {
+                  const { key, vars } = providerFailureMessageKey(failure())
+                  return language.t(key, vars)
+                })
+                return (
+                  <span
+                    style={{
+                      "font-size": "var(--kilo-font-size-12)",
+                      color: "var(--vscode-errorForeground)",
+                      "padding-left": "32px",
+                    }}
+                  >
+                    {message()}
+                  </span>
+                )
               }}
-            >
-              Kilo Gateway
-            </span>
-            <Show
-              when={kiloLoggedIn()}
-              fallback={
-                <Button size="small" variant="secondary" onClick={() => server.goToLogin()}>
-                  {language.t("common.signIn")}
-                </Button>
-              }
-            >
-              <Tag>{language.t("settings.providers.tag.gateway")}</Tag>
             </Show>
           </div>
         </Card>
@@ -261,7 +303,19 @@ const ProvidersTab: Component = () => {
                       {language.t("settings.providers.action.signInChatGPT")}
                     </Button>
                   </Show>
+                  <Show when={item.id === "anaconda-desktop"}>
+                    <Button size="large" variant="ghost" onClick={() => connectProvider(item)}>
+                      {language.t("provider.anaconda.action.manage")}
+                    </Button>
+                  </Show>
                   <Show when={canDisconnect(item)}>
+                    <Show
+                      when={canChangeProviderKey(item, config().provider?.[item.id], provider.authMethods()[item.id])}
+                    >
+                      <Button size="large" variant="ghost" onClick={() => connectProvider(item)}>
+                        {language.t("settings.providers.action.changeApiKey")}
+                      </Button>
+                    </Show>
                     <Show when={isCustom(item)}>
                       <Button size="large" variant="ghost" onClick={() => editProvider(item)}>
                         {language.t("provider.custom.edit.title")}
@@ -344,6 +398,7 @@ const ProvidersTab: Component = () => {
             gap: "16px",
             "min-height": "56px",
             padding: "12px 0",
+            "border-bottom": "1px solid var(--border-weak-base)",
           }}
         >
           <div style={{ display: "flex", "flex-direction": "column", "min-width": 0 }}>
@@ -379,100 +434,144 @@ const ProvidersTab: Component = () => {
             {language.t("common.connect")}
           </Button>
         </div>
-      </Card>
 
-      {/* View all providers link */}
-      <div style={{ "margin-top": "16px" }}>
-        <Button variant="ghost" onClick={() => dialog.show(() => <ProviderSelectDialog />)} style={{ padding: "0" }}>
-          {language.t("dialog.provider.viewAll")}
-        </Button>
-      </div>
-
-      {/* Disabled providers */}
-      <h4 style={{ "margin-top": "24px", "margin-bottom": "8px" }}>{language.t("settings.providers.disabled")}</h4>
-      <Card>
-        <div
-          style={{
-            "font-size": "var(--kilo-font-size-12)",
-            color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
-            "padding-bottom": "8px",
-            "border-bottom": "1px solid var(--border-weak-base)",
-          }}
-        >
-          {language.t("settings.providers.disabled.description")}
-        </div>
-        <div
+        {/* Show more providers — prominent entry point to the full catalog */}
+        <button
+          type="button"
+          onClick={() => dialog.show(() => <ProviderSelectDialog />)}
           style={{
             display: "flex",
-            gap: "8px",
             "align-items": "center",
-            padding: "8px 0",
-            "border-bottom": disabledProviders().length > 0 ? "1px solid var(--border-weak-base)" : "none",
+            "justify-content": "space-between",
+            gap: "16px",
+            width: "100%",
+            "min-height": "56px",
+            padding: "12px 0",
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            "text-align": "left",
+            color: "var(--vscode-foreground)",
+            font: "inherit",
           }}
         >
-          <div style={{ flex: 1 }}>
-            <Select
-              options={disabledOptions()}
-              current={disabled()}
-              value={(item) => item.value}
-              label={(item) => item.label}
-              onSelect={(item) => setDisabled(item)}
-              variant="secondary"
-              triggerVariant="settings"
-              placeholder={language.t("settings.providers.select.placeholder")}
-            />
-          </div>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              const item = disabled()
-              if (!item) return
-              disableProvider(item.value)
-              setDisabled(undefined)
-            }}
-            disabled={!disabled()}
-          >
-            {language.t("common.add")}
-          </Button>
-        </div>
-        <For each={disabledProviders()}>
-          {(id, index) => (
-            <div
+          <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": 0 }}>
+            <Icon name="providers" size="small" />
+            <span
               style={{
-                display: "flex",
-                "flex-wrap": "wrap",
-                "align-items": "center",
-                "justify-content": "space-between",
-                gap: "16px",
-                "min-height": "56px",
-                padding: "12px 0",
-                "border-bottom":
-                  index() < disabledProviders().length - 1 ? "1px solid var(--border-weak-base)" : "none",
+                "font-size": "var(--kilo-font-size-14)",
+                "font-weight": "500",
               }}
             >
-              <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": 0 }}>
-                <ProviderIcon id={providerIcon(id)} width={20} height={20} />
-                <span
-                  style={{
-                    "font-size": "var(--kilo-font-size-14)",
-                    "font-weight": "500",
-                    color: "var(--vscode-foreground)",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}
-                >
-                  {disabledName(id)}
-                </span>
-                <Tag>{language.t("settings.providers.disabled")}</Tag>
-              </div>
-              <Button size="large" variant="ghost" onClick={() => enableProvider(index())}>
-                {language.t("settings.providers.disabled.enable")}
-              </Button>
-            </div>
-          )}
-        </For>
+              {language.t("dialog.provider.viewAll")}
+            </span>
+          </div>
+          <Icon name="chevron-right" size="small" />
+        </button>
       </Card>
+
+      {/* Disabled providers — collapsed by default to keep the focus on active providers */}
+      <div style={{ "margin-top": "24px" }}>
+        <Collapsible variant="ghost">
+          <Collapsible.Trigger>
+            <span
+              style={{
+                "font-size": "var(--kilo-font-size-12)",
+                "font-weight": "500",
+                color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
+              }}
+            >
+              {language.t("settings.providers.disabled")}
+            </span>
+            <Collapsible.Arrow />
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <Card style={{ "margin-top": "8px" }}>
+              <div
+                style={{
+                  "font-size": "var(--kilo-font-size-12)",
+                  color: "var(--text-weak-base, var(--vscode-descriptionForeground))",
+                  "padding-bottom": "8px",
+                  "border-bottom": "1px solid var(--border-weak-base)",
+                }}
+              >
+                {language.t("settings.providers.disabled.description")}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                  "align-items": "center",
+                  padding: "8px 0",
+                  "border-bottom": disabledProviders().length > 0 ? "1px solid var(--border-weak-base)" : "none",
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <Select
+                    options={disabledOptions()}
+                    current={disabled()}
+                    value={(item) => item.value}
+                    label={(item) => item.label}
+                    onSelect={(item) => setDisabled(item)}
+                    variant="secondary"
+                    triggerVariant="settings"
+                    placeholder={language.t("settings.providers.select.placeholder")}
+                  />
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    const item = disabled()
+                    if (!item) return
+                    disableProvider(item.value)
+                    setDisabled(undefined)
+                  }}
+                  disabled={!disabled()}
+                >
+                  {language.t("common.add")}
+                </Button>
+              </div>
+              <For each={disabledProviders()}>
+                {(id, index) => (
+                  <div
+                    style={{
+                      display: "flex",
+                      "flex-wrap": "wrap",
+                      "align-items": "center",
+                      "justify-content": "space-between",
+                      gap: "16px",
+                      "min-height": "56px",
+                      padding: "12px 0",
+                      "border-bottom":
+                        index() < disabledProviders().length - 1 ? "1px solid var(--border-weak-base)" : "none",
+                    }}
+                  >
+                    <div style={{ display: "flex", "align-items": "center", gap: "12px", "min-width": 0 }}>
+                      <ProviderIcon id={providerIcon(id)} width={20} height={20} />
+                      <span
+                        style={{
+                          "font-size": "var(--kilo-font-size-14)",
+                          "font-weight": "500",
+                          color: "var(--vscode-foreground)",
+                          overflow: "hidden",
+                          "text-overflow": "ellipsis",
+                          "white-space": "nowrap",
+                        }}
+                      >
+                        {disabledName(id)}
+                      </span>
+                      <Tag>{language.t("settings.providers.disabled")}</Tag>
+                    </div>
+                    <Button size="large" variant="ghost" onClick={() => enableProvider(index())}>
+                      {language.t("settings.providers.disabled.enable")}
+                    </Button>
+                  </div>
+                )}
+              </For>
+            </Card>
+          </Collapsible.Content>
+        </Collapsible>
+      </div>
     </div>
   )
 }
